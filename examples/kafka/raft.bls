@@ -633,7 +633,22 @@ at Broker {
     note_heard_quiet: while quiet(g, _), members(g, f), peer_alive(f), not quorum_heard(g, f) {
         upsert quorum_heard(g, f);
     }
-    view heard_n(g, n = count!(f)) = quorum_heard(g, f), members(g, f);
+    /// When the leader last took each follower's acknowledgement.
+    table acked_at(g: Group, f: Node<Broker>, at: Instant) key(g, f);
+    note_acked: on ack(g, t, _m, _s) from f, leader(g, t), members(g, f) {
+        upsert acked_at(g, f, now());
+    }
+    /// The followers heard in the period that ends at this tick, by either measure of a period: since the last check
+    /// (`quorum_heard`), or within the last `RAFT_ELECTION_MIN` (the timer fires on a fixed schedule, so a check that
+    /// ran late leaves the next one less than a period), and those whose acknowledgement this tick takes. A slow tick
+    /// leaves acknowledgements queued for the next one, which may be the check's: they arrived within the period. (A
+    /// leader whose ticks took a good part of a period once deposed itself with every follower answering.)
+    view heard_now(g, f) {
+        quorum_heard(g, f);
+        acked_at(g, f, at) where now() < at + RAFT_ELECTION_MIN;
+        ack(g: g, term: t, ..) from f, leader(g, t);
+    }
+    view heard_n(g, n = count!(f)) = heard_now(g, f), members(g, f);
     view quorum_kept(g) {
         heard_n(g, n), group_size(g, k), mine(g) where (n + 1) * 2 > k;
         heard_n(g, n), group_size(g, k), not mine(g) where n * 2 > k;
@@ -656,6 +671,12 @@ at Broker {
     }
     forget_quorum: while quorum_heard(g, f), not leader(g, _) {
         delete quorum_heard(g, f);
+    }
+    forget_acked: while acked_at(g, f, at), not leader(g, _) {
+        delete acked_at(g, f, at);
+    }
+    forget_acked_member: while acked_at(g, f, at), not members(g, f) {
+        delete acked_at(g, f, at);
     }
     forget_led_since: while led_since(g, t, at), not won(g, t) {
         delete led_since(g, t, at);

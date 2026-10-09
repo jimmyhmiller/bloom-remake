@@ -32,13 +32,36 @@ the Raft program would avoid it. Not a defect.
    them 20 times a second for nothing. Now the heartbeat re-send goes only to a follower whose broker is heard alive
    (`peer_alive`); the ack path and new entries are unchanged.
 
+## CheckQuorum under slow ticks (RF.2, the user's next choice)
+
+Found by recording the debug-build run of the large-batch test (`BLOSSOM_RECORD_DIR`) and reading the leader's trace
+(`blossom trace history` of `stepped_down`, `quorum_check`, `ack`):
+
+3. **Medium. Acknowledgements taken in the check's own tick did not count.** `quorum_kept` read `quorum_heard` as
+   the tick began; a slow tick leaves the acknowledgements that arrive during it for the next tick, which is often
+   the check's. The trace: b1 answered the heartbeat of tick 559 at once, its answer was taken at tick 563 with
+   `quorum_check(15)`, and b2 stepped down. Now `heard_now` also counts the tick's own acknowledgements.
+4. **Low–medium. A check that ran late left the next one less than a period.** The timer fires on a fixed schedule;
+   periods were "since the last check ran" (one was 234 ms). Now a follower also counts if its last acknowledgement
+   was taken within `RAFT_ELECTION_MIN` (`acked_at`): the union, so never stricter than before.
+
+Neither changes safety (reads are confirmed by `confirmed_at`, ReadIndex; CheckQuorum is for liveness).
+
+**The simulator now models slow nodes:** `Cluster::set_tick_cost(n, ns)` makes each of a node's ticks take that
+long; what reaches it meanwhile waits for its next tick (taken together, as the runtime does), its due timers are
+taken together, and its messages leave when the tick ends. Cost 0 (the default) schedules exactly as before.
+Byte-stream writes are not delayed. `raft_groups::a_leader_whose_ticks_are_slow_keeps_its_group` (80 ms ticks,
+seeds 7–9) fails on every seed with the old rule and passes with the new one; a sweep showed 60–80 ms separates them,
+and from 100 ms the followers rightly elect another (the leader is silent past their election timeouts).
+
+**What is left is not a CheckQuorum defect.** In the debug build the restarted follower falls seconds behind (its
+acknowledgements answer heartbeats sent 4.5 s earlier) while it takes 4 MiB batches; a leader with that follower
+alone has no majority, and steps down rightly. The same ticks replayed with the release evaluator take 5–7 ms.
+
 ## Found, not fixed
 
-- **A debug build cannot keep up with ~1 MiB batches.** One 900 KiB batch makes ticks of 230–590 ms on the leader;
-  followers' acknowledgements wait in its queue past CheckQuorum's period (`RAFT_ELECTION_MIN`, 300 ms), the
-  leader steps down, and leadership flaps. The new test therefore runs from a release build (`scripts/test-tiers.sh
-  full`; a debug build skips it). CheckQuorum counting acknowledgements by when they are processed, not received,
-  makes slow ticks look like a lost quorum: worth a look under load in release too.
+- **A debug build cannot keep up with ~1 MiB batches** (ticks of 120–590 ms; see above), so the large-batch test
+  runs from a release build (`scripts/test-tiers.sh full`; a debug build skips it).
 - **Catch-up is one batch per round trip,** each with a follower fsync, and at most 64 entries: a long history of
   small batches catches up slowly. Kafka bounds a fetch by bytes only.
 - **While a follower catches up, each heartbeat re-sends its in-flight batch** (the ack path already sent it):

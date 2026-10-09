@@ -379,6 +379,60 @@ fn groups() -> Vec<Value> {
     .collect()
 }
 
+/// A leader whose ticks are slow keeps its group (CheckQuorum). Each of its ticks takes 80 ms, so its followers'
+/// acknowledgements wait for its next tick, which is often the check's own (its timer falls due during a tick), with
+/// none in between. Its followers answer every heartbeat: the leader once counted only the acknowledgements taken
+/// before the check's tick and deposed itself (it does, on every seed here, with that rule), and a check that ran
+/// late left the next one less than a period. Its ticks come in bursts of up to three, so it is silent for at most
+/// about 240 ms, under its followers' election timeouts (from 300 ms): at 100 ms and more they rightly elect another.
+#[test]
+fn a_leader_whose_ticks_are_slow_keeps_its_group() {
+    use blossom_value::time::NodeId;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    for seed in 7..=9 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                record: blossom_integration_tests::sim_record(&format!("slow-leader-seed{seed}")),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        d.c.set_tick_cost(l, 80_000_000).unwrap();
+        let start = d.last(l);
+        for k in 0..20 {
+            d.wait(200_000_000);
+            assert_eq!(
+                d.leads(l),
+                Some(t),
+                "seed {seed}: the slow leader stepped down after {} ms",
+                (k + 1) * 200
+            );
+        }
+        assert!(d.last(l).1 > start.1, "seed {seed}: the slow leader appended nothing");
+    }
+}
+
 /// A directed run of the harness (CheckQuorum and PreVote on) with every group held at every broker, once each has
 /// a leader: no group proposes, so every one goes idle.
 #[cfg(test)]
