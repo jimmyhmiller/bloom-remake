@@ -5,6 +5,16 @@ adapters for letting this happen. Also on blob storage like s3. I want to be abl
 service setup and have it just work. The proof will be a keyed chat setup that can work with and without websockets
 that can be hosted on a stateless http server with external storage."
 
+**Status (2026-10-09):** built on branch `slice-stateless`: the store trait and its adapters (§3, §4), objects with
+hibernation (§5, §5a), links in the store (§6), tokens (§7), outboxes (§8), the sweeper (§9), `blossom serve`
+(§11), and the proof (§10): the keyed chat on three instances behind a round-robin proxy, for SQLite, Postgres and
+S3, over plain requests and WebSockets, with instances killed and replaced mid-chat. Not built: §12 item 5 (durable
+relations as SQL tables), and §13.
+
+**Trying it:** `scripts/run-stateless.sh` (the keyed chat, three instances on SQLite; `postgres` or `s3` as its
+second argument use the services of `scripts/test-services.sh`), then open http://localhost:8080/?member=lunch in two
+tabs and kill an instance.
+
 Their choices (2026-10-09):
 
 - **Storage shape: blobs now, tables next.** A node's store (its WAL and database files, laid over keys and values by

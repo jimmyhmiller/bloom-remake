@@ -14,6 +14,7 @@ between the two roles are the whole API: no routes, no message classes, no clien
 | `examples/web/board.bls` | A kanban board: add, rename (others see who is editing), drag within and between columns, delete. | `scripts/run-app.sh board` |
 | `examples/web/pixels.bls` | An r/place canvas: paint a square, wait out a cooldown the server enforces, a live leaderboard. | `scripts/run-app.sh pixels` |
 | `examples/web/rooms.bls` | Tic-tac-toe rooms: every room (`/?member=lunch`) is a keyed member with its own store, created by its first page (docs/design/KEYED.md). | `scripts/run-app.sh rooms` |
+| `examples/web/keyed_chat.bls` | A chat with rooms (`/?member=lunch`), each a keyed member; a lobby node tells each room of the others. Runs on stateless hosts over SQLite, Postgres or S3 (docs/design/STATELESS.md). | `scripts/run-stateless.sh` |
 
 `scripts/run-app.sh APP [PORT] [--fresh]` builds what is missing, keeps the store and seed under
 `examples/web/.data/`, and serves the page on http://localhost:8080/. Open it in two tabs, or two browsers.
