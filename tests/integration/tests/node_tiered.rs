@@ -80,6 +80,7 @@ impl Fixture {
             names.to_vec(),
             blossom_value::Seed([9; 16]),
             Arc::new(blossom_value::ExternRegistry::new()),
+            Arc::default(),
         )
         .unwrap();
         if let Some(rows) = hot_rows {
@@ -127,13 +128,7 @@ impl Fixture {
             opened.boot.clone(),
         )
         .unwrap();
-        ManualDriver::new(
-            node,
-            &self.artifact.program,
-            &self.schema,
-            self.names.clone(),
-            opened,
-        )
+        ManualDriver::new(node, &self.artifact.program, &self.schema, self.names.clone(), opened)
     }
 
     fn offer(&self, d: &mut ManualDriver<Box<dyn Executor>>, input: &str, values: Vec<Value>) {

@@ -110,6 +110,10 @@ impl<R: Read> Replay<R> {
                 ),
             });
         }
+        // A trace's node ids are the deployment's: a simulation's keyed members are its nodes of keyed roles. (A
+        // running node gives its members ids as it meets them; it does not record traces of them.)
+        let members = blossom_ir::members::of_deployment(artifact.program.get(), &nodes, &artifact.roles)
+            .map_err(|e| EvalError::from(blossom_base::internal_error!("the deployment's members: {e}")))?;
         let executors = Executors::new(
             Backend::Engine,
             artifact.program.clone(),
@@ -117,6 +121,7 @@ impl<R: Read> Replay<R> {
             nodes,
             Seed(h.seed),
             externs,
+            std::sync::Arc::new(members),
         )?;
         Ok(Replay {
             engine: executors.make(h.node)?,

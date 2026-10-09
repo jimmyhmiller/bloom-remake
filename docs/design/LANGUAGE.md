@@ -1038,8 +1038,8 @@ at Coordinator { … }            // sections reopen, so the protocol reads in m
   alike (BLS0404 when `R` is not keyed); `self.key()` at `R` is the member's own key (BLS0404 in a rule not placed at a
   keyed role). A member's value is its role and key (`Game:"game-1"`), so it orders after every node, by role, then
   key. As for client roles, `p in R`, `R.size()` and `majority(s, R)` over a keyed role are BLS0404. In simulation a
-  node of a keyed role is the member its name keys (`--nodes game-1=Game`); outside simulation a program with a keyed
-  role is refused until `blossom run` hosts members (KEYED.md §4).
+  node of a keyed role is the member its name keys (`--nodes game-1=Game`); on `blossom run` the deployment's nodes of a
+  keyed role are its hosts, each running the members rendezvous hashing gives it (KEYED.md §3).
 - **ACLs** are inferred: a channel accepts frames only from the roles that `send` into it (LANG-242 P0, ODD-33).
   A channel whose source role is `external` is open to that role's sessions; declaring the direction is the
   explicit opening ANA-105 asks for.

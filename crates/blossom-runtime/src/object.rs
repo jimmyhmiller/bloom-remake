@@ -10,8 +10,12 @@
 //! writes are committed besides. The host gives each call its wall clock; the node's time never goes back (a step
 //! back runs at the node's last instant).
 //!
-//! What an object does not do yet: send to other nodes of the deployment (they would be other objects, reached by
-//! RPC), answer external sessions, or run streams. A program that needs them is refused when its tick sends there.
+//! An object may also run a keyed member (docs/design/KEYED.md) for the host of its role: the host hands it the
+//! messages addressed to it ([`ObjectNode::deliver`]) and routes what it sends to other nodes and members
+//! ([`Output::Send`]).
+//!
+//! What an object does not do yet: answer external sessions, or run streams. A program that needs them is refused
+//! when its tick sends there.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::{RelId, RoleId, internal_error};
 use blossom_ir::core::Program;
+use blossom_ir::members::Members;
 use blossom_node::Executor;
 use blossom_node::acl::{AclTable, Source};
 use blossom_node::eval::{Backend, Executors};
@@ -29,7 +34,7 @@ use blossom_node::recovery::{self, StoreSpec};
 use blossom_node::{Node, NodeConfig, ReleasedTick};
 use blossom_oracle::{Delivery, Oracle, Row};
 use blossom_store::{ClientRegistry, OpenMode, Vfs};
-use blossom_value::time::{Instant, NodeId};
+use blossom_value::time::{Instant, MemberRef, NodeId};
 use blossom_value::{ExternRegistry, Seed};
 use blossom_wire::codec::WireLimits;
 use blossom_wire::frame::{Frame, RejectReason};
@@ -41,11 +46,24 @@ use crate::members::{
 };
 use crate::net::{Catalog, Identity};
 
-/// What the host writes after a call: a frame to a connection, or the end of one.
+/// What the host does after a call: write a frame to a connection, end one, or route a message the node sent to
+/// another node or member (column 0 of `row` is the destination; `to` its id in the host's member table), sent by
+/// the node's tick `tick`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    Frame { conn: u64, bytes: Vec<u8> },
-    Close { conn: u64 },
+    Frame {
+        conn: u64,
+        bytes: Vec<u8>,
+    },
+    Close {
+        conn: u64,
+    },
+    Send {
+        to: NodeId,
+        rel: RelId,
+        row: Row,
+        tick: u64,
+    },
 }
 
 /// Fills a buffer with secret random bytes.
@@ -56,8 +74,12 @@ pub struct ObjectConfig {
     pub spec: DeploymentSpec,
     /// The deployment's program, compiled for its nodes.
     pub artifact: Arc<BlsArtifact>,
-    /// The node this object runs.
+    /// The node this object runs, or, for a keyed member, the node that hosts it.
     pub node: String,
+    /// The keyed member this object runs, if it runs one (docs/design/KEYED.md), and the host's member table, which
+    /// gives the member and those it meets their ids.
+    pub member: Option<MemberRef>,
+    pub members: Arc<Members>,
     /// Its store's filesystem, and the store's directory there.
     pub fs: Arc<dyn Vfs>,
     pub dir: PathBuf,
@@ -142,6 +164,8 @@ pub struct ObjectNode {
     app: String,
     random: Random,
     next_conn: u64,
+    /// The host's member table (a member's role, for admission).
+    members_table: Arc<Members>,
     pub stats: ObjectStats,
 }
 
@@ -155,9 +179,42 @@ impl ObjectNode {
         if names.len() != artifact.nodes.len() || names.iter().zip(&artifact.nodes).any(|(a, b)| **a != *b.as_str()) {
             return Err(internal_error!("the program was compiled for other nodes than the deployment's").into());
         }
-        crate::refuse_keyed(program)?;
-        let (me, _) = spec.node(&cfg.node)?;
-        let role = artifact.roles.get(me.0 as usize).copied().flatten();
+        let (host, entry) = spec.node(&cfg.node)?;
+        let host_role = artifact.roles.get(host.0 as usize).copied().flatten();
+        let (me, role, identity) = match &cfg.member {
+            Some(m) => {
+                if host_role != Some(m.role) {
+                    return Err(RuntimeError::Config(format!(
+                        "node {} does not host the role of {}",
+                        cfg.node,
+                        blossom_ir::members::member_name(program, m)
+                    )));
+                }
+                let me = cfg
+                    .members
+                    .id(m)
+                    .ok_or_else(|| RuntimeError::Config("the host has given every member id".into()))?;
+                let mut identity = crate::server::store_identity(spec, &artifact, &cfg.node)?;
+                identity.node_name = blossom_ir::members::member_name(program, m).into();
+                (me, Some(m.role), identity)
+            }
+            None if host_role.is_some_and(|r| program.is_keyed(r)) => {
+                return Err(RuntimeError::Config(format!(
+                    "node {} hosts the keyed role `{}`: it runs that role's members, each an object of its own",
+                    entry.name,
+                    host_role
+                        .and_then(|r| program.roles.get(r))
+                        .map(|r| r.name.to_string())
+                        .unwrap_or_default()
+                )));
+            }
+            None => (
+                host,
+                host_role,
+                crate::server::store_identity(spec, &artifact, &cfg.node)?,
+            ),
+        };
+        let members = cfg.members.clone();
         let executors = Executors::new(
             Backend::Engine,
             artifact.program.clone(),
@@ -165,6 +222,7 @@ impl ObjectNode {
             names.to_vec(),
             cfg.seed,
             cfg.externs.clone(),
+            members.clone(),
         )?
         .tiered(spec.tiered);
         let oracle = executors.oracle().clone();
@@ -175,7 +233,7 @@ impl ObjectNode {
             cfg.fs.clone(),
             &StoreSpec {
                 dir: cfg.dir.clone(),
-                identity: crate::server::store_identity(spec, &artifact, &cfg.node)?,
+                identity,
                 mode: if fresh { OpenMode::InitFresh } else { OpenMode::Existing },
                 certification: spec.tail_certification,
                 database: blossom_store::lsm::LsmOptions {
@@ -227,6 +285,7 @@ impl ObjectNode {
             app,
             random: cfg.random,
             next_conn: 0,
+            members_table: members,
             stats: ObjectStats::default(),
             artifact,
         })
@@ -320,6 +379,41 @@ impl ObjectNode {
             .ok_or_else(|| RuntimeError::Config(format!("no relation `{rel}`")))?;
         let image = self.driver.released_image()?;
         Ok(image.rows.get(&id).cloned().unwrap_or_default().into_iter().collect())
+    }
+
+    fn push(&self, o: Output) {
+        if let Ok(mut out) = self.out.lock() {
+            out.push(o);
+        }
+    }
+
+    /// A message to this node from another node or member of the deployment (`from` its id in the host's member
+    /// table), admitted by its channel's ACL as from `principal`, then the ticks it makes ready.
+    pub fn deliver(
+        &mut self,
+        from: NodeId,
+        principal: &str,
+        rel: RelId,
+        row: Row,
+        now: Instant,
+    ) -> Result<(), RuntimeError> {
+        let role = match self.members_table.get(from) {
+            Some(m) => Some(m.role),
+            None => self.artifact.roles.get(from.0 as usize).copied().flatten(),
+        };
+        let source = Source::Node { role, principal };
+        if self.driver.admits(&self.acl, self.oracle.static_facts(), rel, source)? {
+            bump(&self.stats.delivered, 1);
+            self.driver.node.offer_delivery(Delivery { rel, from, row });
+        } else {
+            bump(&self.stats.rejected_acl, 1);
+        }
+        self.run(now)
+    }
+
+    /// This node's id: a deployment node's, or a keyed member's in the host's table.
+    pub fn me(&self) -> NodeId {
+        self.me
     }
 
     fn close(&mut self, conn: u64) {
@@ -432,12 +526,13 @@ impl ObjectNode {
                     row: s.row.clone(),
                 });
             } else {
-                return Err(blossom_base::unimplemented_error!(
-                    "DIST-001",
-                    "a send to another node from a node an object runs (objects reach each other by RPC, \
-                     docs/design/DURABLE-OBJECTS.md)"
-                )
-                .into());
+                // Another node or member: the host routes it, after this tick's writes (Invariant R).
+                self.push(Output::Send {
+                    to: s.to,
+                    rel: s.rel,
+                    row: s.row.clone(),
+                    tick: t.tick.0,
+                });
             }
         }
         if !t.egress.is_empty() {

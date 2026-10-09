@@ -257,34 +257,47 @@ fn members_survive_crashes_on_the_cluster_simulator() {
     assert!(c.state(g).unwrap().unwrap().contains(rel("done"), &[s("ada")]));
 }
 
-/// Outside simulation a program with a keyed role is refused, by name, until `blossom run` hosts keyed members
-/// (docs/design/KEYED.md §4, sub-slice 2).
+/// On `blossom run` a deployment's node of a keyed role is a host: it runs that role's members, each a node of its
+/// own, and is no member itself, so an object asked to run the host as a node refuses.
 #[test]
-fn a_node_refuses_a_keyed_program_outside_simulation() {
+fn a_host_is_not_run_as_a_node() {
     use blossom_runtime::deploy::DeploymentSpec;
     use blossom_runtime::object::{ObjectConfig, ObjectNode};
     use blossom_store::{KvFs, KvStore, MemKv};
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/keyed/games.bls");
+    let node = |name: &str, role: &str, port: u16| {
+        format!(
+            "[[node]]\nname = \"{name}\"\nrole = \"{role}\"\naddr = \"127.0.0.1:{port}\"\n\
+             principal = \"spiffe://test/games/{role}/{name}\"\n"
+        )
+    };
     let text = format!(
-        "format = 1\n[deployment]\nid = \"games\"\nprogram = \"games\"\nversion = 1\nsource = \"{}\"\n\
-         [[node]]\nname = \"lobby\"\nrole = \"Lobby\"\naddr = \"127.0.0.1:1\"\nprincipal = \"spiffe://test/games/Lobby/lobby\"\n\
+        "format = 1\n[deployment]\nid = \"games\"\nprogram = \"games\"\nversion = 1\nsource = \"{}\"\n{}{}\
          [security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"data\"\n",
-        source.display()
+        source.display(),
+        node("h1", "Game", 1),
+        node("lobby", "Lobby", 2),
     );
     let spec = DeploymentSpec::parse(&text, &std::env::temp_dir()).unwrap();
-    let nodes = [NodeSpec {
-        name: "lobby".into(),
-        role: Some("Lobby".into()),
-    }];
+    let nodes: Vec<NodeSpec> = spec
+        .nodes
+        .iter()
+        .map(|n| NodeSpec {
+            name: n.name.clone(),
+            role: n.role.clone(),
+        })
+        .collect();
     let (compiled, _) =
         blossom_driver::bls::compile_deployed(&spec.source.to_string_lossy(), &nodes, &Default::default());
     let kv = Arc::new(MemKv::default());
     let opened = ObjectNode::open(ObjectConfig {
         spec,
         artifact: Arc::new(compiled.unwrap().0),
-        node: "lobby".into(),
+        node: "h1".into(),
+        member: None,
+        members: Arc::new(blossom_ir::members::Members::open()),
         fs: Arc::new(KvFs::open(kv as Arc<dyn KvStore>).unwrap()),
-        dir: "/lobby".into(),
+        dir: "/h1".into(),
         seed: blossom_value::Seed([1; 16]),
         now: blossom_value::time::Instant(1),
         nonce: 1,
@@ -292,8 +305,8 @@ fn a_node_refuses_a_keyed_program_outside_simulation() {
         externs: Arc::new(blossom_std_host::registry().unwrap()),
     });
     let err = match opened {
-        Ok(_) => panic!("a keyed program ran outside simulation"),
+        Ok(_) => panic!("a host ran as a node"),
         Err(e) => e.to_string(),
     };
-    assert!(err.contains("keyed role `Game` outside simulation"), "{err}");
+    assert!(err.contains("node h1 hosts the keyed role `Game`"), "{err}");
 }

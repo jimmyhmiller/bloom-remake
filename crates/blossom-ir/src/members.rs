@@ -6,57 +6,101 @@
 //! value, so they need not agree across hosts.
 
 use std::collections::BTreeMap;
+use std::sync::{PoisonError, RwLock};
 
 use blossom_value::Value;
 use blossom_value::time::{MemberRef, NodeId};
 
 use crate::core::Program;
 
-/// The keyed members a host knows, by node id.
-#[derive(Clone, Debug, Default)]
+/// The keyed members a host knows, by node id. A closed table (simulation's) knows only the members it was given; an
+/// open one (a running node's) gives a member it has not seen the next id of [`NodeId::MEMBERS`] when it is asked
+/// for one, so a node can send to any member.
+#[derive(Debug, Default)]
 pub struct Members {
+    table: RwLock<Table>,
+    open: bool,
+}
+
+#[derive(Debug, Default)]
+struct Table {
     by_id: BTreeMap<NodeId, MemberRef>,
     by_ref: BTreeMap<MemberRef, NodeId>,
+    next: u32,
 }
 
 impl Members {
+    /// A table that gives ids on demand.
+    pub fn open() -> Members {
+        Members {
+            table: RwLock::default(),
+            open: true,
+        }
+    }
+
+    // The table is only ever written whole (both maps under one lock), so one a panicking thread held is consistent.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Table> {
+        self.table.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Table> {
+        self.table.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Gives member `m` the id `id`; refused when either is already given.
-    pub fn insert(&mut self, id: NodeId, m: MemberRef) -> Result<(), String> {
-        if let Some(had) = self.by_id.get(&id) {
+    pub fn insert(&self, id: NodeId, m: MemberRef) -> Result<(), String> {
+        let mut t = self.write();
+        if let Some(had) = t.by_id.get(&id) {
             return Err(format!("node {} is already the member {had:?}", id.0));
         }
-        if let Some(had) = self.by_ref.get(&m) {
+        if let Some(had) = t.by_ref.get(&m) {
             return Err(format!("the member {m:?} already has node {}", had.0));
         }
-        self.by_id.insert(id, m.clone());
-        self.by_ref.insert(m, id);
+        t.by_id.insert(id, m.clone());
+        t.by_ref.insert(m, id);
         Ok(())
     }
 
     /// The member node `id` is, if it is one.
-    pub fn get(&self, id: NodeId) -> Option<&MemberRef> {
-        self.by_id.get(&id)
+    pub fn get(&self, id: NodeId) -> Option<MemberRef> {
+        self.read().by_id.get(&id).cloned()
     }
 
-    /// The node id of member `m`, if the host gave it one.
+    /// The node id of member `m`: the one the host gave it, or, in an open table, a new one; `None` when a closed
+    /// table does not know it, or an open one has given every id of the range.
     pub fn id(&self, m: &MemberRef) -> Option<NodeId> {
-        self.by_ref.get(m).copied()
+        if let Some(id) = self.read().by_ref.get(m) {
+            return Some(*id);
+        }
+        if !self.open {
+            return None;
+        }
+        let mut t = self.write();
+        if let Some(id) = t.by_ref.get(m) {
+            return Some(*id);
+        }
+        let id = NodeId::member(t.next)?;
+        t.next += 1;
+        t.by_id.insert(id, m.clone());
+        t.by_ref.insert(m.clone(), id);
+        Some(id)
     }
 
     /// Node `id` as a value: its member, or the node id.
     pub fn value(&self, id: NodeId) -> Value {
-        match self.by_id.get(&id) {
+        match self.read().by_id.get(&id) {
             Some(m) => Value::Member(m.clone()),
             None => Value::Node(id),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.read().by_id.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (NodeId, &MemberRef)> {
-        self.by_id.iter().map(|(id, m)| (*id, m))
+    /// Every member the table knows, by id.
+    pub fn all(&self) -> Vec<(NodeId, MemberRef)> {
+        self.read().by_id.iter().map(|(id, m)| (*id, m.clone())).collect()
     }
 }
 
@@ -67,7 +111,7 @@ pub fn of_deployment<N: AsRef<str>>(
     names: &[N],
     roles: &[Option<blossom_base::RoleId>],
 ) -> Result<Members, String> {
-    let mut out = Members::default();
+    let out = Members::default();
     for (i, (name, role)) in names.iter().zip(roles).enumerate() {
         if let Some(r) = role
             && program.is_keyed(*r)

@@ -1,0 +1,95 @@
+//! The lobby and games of games.bls on `blossom run` (docs/design/KEYED.md), for `run_keyed.rs`: the deployment's
+//! nodes of `Game` are its hosts, and each game runs on the host rendezvous hashing picks for its key. An external
+//! admin pairs players and forwards their moves; a finished game tells the lobby, which thanks it (a reply to a
+//! member), and tells the `ledger` game (a message from member to member), which tells the lobby what it counted.
+program games_run version 1;
+
+role Admin: external;
+role Lobby;
+role Game: keyed;
+
+channel pair(n: u64, x: String, o: String): Admin -> Lobby;
+channel play(n: u64, who: String, cell: u64): Admin -> Lobby;
+channel start(x: String, o: String): Lobby -> Game;
+channel move(who: String, cell: u64): Lobby -> Game;
+channel took(key: String, who: String, cell: u64): Game -> Lobby;
+channel won(game: Node<Game>, key: String, winner: String): Game -> Lobby;
+channel thanks(): Lobby -> Game;
+channel thanked(key: String): Game -> Lobby;
+channel tally(game: Node<Game>): Game -> Game;
+channel counted(game: Node<Game>, by: Node<Game>): Game -> Lobby;
+channel alive(key: String, n: u64): Game -> Lobby;
+
+at Lobby {
+    durable table results(g: Node<Game>, key: String, winner: String);
+    /// Who the lobby heard from, as plain nodes: keyed members among them.
+    durable table heard(n: Node);
+    durable table acks(key: String);
+    durable table tallies(g: Node<Game>, by: Node<Game>);
+    durable table taken(key: String, who: String, cell: u64);
+    durable table pulses(key: String, n: u64);
+
+    begin: on pair(n, x, o) {
+        send start(x, o) to Game.named(f"game-{n}");
+    }
+    forward: on play(n, who, cell) {
+        send move(who, cell) to Game.named(f"game-{n}");
+    }
+    record: on won(g, k, w) {
+        emit results(g, k, w);
+    }
+    ack: on won(_, _, _) from g {
+        send thanks() to g;
+        emit heard(g);
+    }
+    noted: on thanked(k) {
+        emit acks(k);
+    }
+    counts: on counted(g, by) {
+        emit tallies(g, by);
+    }
+    moved: on took(k, who, cell) {
+        emit taken(k, who, cell);
+    }
+    pulse: on alive(k, n) {
+        emit pulses(k, n);
+    }
+}
+
+at Game {
+    durable table players(x: String, o: String) key();
+    durable table moves(who: String, cell: u64);
+    durable table done(winner: String) key();
+    /// How many times the game told the lobby it is alive.
+    durable table beats(n: u64) key();
+    view made(who, n = count!(c)) = moves(who, c);
+    view playing() = players(_, _), not done(_);
+    /// A game in play tells the lobby it is alive: a timer, so it goes on after its host restarts.
+    timer pulse every 100ms while playing;
+
+    setup: on start(x, o) {
+        upsert players(x, o);
+    }
+    take: on move(who, cell), players(x, o), l in Lobby where who == x || who == o {
+        emit moves(who, cell);
+        send took(self.key(), who, cell) to l;
+    }
+    finish: while made(who, n), not done(_) where n >= 3u64 {
+        upsert done(who);
+    }
+    report: while made(who, n), not done(_), l in Lobby where n >= 3u64 {
+        send won(self, self.key(), who) to l;
+        send tally(self) to Game.named("ledger");
+    }
+    beat: on pulse, outer beats(b), l in Lobby, let n = b.unwrap_or(0u64) + 1u64 {
+        upsert beats(n);
+        send alive(self.key(), n) to l;
+    }
+    thank: on thanks() from l {
+        send thanked(self.key()) to l;
+    }
+    /// The ledger: a game's tally, checked against its sender, goes to the lobby.
+    count: on tally(g) from h, l in Lobby where g == h {
+        send counted(g, self) to l;
+    }
+}

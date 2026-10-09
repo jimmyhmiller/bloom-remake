@@ -7,8 +7,9 @@ is the design; nothing here is built yet.
 Name: the role kind is `keyed` (`role Game: keyed;`), not `object`, so it does not collide with the runtime's
 `object` module (a node a Durable Object hosts). A keyed role's members are **keyed members**.
 
-**Status (2026-10-09):** sub-slice 1 is built (§4): the value, the language, both evaluators, the codecs and the
-simulator. `blossom run` and Durable Objects refuse a program with a keyed role until sub-slices 2 and 4.
+**Status (2026-10-09):** sub-slices 1 and 2 are built (§4): the value, the language, both evaluators, the codecs, the
+simulator, and `blossom run`'s hosts. Pages connect to members in sub-slice 3; a Durable Object refuses a send to a
+member until sub-slice 4.
 
 ## 1. What a program says
 
@@ -93,12 +94,21 @@ Its cost is breadth, not depth: each layer gains one case.
   is `Game.named("game-17")`); members are dense nodes there, as client members are, and a send to a key the
   deployment does not name is the hard error above, so a schedule never silently loses a node. LDFI decides programs
   with keyed roles by enumeration; its lineage refuses them (TEST-020) until it reads members.
-- **`blossom run`**: the deployment's nodes of a keyed role are its **hosts**. A member lives on the host that
-  rendezvous hashing over the hosts picks for `(R, k)`; senders route by the same hash. A host runs its members as
-  `ObjectNode`s (the threadless node of blossom-runtime::object), each with its own store under
-  `<data_dir>/<host>/members/<hex of hash>/` and the key recorded in it; it creates one on the first message. Messages
-  between a member and the rest go over the host's peer links, with the member as `from`; a receiver accepts a member
-  as a sender only from the host the hash picks for it.
+- **`blossom run`** (built): the deployment's nodes of a keyed role are its **hosts** (`blossom_runtime::hosting`;
+  `blossom run` starts one for such a node, and `Server::start` refuses it). A member lives on the host that
+  rendezvous hashing over the hosts picks for `(R, k)` (`keyed::Routing`: the highest BLAKE3 score of role, key and
+  host name); senders route by the same hash. A host runs no rules as itself: it runs its members as `ObjectNode`s
+  (the threadless node of blossom-runtime::object), each with its own store under
+  `<store>/members/<first 16 bytes of BLAKE3 of the member's name, hex>/store`, the member named in the `member` file
+  beside it; it creates one on the first message and opens every one its store holds when it restarts, so their
+  timers run again. Its own store holds only its restart count (`<store>/host`), which its peers' incarnation check
+  needs. A node routes a send to a member to the member's host, the row naming the member (column 0); a host sends
+  what its members send as `FROM_MEMBER` frames (`0x13 := role:u32 key:str BATCH-body`), and a receiver accepts one
+  only from the host the hash picks for that member, admitting it by the member's role and the host's principal. A
+  member's message to a member of its own host stays on the host. Each member runs its ticks durably before its
+  messages leave (Invariant R per member); a message to a host that is down may be lost, as any message may.
+  Not yet: pages at a host (sub-slice 3), streams, external sessions, queries and traces at a host, and traces of a
+  node of a program with keyed roles (a trace would name members by one incarnation's ids).
 - **Pages**: a host's web listener serves `/?member=K`; the page's `HELLO` names the member; the member's client
   registry admits it.
 - **Durable Objects**: each member is an object (`idFromName("R/" + k)`), and a send to a member is an RPC to that
@@ -112,7 +122,9 @@ Its cost is breadth, not depth: each layer gains one case.
    (tests/integration/tests/bls_keyed.rs: the lobby fixture on both evaluators, an unnamed member's error, the codecs,
    and crashes on the cluster simulator's durable path).
 2. **`blossom run`**: hosts, rendezvous routing, members as `ObjectNode`s with their own stores, restart. Gate: a
-   lobby and games over TCP, a host killed and restarted.
+   lobby and games over TCP, a host killed and restarted. **Done** (tests/integration/tests/run_keyed.rs: games on
+   two hosts, replies by sender, member-to-member on one host and across hosts, a host stopped mid-game and restarted
+   from its store, and a member's timer running again after the restart).
 3. **Pages to members**: the `member` parameter, the `HELLO` field, link events. Gate: tic-tac-toe with a member per
    game, in Playwright.
 4. **Durable Objects**: a member per object, RPC between objects. Gate: the same tic-tac-toe on a local workerd.

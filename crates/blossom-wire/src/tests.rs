@@ -458,6 +458,17 @@ fn frames_round_trip() {
             },
         },
         Frame::Ack { seq: 300 },
+        Frame::FromMember {
+            role: 2,
+            key: "game-\u{e9}".into(),
+            batch: Batch {
+                sid: 4,
+                send_tick: 11,
+                kind: 0,
+                count: 1,
+                body: vec![1, 8, 3],
+            },
+        },
     ];
     for f in frames {
         let bytes = f.encode();

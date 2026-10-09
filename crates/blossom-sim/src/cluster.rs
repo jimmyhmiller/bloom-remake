@@ -359,6 +359,10 @@ impl<'p> Cluster<'p> {
             Some(_) => Backend::from_env().map_err(|e| SimError::Internal(internal_error!("{e}")))?,
             None => cfg.backend,
         };
+        // A node of a keyed role is the member its name keys (docs/design/KEYED.md).
+        let members = artifact
+            .members()
+            .map_err(|e| SimError::Internal(internal_error!("the deployment's members: {e}")))?;
         let executors = Executors::new(
             backend,
             artifact.program.clone(),
@@ -366,6 +370,7 @@ impl<'p> Cluster<'p> {
             artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
             program_seed,
             cfg.externs.clone(),
+            Arc::new(members),
         )
         .map_err(SimError::Load)?;
         let names: Arc<[Arc<str>]> = artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect();
