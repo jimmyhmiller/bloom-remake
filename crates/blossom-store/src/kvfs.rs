@@ -82,6 +82,67 @@ impl KvStore for MemKv {
     }
 }
 
+/// A [`KvStore`] in memory that journals its writes, for a host whose storage the program cannot call (a Durable
+/// Object's, from WebAssembly): the host loads every key at start ([`JournalKv::load`]) and, after each call, takes
+/// the writes ([`JournalKv::take_writes`]) and applies them to its storage before anything the call sent leaves. The
+/// whole store is in memory.
+#[derive(Default)]
+pub struct JournalKv {
+    map: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// The keys written since the last [`JournalKv::take_writes`]: their values, or `None` for a deletion.
+    writes: Mutex<BTreeMap<String, Option<Vec<u8>>>>,
+}
+
+impl JournalKv {
+    /// A store holding `entries` (what the host's storage holds), with nothing journaled.
+    pub fn load(entries: impl IntoIterator<Item = (String, Vec<u8>)>) -> JournalKv {
+        JournalKv {
+            map: Mutex::new(entries.into_iter().collect()),
+            writes: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The writes since the last call, each key's last: its value, or `None` for a deletion.
+    pub fn take_writes(&self) -> Result<Vec<(String, Option<Vec<u8>>)>, StoreError> {
+        let mut writes = self.writes.lock().map_err(|_| invalid("journal mutex poisoned"))?;
+        Ok(std::mem::take(&mut *writes).into_iter().collect())
+    }
+
+    fn map(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, Vec<u8>>>, StoreError> {
+        self.map.lock().map_err(|_| invalid("key-value mutex poisoned"))
+    }
+
+    fn journal(&self, key: &str, value: Option<&[u8]>) -> Result<(), StoreError> {
+        let mut writes = self.writes.lock().map_err(|_| invalid("journal mutex poisoned"))?;
+        writes.insert(key.to_owned(), value.map(<[u8]>::to_vec));
+        Ok(())
+    }
+}
+
+impl KvStore for JournalKv {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(self.map()?.get(key).cloned())
+    }
+    fn put(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        self.map()?.insert(key.to_owned(), value.to_vec());
+        self.journal(key, Some(value))
+    }
+    fn delete(&self, key: &str) -> Result<(), StoreError> {
+        if self.map()?.remove(key).is_some() {
+            self.journal(key, None)?;
+        }
+        Ok(())
+    }
+    fn list(&self, prefix: &str) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .map()?
+            .range(prefix.to_owned()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, _)| k.clone())
+            .collect())
+    }
+}
+
 /// A filesystem over a [`KvStore`].
 #[derive(Clone)]
 pub struct KvFs {
@@ -551,6 +612,39 @@ mod tests {
         let _fs = KvFs::open(kv.clone()).unwrap();
         assert!(kv.list("i/").unwrap().is_empty());
         assert!(kv.list("c/").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_journal_replayed_into_another_store_is_the_same_filesystem() {
+        let journal = Arc::new(JournalKv::default());
+        let fs = KvFs::open(journal.clone()).unwrap();
+        fs.create_dir_all(Path::new("/d")).unwrap();
+        let mut f = fs.open(Path::new("/d/f"), OpenOpts { create: true, ..OpenOpts::default() }).unwrap();
+        f.append(&vec![7; CHUNK + 10]).unwrap();
+        drop(f);
+        fs.rename(Path::new("/d/f"), Path::new("/d/g")).unwrap();
+        // The host's storage: everything the journal said, in one go.
+        let host = MemKv::default();
+        for (k, v) in journal.take_writes().unwrap() {
+            match v {
+                Some(v) => host.put(&k, &v).unwrap(),
+                None => host.delete(&k).unwrap(),
+            }
+        }
+        assert!(journal.take_writes().unwrap().is_empty());
+        // A later start loads the host's keys: the same files.
+        let entries: Vec<(String, Vec<u8>)> = host
+            .list("")
+            .unwrap()
+            .into_iter()
+            .map(|k| {
+                let v = host.get(&k).unwrap().unwrap();
+                (k, v)
+            })
+            .collect();
+        let again = KvFs::open(Arc::new(JournalKv::load(entries))).unwrap();
+        assert_eq!(read_path(&again, Path::new("/d/g")).unwrap(), vec![7; CHUNK + 10]);
+        assert!(again.list(Path::new("/d")).unwrap() == vec![PathBuf::from("/d/g")]);
     }
 
     #[test]

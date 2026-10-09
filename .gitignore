@@ -22,3 +22,7 @@ __pycache__/
 /tests/web/playwright-report/
 /examples/web/.data/
 /examples/http/.data/
+/do/node_modules/
+/do/build/
+/do/public/
+/do/.wrangler/

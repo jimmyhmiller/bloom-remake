@@ -305,6 +305,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "blossom-do"
+version = "0.1.0"
+dependencies = [
+ "blossom-artifact",
+ "blossom-base",
+ "blossom-driver",
+ "blossom-front",
+ "blossom-ir",
+ "blossom-node",
+ "blossom-runtime",
+ "blossom-std-host",
+ "blossom-store",
+ "blossom-value",
+ "blossom-wire",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "blossom-driver"
 version = "0.1.0"
 dependencies = [

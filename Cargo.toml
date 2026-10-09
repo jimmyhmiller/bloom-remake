@@ -55,6 +55,7 @@ blossom-build = { path = "crates/blossom-build" }
 blossom-cli = { path = "crates/blossom-cli" }
 blossom-codegen = { path = "crates/blossom-codegen" }
 blossom-driver = { path = "crates/blossom-driver" }
+blossom-do = { path = "crates/blossom-do" }
 blossom-web = { path = "crates/blossom-web" }
 blossom-engine = { path = "crates/blossom-engine" }
 blossom-front = { path = "crates/blossom-front" }

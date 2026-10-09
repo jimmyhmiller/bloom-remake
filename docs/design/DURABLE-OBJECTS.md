@@ -4,7 +4,8 @@ The user (2026-10-09): "explore the idea of using something like durable objects
 the backend ... Don't try to host it, but ... figure out the model, make some documentation."
 
 This is that exploration: what a Durable Object is, how a Blossom node maps onto one, what has to be built, and what
-does not fit. Nothing here is built yet, except that the crates a node needs now compile for WebAssembly (below).
+does not fit. **A prototype runs** (§The prototype): each of the four apps of APPS.md runs unchanged as a Durable
+Object on workerd, Cloudflare's runtime, on this machine (`wrangler dev`; nothing is deployed or hosted).
 This is not the shelved serverless plan (OBJECT-STORAGE.md): that put object storage under the commit path; a Durable
 Object keeps compute and a transactional store together.
 
@@ -188,20 +189,62 @@ does not.
   differential (oracle and engine) runs and the crash-point store tests (for way A, the store's conformance suite over
   the SQLite VFS).
 
+## The prototype
+
+```sh
+scripts/build-do.sh polls                     # or board, tictactoe, pixels
+cd do && npm ci && npx wrangler dev --port 8787
+```
+
+then open http://127.0.0.1:8787/ in two tabs. The page is the same browser host; everything under `/blossom/` goes to
+one object (`idFromName("main")`).
+
+- **`blossom-runtime::object::ObjectNode`**: one node of a deployment over any `Vfs`, with its client members'
+  links, driven by calls: `frame` (a WebSocket message), `closed`, `wake` (the alarm). Each call runs the node's ticks
+  until it is quiescent, every tick durable before the next (`ManualDriver`), and queues the frames to write. It shares
+  the runtime's member-link code (`MemberLinks`, admission, the client registry): a connection is a `LinkConn` trait,
+  a thread's queue in `blossom run`, a socket in an object.
+- **`blossom-store::KvFs`**: the store's files over keys and values (inodes and 64 KiB chunks; a rename moves a name).
+  It passes the store's VFS and WAL conformance suites, and the KVS of node_kvs.rs recovers over it after a restart
+  that keeps only the keys and values.
+- **`blossom-store::JournalKv` and `crates/blossom-do`**: the WebAssembly the object loads. The workspace denies
+  `unsafe`, and storage calls back into JavaScript from Rust would need it (a JavaScript object is not `Send`), so the
+  object's store is held in memory and journaled: the Worker loads every key when the object starts, and after each
+  call applies the journal to `ctx.storage.kv` and only then writes the frames, all in one synchronous run of the event
+  (one commit; the output gate holds the frames). The program is compiled from its sources inside the object at start.
+- **`do/src/worker.js`**: the object class. WebSockets are accepted for hibernation; an object woken from hibernation
+  starts its node again from storage and closes the sockets of its last start (their pages reconnect: `resumed` is
+  false, and the program's greeting resends). A node fault closes every link and discards the call's writes; the next
+  event starts the node from storage, as a crash and restart would.
+- **Tests**: tests/integration/tests/object_node.rs (polls on an `ObjectNode` over `KvFs`, two page engines exchanging
+  frames in memory, a restart from only the keys); tests/web/object.spec.mjs (polls on workerd with Chromium tabs:
+  votes through the object, workerd killed and started again over the same storage, the open tabs reconnect as the same
+  members, a new tab gets everything). `scripts/test-tiers.sh web` runs it.
+
+Measured on this machine: the first request to a new object (compiling polls and opening its store) takes about 140
+ms, later ones about 3 ms; a pixel painted in one tab reaches the other in under 20 ms.
+
+What the prototype does not do yet:
+
+- **Way B**: the store is all in memory (128 MB per isolate), loaded at each start. Lazy reads need storage calls from
+  the engine, which needs either store traits that accept non-`Send` handles in WebAssembly or a SQLite-native
+  database behind `ColdTables` with the Worker answering its queries.
+- **Resume across hibernation**: the replay buffer is memory, so every wake is a non-resumed reconnect.
+- **Precompiled programs**: an encoding of the whole artifact would remove the compile from every start.
+- **More than one object**: the keyed role (above) and RPC between objects.
+
 ## The pieces, in order
 
 Everything below can be built and tested on a laptop with `workerd`, the open-source runtime behind Workers
 (`wrangler dev` runs it locally); none of it needs an account or a deployment.
 
-1. **The node in WebAssembly.** Done in this exploration: `blossom-node`, `blossom-store` and `blossom-wire` check for
+1. **The node in WebAssembly.** Done: `blossom-node`, `blossom-store` and `blossom-wire` check for
    `wasm32-unknown-unknown` (the store's real-filesystem VFS gained a non-Unix read; it was the only thing in the
    way). `ManualDriver` is the threadless driver an object needs.
-2. **A SQLite VFS** (way A) and the store's conformance suite run against it, natively with an in-memory SQLite.
-3. **An object driver**: the class (Rust with `workers-rs`, or a thin JavaScript class over the wasm module), events
-   to ticks, the alarm, the outbox to sockets and RPC.
-4. **The server side of the client link without threads**: today it is in `blossom-runtime` (threads, TCP). The frame
-   handling, the registry and the replay buffer move to a core both the runtime and the object driver use.
-5. **One app end to end**: polls on a local `workerd`, with the Playwright suite of APPS.md pointed at it.
+2. **A key-value VFS** (way A): done, `KvFs`, over a journaled store (see §The prototype for why not SQLite calls).
+3. **An object driver**: done, `ObjectNode` and do/src/worker.js (a thin JavaScript class over the wasm module).
+4. **The server side of the client link without threads**: done, shared with the runtime (`LinkConn`).
+5. **One app end to end**: done, polls on a local workerd with Playwright; the other three apps run too.
 6. **Way B**, then **the keyed role** (a design document of its own first: LANGUAGE §6.10, CLIENTS.md, the simulator).
 
 ## Sources

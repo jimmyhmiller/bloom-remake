@@ -142,6 +142,12 @@ test_only = true
 layer = "L5"
 deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-front", "blossom-driver", "blossom-engine", "blossom-oracle", "blossom-wire"]
 
+[crates.blossom-do]
+layer = "L5"
+# A deployment's node as a Cloudflare Durable Object (docs/design/DURABLE-OBJECTS.md): the object host
+# (blossom-runtime::object) over a journaled key-value store, compiled from sources in memory, for a Worker.
+deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blossom-front", "blossom-driver", "blossom-node", "blossom-runtime", "blossom-store", "blossom-std-host", "blossom-wire"]
+
 [crates.blossom-build]
 layer = "L5"
 deps = ["blossom-base", "blossom-driver", "blossom-artifact", "blossom-codegen"]
