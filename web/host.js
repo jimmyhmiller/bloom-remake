@@ -584,11 +584,14 @@ function refused(r) {
   try {
     last = Number(sessionStorage.getItem(key) ?? 0);
   } catch {}
-  if (stale && Date.now() - last > 30_000) {
+  // A token the deployment did not give out: the page starts over with a new one (once in a while, not in a loop).
+  const token = r.reason === "token";
+  if ((stale || token) && Date.now() - last > 30_000) {
     try {
       sessionStorage.setItem(key, String(Date.now()));
     } catch {}
-    report("the server runs a newer version of this page: loading it");
+    if (token) localStorage.removeItem(member.linkKey);
+    report(token ? "this page's token is not one the server gave out: getting a new one" : "the server runs a newer version of this page: loading it");
     location.reload();
     return;
   }
@@ -753,7 +756,22 @@ async function runMember(appText) {
     return;
   }
   const linkKey = `${storageKey}:link`;
-  const link = client.link(localStorage.getItem(linkKey) ?? "");
+  let stored = localStorage.getItem(linkKey) ?? "";
+  // A deployment whose objects admit pages by signed tokens (Durable Objects, docs/design/KEYED.md) gives a page its
+  // token before it links.
+  if (desc.tokens && (stored === "" || JSON.parse(stored).token === "")) {
+    const res = await fetch(new URL(`${desc.tokens}?role=${encodeURIComponent(role)}`, location.href), {
+      method: "POST",
+    });
+    if (!res.ok) {
+      report(`cannot get a token: ${res.status}`);
+      return;
+    }
+    const token = [...new Uint8Array(await res.arrayBuffer())].map((b) => b.toString(16).padStart(2, "0")).join("");
+    stored = JSON.stringify({ member: null, token, seed: "", received: 0, acked: 0, out_next: 1, unacked: [] });
+    localStorage.setItem(linkKey, stored);
+  }
+  const link = client.link(stored);
   const transport = search.get("link") ?? desc.transport ?? "websocket";
   let conn;
   if (transport === "http") {
@@ -762,6 +780,8 @@ async function runMember(appText) {
   } else {
     const url = new URL(desc.link, location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    // The member the link goes to, for a front that routes links by member.
+    if (key !== null) url.searchParams.set("member", key);
     conn = new Connection(url, memberOpened, memberFrame, memberClosed);
   }
   member = { client, link, linkKey, conn };

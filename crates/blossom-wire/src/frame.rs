@@ -90,6 +90,8 @@ pub enum RejectReason {
     Directory = 4,
     SchemaMismatch = 5,
     NotAllowed = 6,
+    /// The member's token is not one this deployment gave out: the page gets a new one (docs/design/KEYED.md).
+    Token = 7,
 }
 
 impl RejectReason {
@@ -101,6 +103,7 @@ impl RejectReason {
             4 => RejectReason::Directory,
             5 => RejectReason::SchemaMismatch,
             6 => RejectReason::NotAllowed,
+            7 => RejectReason::Token,
             other => return Err(WireError::Malformed(format!("reject reason {other}"))),
         })
     }

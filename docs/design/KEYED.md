@@ -7,9 +7,9 @@ is the design; nothing here is built yet.
 Name: the role kind is `keyed` (`role Game: keyed;`), not `object`, so it does not collide with the runtime's
 `object` module (a node a Durable Object hosts). A keyed role's members are **keyed members**.
 
-**Status (2026-10-09):** sub-slices 1 to 3 are built (§4): the value, the language, both evaluators, the codecs, the
-simulator, `blossom run`'s hosts, and pages linked to members (examples/web/rooms.bls). A Durable Object refuses a
-send to a member until sub-slice 4.
+**Status (2026-10-09):** all four sub-slices are built (§4): the value, the language, both evaluators, the codecs,
+the simulator, `blossom run`'s hosts, pages linked to members (examples/web/rooms.bls), and Durable Objects with an
+object per member.
 
 ## 1. What a program says
 
@@ -120,8 +120,11 @@ Its cost is breadth, not depth: each layer gains one case.
   its sends to `r` go over the link. A page naming a member another host runs is refused, naming that host; a node
   that runs no keyed members refuses a page naming one. In simulation a page is linked to every keyed member, as to
   every server node. Not yet: sending a page to the right host (a front that routes by member, or a redirect).
-- **Durable Objects**: each member is an object (`idFromName("R/" + k)`), and a send to a member is an RPC to that
-  object; the prototype's single object becomes the hosts' role.
+- **Durable Objects** (built; DURABLE-OBJECTS.md §The prototype): each member is an object (`member/ROLE/KEY`), each
+  node one (`node/NAME`), and a send to either is a request to that object. Pages' ids come from one `registry`
+  object (the user's choice, 2026-10-09, over ids unique only per member or ids naming the member): it hands out
+  serials, and each token is signed with a key derived from the deployment's seed, so every member's object checks a
+  page's token without asking, and a page's id is the same wherever it links.
 
 ## 4. Sub-slices
 
@@ -139,6 +142,7 @@ Its cost is breadth, not depth: each layer gains one case.
    played, then the host killed and restarted, both rooms back from their own stores; web_apps.rs plays a room on
    both evaluators).
 4. **Durable Objects**: a member per object, RPC between objects. Gate: the same tic-tac-toe on a local workerd.
+   **Done** (tests/web/object.spec.mjs `rooms`; crates/blossom-do/tests/rpc.rs for requests between objects).
 
 ## 5. Out of scope
 

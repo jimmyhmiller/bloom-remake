@@ -89,7 +89,7 @@ pub(crate) enum MemberEvent {
 
 /// A client role as the web listener serves it: its id, the digest of its part of the program, and that part encoded
 /// (`/blossom/client/ROLE`).
-pub(crate) struct ClientRole {
+pub struct ClientRole {
     pub id: RoleId,
     pub part: [u8; 16],
     pub artifact: Arc<[u8]>,
@@ -97,7 +97,7 @@ pub(crate) struct ClientRole {
 
 /// Each client role's part of the program, projected once: what its pages run, and the digest their links present. A
 /// projection that would show a page anything placed at another role is refused.
-pub(crate) fn project_clients(artifact: &BlsArtifact) -> Result<BTreeMap<String, ClientRole>, RuntimeError> {
+pub fn project_clients(artifact: &BlsArtifact) -> Result<BTreeMap<String, ClientRole>, RuntimeError> {
     let program = artifact.program.get();
     let mut client_roles = BTreeMap::new();
     for (role, r) in program.roles.iter_enumerated() {
@@ -309,12 +309,12 @@ pub(crate) fn admit(ctx: &WebCtx, h: blossom_wire::frame::Hello) -> Result<Admit
         &ctx.client_roles,
         &*ctx.keyed,
         h,
-        &mut |role, token| identify(ctx, role, token),
+        &mut |role, token| identify(ctx, role, token).map_err(AdmitError::Failed),
     )
 }
 
 /// Identifies a member of a client role by its token (or none): its node id and its token.
-pub(crate) type Identify<'a> = dyn FnMut(&str, Option<Vec<u8>>) -> Result<(NodeId, Vec<u8>), RuntimeError> + 'a;
+pub(crate) type Identify<'a> = dyn FnMut(&str, Option<Vec<u8>>) -> Result<(NodeId, Vec<u8>), AdmitError> + 'a;
 
 /// [`admit`], with what it needs given: the node's identity, its channel catalog and client roles, and how a member
 /// is identified (`identify(role, token)`).
@@ -357,7 +357,7 @@ pub(crate) fn admit_with(
     }
     let keyed = keyed(target.as_ref()).map_err(|(reason, detail)| AdmitError::Refused(reason, detail))?;
     let inbound = catalog.accept(&h.channels);
-    let (member, token) = identify(&role, token).map_err(AdmitError::Failed)?;
+    let (member, token) = identify(&role, token)?;
     Ok(Admitted {
         member,
         role: client.id,
@@ -593,6 +593,50 @@ pub(crate) fn identify_in(
     let mut token = serial.to_le_bytes().to_vec();
     token.extend_from_slice(&secret);
     Ok((id, token))
+}
+
+/// The key a deployment signs its pages' tokens with (docs/design/KEYED.md): derived from its seed, which only its
+/// nodes know.
+fn token_key(seed: blossom_value::Seed) -> [u8; 32] {
+    blake3::derive_key("blossom page tokens v1", &seed.0)
+}
+
+/// A page's token signed for the deployment seeded `seed`, so any of its nodes checks it without a registry: the
+/// serial (little-endian), then the first [`SECRET_LEN`] bytes of a keyed BLAKE3 over the role and the serial. Durable
+/// Objects mint serials in one registry object and admit pages in many.
+pub fn signed_token(seed: blossom_value::Seed, role: &str, serial: u32) -> Vec<u8> {
+    let mut h = blake3::Hasher::new_keyed(&token_key(seed));
+    h.update(&(role.len() as u64).to_le_bytes());
+    h.update(role.as_bytes());
+    h.update(&serial.to_le_bytes());
+    let mut token = serial.to_le_bytes().to_vec();
+    token.extend_from_slice(h.finalize().as_bytes().get(..SECRET_LEN).unwrap_or_default());
+    token
+}
+
+/// The identity a signed token names (the client member `serial` of node `server`), or the refusal: a page brings a
+/// token it was given; one this deployment did not sign gets it a new one.
+pub(crate) fn identify_signed(
+    seed: blossom_value::Seed,
+    server: NodeId,
+    role: &str,
+    token: Option<Vec<u8>>,
+) -> Result<(NodeId, Vec<u8>), AdmitError> {
+    let refuse = |d: &str| AdmitError::Refused(RejectReason::Token, d.to_owned());
+    let t = token.ok_or_else(|| refuse("a page gets its token before it links (/blossom/token)"))?;
+    let serial = t
+        .get(..4)
+        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| refuse("a malformed token"))?;
+    let expected = signed_token(seed, role, serial);
+    // Compared whole, every byte: how much of a forged token matched must not show.
+    let same = expected.len() == t.len() && expected.iter().zip(&t).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0;
+    if !same {
+        return Err(refuse("a token this deployment did not give out"));
+    }
+    let id = NodeId::client(server, serial).ok_or_else(|| refuse("a token past the members a node admits"))?;
+    Ok((id, t))
 }
 
 /// The connection carrying a member's link.

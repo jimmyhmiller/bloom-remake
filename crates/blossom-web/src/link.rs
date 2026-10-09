@@ -23,7 +23,8 @@ use crate::HostError;
 /// What the page stores of its link (hex for bytes), to resume it after a reload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkState {
-    /// The member's id, token and seed, once the server gave them.
+    /// The member's id, token and seed, once the server gave them (the token alone when the page was given one
+    /// before it linked: a deployment of Durable Objects mints them, docs/design/KEYED.md).
     pub member: Option<u32>,
     pub token: String,
     pub seed: String,
@@ -67,6 +68,8 @@ pub struct Link {
     /// The keyed member the link goes to, when its server hosts one (its role's name and its key).
     keyed: Option<(String, String)>,
     member: Option<Member>,
+    /// A token the page was given before its first `WELCOME`.
+    granted: Option<Vec<u8>>,
     received: u64,
     acked: u64,
     out_next: u64,
@@ -125,6 +128,7 @@ impl Link {
             catalog,
             keyed,
             member: None,
+            granted: None,
             received: 0,
             acked: 0,
             out_next: 1,
@@ -144,6 +148,8 @@ impl Link {
                     token: unhex(&s.token)?,
                     seed,
                 });
+            } else if !s.token.is_empty() {
+                link.granted = Some(unhex(&s.token)?);
             }
             link.received = s.received;
             link.acked = s.acked;
@@ -181,7 +187,11 @@ impl Link {
         let peer = Peer::Member {
             role: self.role.clone(),
             part: self.part,
-            token: self.member.as_ref().map(|m| m.token.clone()),
+            token: self
+                .member
+                .as_ref()
+                .map(|m| m.token.clone())
+                .or_else(|| self.granted.clone()),
             received: self.received,
             acked: self.acked,
             keyed: self.keyed.clone(),
@@ -311,7 +321,12 @@ impl Link {
     pub fn state(&self) -> LinkState {
         LinkState {
             member: self.member.as_ref().map(|m| m.id.0),
-            token: self.member.as_ref().map(|m| hex(&m.token)).unwrap_or_default(),
+            token: self
+                .member
+                .as_ref()
+                .map(|m| hex(&m.token))
+                .or_else(|| self.granted.as_deref().map(hex))
+                .unwrap_or_default(),
             seed: self.member.as_ref().map(|m| hex(&m.seed)).unwrap_or_default(),
             received: self.received,
             acked: self.acked,

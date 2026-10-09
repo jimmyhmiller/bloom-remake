@@ -1,0 +1,41 @@
+//! Messages between keyed members and a node when each is a Durable Object (docs/design/KEYED.md §4), for
+//! `crates/blossom-do/tests/rpc.rs`: the lobby starts two games at boot; each answers the lobby and pings the `ledger`
+//! game, which tells the lobby who pinged it.
+program relay version 1;
+
+role Lobby;
+role Game: keyed;
+
+channel start(n: u64): Lobby -> Game;
+channel started(key: String, n: u64): Game -> Lobby;
+channel ping(): Game -> Game;
+channel pong(by: Node<Game>): Game -> Lobby;
+
+at Lobby {
+    durable table heard(key: String, n: u64);
+    durable table pongs(by: Node<Game>);
+
+    go: on boot() {
+        send start(1u64) to Game.named("a");
+        send start(2u64) to Game.named("b");
+    }
+    got: on started(k, n) {
+        emit heard(k, n);
+    }
+    ponged: on pong(g) {
+        emit pongs(g);
+    }
+}
+
+at Game {
+    durable table began(n: u64);
+
+    begin: on start(n), l in Lobby {
+        emit began(n);
+        send started(self.key(), n) to l;
+        send ping() to Game.named("ledger");
+    }
+    answer: on ping() from g, l in Lobby {
+        send pong(g) to l;
+    }
+}
