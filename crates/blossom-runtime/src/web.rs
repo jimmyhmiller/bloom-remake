@@ -19,11 +19,13 @@ use crate::RuntimeError;
 const MAX_HEAD: usize = 16 * 1024;
 pub const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
-/// A request's method, path (without its query), protocol version and headers (names lowercased).
+/// A request's method, path (without its query), query (after `?`, empty when none), protocol version and headers
+/// (names lowercased).
 #[derive(Debug)]
 pub struct Request {
     pub method: String,
     pub path: String,
+    pub query: String,
     pub version: String,
     pub headers: BTreeMap<String, String>,
 }
@@ -31,6 +33,16 @@ pub struct Request {
 impl Request {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).map(String::as_str)
+    }
+
+    /// A query parameter, percent-decoded (`+` is a space).
+    pub fn param(&self, name: &str) -> Option<String> {
+        self.query.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(&k.replace('+', " ")).as_deref() == Some(name))
+                .then(|| percent_decode(&v.replace('+', " ")))
+                .flatten()
+        })
     }
 
     /// Whether the client keeps the connection for another request: HTTP/1.1's default, unless it says `close`;
@@ -101,7 +113,9 @@ pub fn read_request(r: &mut impl BufRead) -> Result<Request, RuntimeError> {
         return Err(RuntimeError::Net(format!("a malformed request line `{first}`")));
     };
     let version = parts.next().unwrap_or("HTTP/1.0").to_owned();
-    let path = target.split(['?', '#']).next().unwrap_or("/").to_owned();
+    let target = target.split('#').next().unwrap_or("/");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_owned(), query.to_owned());
     let mut headers = BTreeMap::new();
     for l in it {
         if let Some((k, v)) = l.split_once(':') {
@@ -111,6 +125,7 @@ pub fn read_request(r: &mut impl BufRead) -> Result<Request, RuntimeError> {
     Ok(Request {
         method: method.to_owned(),
         path,
+        query,
         version,
         headers,
     })

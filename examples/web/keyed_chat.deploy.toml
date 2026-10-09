@@ -33,3 +33,6 @@ mode = "insecure-dev"
 [storage]
 data_dir = ".data/keyed_chat"
 
+
+[web]
+style = "keyed_chat.css"

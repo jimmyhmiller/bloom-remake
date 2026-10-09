@@ -32,6 +32,10 @@ web() {
   scripts/build-do.sh rooms Room
   (cd do && npm ci --no-audit --no-fund)
   export BLOSSOM_DO=1
+  # The stateless specs (tests/web/stateless.spec.mjs) run `blossom serve` on SQLite, Postgres and S3
+  # (docs/design/STATELESS.md §10).
+  scripts/test-services.sh start
+  eval "$(scripts/test-services.sh env)"
   (cd tests/web && npm ci --no-audit --no-fund && npx playwright test)
 }
 

@@ -451,8 +451,12 @@ function decodeFrames(buffer) {
  * so they come in order; the page's frames go out a request at a time, those written meanwhile together. A failed
  * request is the connection's loss: the next session resumes the link, as a WebSocket's reconnect does. */
 class HttpConnection {
-  constructor(base, onOpen, onFrame, onClose) {
-    Object.assign(this, { base, onOpen, onFrame, onClose, session: null, opening: false, open_: false });
+  /** `member`: the keyed member the link goes to (`?member=` on the open), for a front that routes links by member. A
+   * stateless host (docs/design/STATELESS.md §6.3) answers each receive with a cursor (`Blossom-Cursor`) the next one
+   * sends back; a node that keeps the link in memory sends none. */
+  constructor(base, member, onOpen, onFrame, onClose) {
+    Object.assign(this, { base, member, onOpen, onFrame, onClose, session: null, opening: false, open_: false });
+    this.cursor = null;
     Object.assign(this, { generation: 0, failures: 0, timer: null, queue: [], sending: false });
     addEventListener("pagehide", (e) => {
       // A page going for good closes its session at once; one kept in the back/forward cache keeps it (its lease ends
@@ -464,7 +468,7 @@ class HttpConnection {
   open() {
     this.timer = null;
     this.generation += 1;
-    Object.assign(this, { session: null, opening: false, open_: true, queue: [], sending: false });
+    Object.assign(this, { session: null, opening: false, open_: true, queue: [], sending: false, cursor: null });
     this.onOpen();
   }
 
@@ -507,7 +511,8 @@ class HttpConnection {
     this.opening = true;
     let res, frames;
     try {
-      res = await fetch(`${this.base}/open`, { method: "POST", body: encodeFrames([hello]), cache: "no-store" });
+      const at = this.member === null ? "" : `?member=${encodeURIComponent(this.member)}`;
+      res = await fetch(`${this.base}/open${at}`, { method: "POST", body: encodeFrames([hello]), cache: "no-store" });
       if (!res.ok) throw new Error(`open: ${res.status}`);
       frames = decodeFrames(await res.arrayBuffer());
     } catch {
@@ -517,6 +522,7 @@ class HttpConnection {
     if (generation !== this.generation) return;
     this.opening = false;
     this.session = res.headers.get("Blossom-Session");
+    this.cursor = res.headers.get("Blossom-Cursor");
     for (const f of frames) if (generation === this.generation) this.onFrame(f);
     if (this.session === null) {
       // Refused: the answer was the REJECT, which the link has heard.
@@ -530,9 +536,12 @@ class HttpConnection {
     while (generation === this.generation) {
       let frames;
       try {
-        const res = await fetch(`${this.base}/${this.session}/recv`, { cache: "no-store" });
+        const at = this.cursor === null ? "" : `?cursor=${encodeURIComponent(this.cursor)}`;
+        const res = await fetch(`${this.base}/${this.session}/recv${at}`, { cache: "no-store" });
         if (!res.ok) throw new Error(`recv: ${res.status}`);
         frames = decodeFrames(await res.arrayBuffer());
+        const next = res.headers.get("Blossom-Cursor");
+        if (next !== null) this.cursor = next;
       } catch {
         this.lost(generation);
         return;
@@ -776,7 +785,7 @@ async function runMember(appText) {
   let conn;
   if (transport === "http") {
     const base = new URL(desc.http, location.href).href.replace(/\/$/, "");
-    conn = new HttpConnection(base, memberOpened, memberFrame, memberClosed);
+    conn = new HttpConnection(base, key, memberOpened, memberFrame, memberClosed);
   } else {
     const url = new URL(desc.link, location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
