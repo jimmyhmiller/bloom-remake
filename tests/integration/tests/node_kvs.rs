@@ -94,7 +94,11 @@ impl Kvs {
     /// Opens (recovers) the store on `fs` and boots the node.
     fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<'a, Box<dyn Executor>> {
         // A clone of a `SimFs` is another handle on the same filesystem.
-        let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
+        self.boot_on(Arc::new(fs.clone()), wall)
+    }
+
+    /// Opens (recovers) the store on any filesystem and boots the node.
+    fn boot_on<'a>(&'a self, fs: Arc<dyn Vfs>, wall: i64) -> ManualDriver<'a, Box<dyn Executor>> {
         let opened = recovery::open(
             fs,
             &StoreSpec {
@@ -721,4 +725,35 @@ fn a_store_refuses_another_tail_certification() {
         panic!("a strict store opened as crc")
     };
     assert!(err.to_string().contains("tail certification"), "{err}");
+}
+
+/// The node over a key-value store (`KvFs`, docs/design/DURABLE-OBJECTS.md): every acknowledged put is there after a
+/// restart that keeps only the keys and values, and no tick is reused.
+#[test]
+fn a_node_runs_over_a_key_value_store_and_recovers_from_it() {
+    use blossom_store::{KvFs, KvStore, MemKv};
+    let k = Kvs::new();
+    let kv: Arc<MemKv> = Arc::new(MemKv::default());
+    let last_tick;
+    {
+        let mut d = k.boot_on(Arc::new(KvFs::open(kv.clone() as Arc<dyn KvStore>).unwrap()), 1_000);
+        d.run_until_quiescent(Instant(1_000)).unwrap();
+        for i in 0..20u64 {
+            d.node
+                .offer_ingress(k.put(1, i, &format!("k{}", i % 7), format!("v{i}").as_bytes()));
+            let r = d.run_until_quiescent(Instant(2_000 + i as i64)).unwrap();
+            assert_eq!(replies(&k, &r).len(), 1);
+        }
+        last_tick = d.node.next_tick();
+        assert_eq!(k.store(&d).len(), 7);
+    }
+    // A new process: only the keys and values are left.
+    let mut d = k.boot_on(Arc::new(KvFs::open(kv.clone() as Arc<dyn KvStore>).unwrap()), 3_000);
+    assert!(d.node.recovered());
+    assert!(d.node.next_tick() > last_tick);
+    let now = d.node.last_now();
+    d.run_until_quiescent(now).unwrap();
+    let store = k.store(&d);
+    assert_eq!(store.len(), 7);
+    assert!(store.contains(&("k6".to_string(), b"v13".to_vec())), "{store:?}");
 }

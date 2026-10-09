@@ -21,14 +21,14 @@ between the two roles are the whole API: no routes, no message classes, no clien
 
 Lines of code (no comments, no blank lines), by part of the program:
 
-| App | Total | Channels, constants | Server | Page: events and sync | Page: views | Page: markup |
+| App | Total | Channels, constants | Server (and what both ends share) | Page: events and sync | Page: views | Page: markup |
 |---|---|---|---|---|---|---|
-| polls | 255 | 17 | 55 | 67 | 62 | 54 |
-| tictactoe | 309 | 25 | 85 | 70 | 72 | 57 |
-| board | 279 | 10 | 56 | 91 | 66 | 56 |
-| pixels | 204 | 22 | 51 | 53 | 29 | 49 |
+| polls | 240 | 17 | 57 | 55 | 55 | 56 |
+| tictactoe | 303 | 25 | 86 | 67 | 68 | 57 |
+| board | 272 | 10 | 56 | 92 | 58 | 56 |
+| pixels | 205 | 22 | 53 | 52 | 29 | 49 |
 
-The server side of each app is 51 to 85 lines, and that includes its storage schema, its rules, and its whole sync
+The server side of each app is 53 to 86 lines (with the sections both ends share), and that includes its storage schema, its rules, and its whole sync
 protocol. Each app also has a stylesheet of 60 to 130 lines (`examples/web/APP.css`, sharing `web/apps.css`).
 
 ## What the platform does that the apps do not write
@@ -170,22 +170,23 @@ make the programmer write, and where each is in a Blossom app:
   `dblclicked(id)`, `pressed(id)` and `dropped(item, id)`: the element an event names and every element it is inside,
   walked up the page's `elem` rows. Polls had a real bug here: a click on a choice's text named the text's `span`
   and the vote was dropped. The Playwright test now clicks the text.
+- **One namespace for every role, and no logic shared between roles.** A relation placed at the server and one at
+  the page could not share a name (polls kept `polls` and `poll_list`), and a view lived at one role, so tic-tac-toe
+  judged wins on the server and repeated the join on the page. A section of several roles, `at Server, Browser { … }`
+  (LANGUAGE §6.10), now gives each end its own copy under one name and runs its rules at both: polls shares `polls`
+  and `votes`, pixels its `canvas`, and tic-tac-toe its games, moves and the referee's views, so a page shows the
+  outcome and the winning line by the server's own rules (the `ended` message is gone). A module written in the file
+  can also be imported at each role; it now calls the file's functions, which it could not.
 - **A page that silently disappears** is warned about: BLS1011, for a `while` handler that writes an output and needs
   a row of an ungrouped aggregate view with no `default`.
 - **`if … else` as content**: `p { if open { "a" } else { "b" } }` was BLS0303 ("one content"); an `if` and its
   `else` now each may give the element its content.
 
-### Open gaps (worked around in the apps)
+### Open gaps
 
-1. **One namespace for every role.** A relation placed at `Server` and one at `Browser` cannot share a name, so each
-   app names its two copies differently (`polls` and `poll_list`, `cards` and `deck`).
-2. **No logic shared between roles.** Views and tables live at one role; only functions, types, constants and
-   channels are shared. Tic-tac-toe decides wins on the server with views and highlights the winning line on the
-   page with a second copy of the same join. A way to place one view (or block) at several roles would let the page
-   run the referee's rules too, for instant feedback, from one definition.
-3. **A resolution cost is one column** (LANG-117). The board puts its two-part version in one tuple column.
-4. **Descending `by` keys** (`collect!(e by k desc)`) are not implemented (LANG-118).
-5. **`index!` over persistent state re-ranks every tick** (BLS0601), with the quadratic reference lowering. Fine for a
+1. **A resolution cost is one column** (LANG-117). The board puts its two-part version in one tuple column.
+2. **Descending `by` keys** (`collect!(e by k desc)`) are not implemented (LANG-118).
+3. **`index!` over persistent state re-ranks every tick** (BLS0601), with the quadratic reference lowering. Fine for a
    board; a large list would want the engine's sort.
 
 ### Mistakes made while writing the apps

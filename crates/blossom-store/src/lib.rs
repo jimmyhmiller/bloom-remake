@@ -4,6 +4,7 @@
 mod blob;
 mod ckpt;
 mod clients;
+mod kvfs;
 pub mod lsm;
 pub mod conformance;
 pub mod crash;
@@ -14,6 +15,7 @@ mod wal;
 pub use blob::*;
 pub use ckpt::*;
 pub use clients::*;
+pub use kvfs::*;
 pub use meta::*;
 pub use simfs::*;
 pub use vfs::*;

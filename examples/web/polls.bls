@@ -32,8 +32,9 @@ channel voted(w: Node<Browser>, n: u64, voter: Node<Browser>, i: u64, s: u64): S
 /// Someone's name, and whether they are here, as of the server's `at`.
 channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Server -> Browser;
 
-at Server {
-    durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
+/// The polls and the votes, kept at the server and at every tab (each keeps its own, across restarts and reloads).
+/// Each keeps the newest of what it hears: a poll once closed stays closed, a voter's latest vote counts.
+at Server, Browser {
     durable table polls(w: Node<Browser>, n: u64, at: Instant, question: String, choices: Vec<String>, open: bool) key(
         w,
         n
@@ -43,6 +44,10 @@ at Server {
         n,
         voter
     ) resolve choose_most(s);
+}
+
+at Server {
+    durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
     table online(b: Node<Browser>);
 
     join: on Browser.connected(b, _) {
@@ -102,20 +107,6 @@ at Browser {
     /// The number of this tab's next poll, and of its next change.
     durable table next_n(n: u64) key();
     durable table next_s(s: u64) key();
-    /// What the tab knows, kept across reloads; each table keeps the newest of what it hears.
-    durable table poll_list(
-        w: Node<Browser>,
-        n: u64,
-        at: Instant,
-        question: String,
-        choices: Vec<String>,
-        open: bool
-    ) key(w, n) resolve choose_least(open);
-    durable table vote_list(w: Node<Browser>, n: u64, voter: Node<Browser>, i: u64, s: u64) key(
-        w,
-        n,
-        voter
-    ) resolve choose_most(s);
     durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
     /// What is typed in each field, by the field's id.
     table drafts(field: String, s: String) key(field);
@@ -127,10 +118,10 @@ at Browser {
     // ------------------------------------------------------------ the server
 
     hear_poll: on poll(w, n, at, q, cs, o) {
-        next poll_list(w, n, at, q, cs, o);
+        next polls(w, n, at, q, cs, o);
     }
     hear_vote: on voted(w, n, v, i, s) {
-        next vote_list(w, n, v, i, s);
+        next votes(w, n, v, i, s);
     }
     hear_person: on person(b, name, here, at) {
         next people(b, name, here, at);
@@ -158,20 +149,20 @@ at Browser {
     /// A poll is asked here at once, and sent (it waits in the link while the server is unreachable).
     ask_it: on click("ask"), question_text(q), drafted(cs), next_poll(n), srv in Server
             where q.trim() != "" && cs.len() >= 2u64 {
-        next poll_list(self, n, now(), q.trim(), cs, true);
+        next polls(self, n, now(), q.trim(), cs, true);
         send ask(n, q.trim(), cs) to srv;
         upsert next_n(n + 1u64);
         for drafts(f, s) where f != "name" {
             delete drafts(f, s);
         }
     }
-    vote_it: on clicked(id), choice_button(id, w, n, i), poll_list(w, n, _, _, _, true), next_change(s), srv in Server {
-        next vote_list(w, n, self, i, s);
+    vote_it: on clicked(id), choice_button(id, w, n, i), polls(w, n, _, _, _, true), next_change(s), srv in Server {
+        next votes(w, n, self, i, s);
         send vote(w, n, i, s) to srv;
         upsert next_s(s + 1u64);
     }
-    close_it: on clicked(id), close_button(id, n), poll_list(self, n, at, q, cs, true), srv in Server {
-        next poll_list(self, n, at, q, cs, false);
+    close_it: on clicked(id), close_button(id, n), polls(self, n, at, q, cs, true), srv in Server {
+        next polls(self, n, at, q, cs, false);
         send close(n) to srv;
     }
 
@@ -191,23 +182,23 @@ at Browser {
     view typed_in(f, s) = field(f), outer drafts(f, d), let s = d.unwrap_or("");
     view question_text(q) = typed_in("question", q);
 
-    view choice(w, n, i, text) = poll_list(w, n, _, _, cs, _), (i, text) in cs.enumerate();
-    view count(w, n, i, k = count!(v)) = per choice(w, n, i, _), vote_list(w, n, v, i, _);
-    view total(w, n, k = count!(v)) = per poll_list(w, n, _, _, _, _), vote_list(w, n, v, _, _);
-    view poll_key(w, n, key) = poll_list(w, n, _, _, _, _), let key = f"{n}-{w}";
+    view choice(w, n, i, text) = polls(w, n, _, _, cs, _), (i, text) in cs.enumerate();
+    view count(w, n, i, k = count!(v)) = per choice(w, n, i, _), votes(w, n, v, i, _);
+    view total(w, n, k = count!(v)) = per polls(w, n, _, _, _, _), votes(w, n, v, _, _);
+    view poll_key(w, n, key) = polls(w, n, _, _, _, _), let key = f"{n}-{w}";
     view choice_button(id, w, n, i) = choice(w, n, i, _), poll_key(w, n, key), let id = f"vote-{key}-{i}";
     view close_button(id, n) = poll_key(self, n, key), let id = f"close-{key}";
     view mine(w, n, i, m) {
-        choice(w, n, i, _), vote_list(w, n, self, i, _), let m = true;
-        choice(w, n, i, _), not vote_list(w, n, self, i, _), let m = false;
+        choice(w, n, i, _), votes(w, n, self, i, _), let m = true;
+        choice(w, n, i, _), not votes(w, n, self, i, _), let m = false;
     }
     view name_of(b, name) {
         people(b, name, _, _) where b != self;
         me(name), let b = self;
     }
-    view asker(w, n, name) = poll_list(w, n, _, _, _, _), outer name_of(w, nm), let name = nm.unwrap_or("someone");
+    view asker(w, n, name) = polls(w, n, _, _, _, _), outer name_of(w, nm), let name = nm.unwrap_or("someone");
     /// Who voted for a choice, by name.
-    view voters(w, n, i, names = collect!(name)) = per choice(w, n, i, _), vote_list(w, n, v, i, _), name_of(v, name);
+    view voters(w, n, i, names = collect!(name)) = per choice(w, n, i, _), votes(w, n, v, i, _), name_of(v, name);
     view here(b, name) {
         people(b, name, true, _), up(_), not b == self;
     }
@@ -269,7 +260,7 @@ at Browser {
                 button[id: "ask", pos: 100](class: "primary") { "Ask" }
             }
             ol[id: "list"](class: "list") {
-                for poll_list(w, n, at, question, _, open), poll_key(w, n, key), asker(w, n, by), total(w, n, all) {
+                for polls(w, n, at, question, _, open), poll_key(w, n, key), asker(w, n, by), total(w, n, all) {
                     li[id: f"poll-{key}", pos: 0i64 - at.as_millis() as i64](class: if open {
                         "card poll"
                     } else {

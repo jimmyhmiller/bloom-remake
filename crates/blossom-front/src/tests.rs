@@ -24,11 +24,19 @@ impl Loader for One {
 
 /// The codes of the diagnostics compiling `src` reports (empty when it compiles without warnings).
 fn codes(src: &'static str) -> Vec<String> {
+    codes_on(src, &[("n1", None)])
+}
+
+/// As [`codes`], for a deployment of the given nodes (name and role).
+fn codes_on(src: &'static str, nodes: &[(&str, Option<&str>)]) -> Vec<String> {
     let mut sources = SourceDb::new();
-    let nodes = [NodeSpec {
-        name: "n1".to_owned(),
-        role: None,
-    }];
+    let nodes: Vec<NodeSpec> = nodes
+        .iter()
+        .map(|(n, r)| NodeSpec {
+            name: (*n).to_owned(),
+            role: r.map(str::to_owned),
+        })
+        .collect();
     match compile("test.bls", &nodes, &mut One(src), &mut sources) {
         Ok((_, warnings)) => warnings.iter().map(|d| d.code.as_str().to_owned()).collect(),
         Err(BlsError::Rejected(d)) => d.iter().map(|d| d.code.as_str().to_owned()).collect(),
@@ -1976,4 +1984,49 @@ fn a_page_over_an_aggregate_without_default_is_bls1011() {
         codes(page("view top(k = max!(i)) = items(i);", "keep: while top(k) { upsert latest(k); }")),
         Vec::<String>::new()
     );
+}
+
+/// Two roles and a channel between them, for the tests of `at` sections of several roles.
+const SECTION_ROLES: &str = "program t version 1;\nrole Server;\nrole Browser: client;\n\
+                     channel ping(x: u64): Browser -> Server;\n";
+
+fn with_section_roles(body: &str) -> &'static str {
+    Box::leak(format!("{SECTION_ROLES}{body}").into_boxed_str())
+}
+
+#[test]
+fn a_section_of_several_roles_gives_each_role_its_copy() {
+    // Each role's rules read and write their own `seen`, by its plain name.
+    let ok = with_section_roles(
+        "at Server, Browser { table seen(x: u64); view big(x) = seen(x) where x > 9u64; }\n\
+         at Server { keep: on ping(x) { emit seen(x); } }\n\
+         at Browser { input poke(x: u64); remember: on poke(x), srv in Server { emit seen(x); send ping(x) to srv; } }\n",
+    );
+    assert_eq!(codes_on(ok, &[("s", Some("Server"))]), Vec::<String>::new());
+    // A role's copy and a relation of that name placed at the role: declared twice.
+    let twice = with_section_roles("at Server, Browser { table seen(x: u64); }\nat Server { table seen(x: u64); }\n");
+    assert_eq!(codes_on(twice, &[("s", Some("Server"))]), ["BLS0201"]);
+    // Another role's copy, named outright, is still placed there.
+    let elsewhere = with_section_roles(
+        "at Server, Browser { table seen(x: u64); }\n\
+         at Server { peek: on ping(x), Browser.seen(x) { emit Server.seen(x); } }\n",
+    );
+    assert_eq!(codes_on(elsewhere, &[("s", Some("Server"))]), ["BLS0404"]);
+    // An import would need an alias per role.
+    let import = with_section_roles(
+        "module M(src: rel(x: u64)) { output out(x: u64); copy: while src(x) { emit out(x); } }\n\
+         at Server, Browser { table seen(x: u64); import M(src = seen) as m; }\n",
+    );
+    assert_eq!(codes_on(import, &[("s", Some("Server"))]), ["BLS0908"]);
+}
+
+#[test]
+fn a_module_calls_the_functions_of_its_file() {
+    let src = with_head(
+        "fn double(x: u64) -> u64 { x * 2u64 }\n\
+         module M(src: rel(x: u64)) { output out(x: u64); twice: while src(x) { emit out(double(x)); } }\n\
+         table vals(x: u64);\n\
+         import M(src = vals) as m;\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
 }

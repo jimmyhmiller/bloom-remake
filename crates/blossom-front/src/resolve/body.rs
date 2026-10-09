@@ -402,7 +402,7 @@ impl<'t> Resolver<'t, '_> {
             if let Some((i, _)) = self.fn_param(cx.template, name.name) {
                 return Some(HFnArg::Param(i));
             }
-            if let Some(f) = self.scope(cx.ms).fns.get(&name.name).copied() {
+            if let Some(f) = self.fn_named(cx.ms, name.name) {
                 return Some(HFnArg::Fn(f));
             }
             if self.scope(cx.ms).generic_fns.contains_key(&name.name) {
@@ -461,6 +461,12 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// Declares a function's signature: its scope, parameter variables and types. A body is resolved later.
+    /// The function `name` calls in scope `s`: the module's own, else one of its file's (`outer_fns`).
+    pub(crate) fn fn_named(&self, s: ScopeIdx, name: Symbol) -> Option<HFnId> {
+        let sc = self.scope(s);
+        sc.fns.get(&name).or_else(|| sc.outer_fns.get(&name)).copied()
+    }
+
     fn declare_fn(
         &mut self,
         s: ScopeIdx,
@@ -2047,7 +2053,7 @@ impl<'t> Resolver<'t, '_> {
                                                 name.as_str()
                                             ),
                                         );
-                                    } else if self.scope(cx.ms).fns.contains_key(&name.name) {
+                                    } else if self.fn_named(cx.ms, name.name).is_some() {
                                         // A function as a value is the argument of a lattice operation
                                         // (`s.map(f)`, `s.filter(p)`, LANGUAGE §11.5).
                                         self.unsupported(
@@ -2625,7 +2631,7 @@ impl<'t> Resolver<'t, '_> {
             [name] if let Some(g) = self.scope(cx.ms).generic_fns.get(&name.name).copied() => {
                 self.generic_call(cx, *name, g, &pos, span)
             }
-            [name] if let Some(f) = self.scope(cx.ms).fns.get(&name.name).copied() => {
+            [name] if let Some(f) = self.fn_named(cx.ms, name.name) => {
                 let arity = self.hir.fns.get(f.index()).map_or(0, |h| h.params.len());
                 if pos.len() != arity {
                     self.error(
@@ -2946,7 +2952,7 @@ impl<'t> Resolver<'t, '_> {
 
     pub(crate) fn handler(&mut self, s: ScopeIdx, h: &'t ast::Handler, placement: Option<HRoleId>) {
         if let Some(l) = h.label {
-            *self.handler_labels.entry((s, l.name)).or_insert(0) += 1;
+            *self.handler_labels.entry((s, l.name, self.section)).or_insert(0) += 1;
         }
         if h.monotone {
             self.unsupported("ANA-020", "`monotone` assertions", h.span);
@@ -2960,6 +2966,7 @@ impl<'t> Resolver<'t, '_> {
         let text = self.normalized(h.header.span);
         self.hir.handlers.push(HHandler {
             scope: cx.scope,
+            section: self.section,
             label: h.label.map(|l| l.name),
             trigger: h.trigger,
             kind: HandlerKind::Plain,
@@ -3002,6 +3009,7 @@ impl<'t> Resolver<'t, '_> {
         let stmts = self.stmts(&mut cx, &block.stmts);
         self.hir.handlers.push(HHandler {
             scope: cx.scope,
+            section: self.section,
             label: None,
             trigger: ast::Trigger::On,
             kind: if fresh {
@@ -3294,7 +3302,7 @@ impl<'t> Resolver<'t, '_> {
                 .aliases
                 .get(&name.name)
                 .copied()
-                .or_else(|| self.scope(cx.ms).rels.get(&name.name).copied())
+                .or_else(|| self.rel_in(cx.ms, name.name))
                 .or_else(|| (name.as_str() == "localtick").then(|| self.builtin(super::BuiltinRel::LocalTick, span)))
                 .or_else(|| (name.as_str() == "halt").then(|| self.builtin(super::BuiltinRel::Halt, span))),
             [inst, name] => {
@@ -3320,12 +3328,9 @@ impl<'t> Resolver<'t, '_> {
                         );
                         return None;
                     }
-                    // A role's link events: the write is refused below (the runtime feeds them).
-                    None if self.role_named(cx.ms, inst.name).is_some()
-                        && matches!(name.as_str(), "connected" | "disconnected") =>
-                    {
-                        self.lookup_rel(cx.ms, path)
-                    }
+                    // A role's link events (the write is refused below: the runtime feeds them), or a role's copy of
+                    // a relation of a section of several roles (`Server.r`, checked below like any placed relation).
+                    None if self.role_named(cx.ms, inst.name).is_some() => self.lookup_rel(cx.ms, path),
                     None => None,
                 }
             }
@@ -3913,7 +3918,7 @@ impl<'t> Resolver<'t, '_> {
     /// `table p(c̄) … while BODY;` (LANGUAGE §7.2): the body `p(c̄), BODY` over the columns, named as declared.
     pub(crate) fn persist_guard(&mut self, s: ScopeIdx, d: &'t ast::RelDecl, placement: Option<HRoleId>) {
         let Some(guard) = &d.guard else { return };
-        let Some(rel) = self.scope(s).rels.get(&d.name.name).copied() else {
+        let Some(rel) = self.rel_in(s, d.name.name) else {
             // The declaration failed (and was reported).
             return;
         };
@@ -4086,6 +4091,7 @@ impl<'t> Resolver<'t, '_> {
         let text = self.normalized(h.header.span);
         self.hir.handlers.push(HHandler {
             scope: cx.scope,
+            section: self.section,
             label: h.label.map(|l| l.name),
             trigger: h.trigger,
             kind: HandlerKind::Plain,

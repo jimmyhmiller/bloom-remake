@@ -123,12 +123,12 @@ fn tictactoe_plays_a_game_on_the_oracle_and_the_engine() {
     let run = differential(&a, &inputs, 36);
     let u = |x: u64| Value::Int(blossom_value::value::IntValue::U64(x));
     assert_eq!(
-        rows(&a, &run, 9, s, "games").iter().map(|r| (r[0].clone(), r[1].clone(), r[2].clone())).collect::<Vec<_>>(),
+        rows(&a, &run, 9, s, "Server.games").iter().map(|r| (r[0].clone(), r[1].clone(), r[2].clone())).collect::<Vec<_>>(),
         vec![(u(0), Value::Node(b1), Value::Node(b2))]
     );
     // b2's out-of-turn click made no move.
-    assert_eq!(rows(&a, &run, 13, s, "moves"), vec![vec![u(0), u(0), u(0)]]);
-    let moves = rows(&a, &run, 36, s, "moves");
+    assert_eq!(rows(&a, &run, 13, s, "Server.moves"), vec![vec![u(0), u(0), u(0)]]);
+    let moves = rows(&a, &run, 36, s, "Server.moves");
     assert_eq!(
         moves,
         vec![
@@ -139,9 +139,14 @@ fn tictactoe_plays_a_game_on_the_oracle_and_the_engine() {
             vec![u(0), u(4), u(2)],
         ]
     );
-    assert_eq!(rows(&a, &run, 36, s, "outcome"), vec![vec![u(0), Value::str("X")]]);
+    assert_eq!(rows(&a, &run, 36, s, "Server.outcome"), vec![vec![u(0), Value::str("X")]]);
+    // Each tab judges its own copy of the game by the same rules: the same outcome, and the winning line.
     for tab in [b1, b2] {
-        assert_eq!(rows(&a, &run, 36, tab, "outcomes"), vec![vec![u(0), Value::str("X")]]);
+        assert_eq!(rows(&a, &run, 36, tab, "Browser.outcome"), vec![vec![u(0), Value::str("X")]]);
+        assert_eq!(
+            rows(&a, &run, 36, tab, "winning"),
+            vec![vec![u(0), u(0)], vec![u(0), u(1)], vec![u(0), u(2)]]
+        );
     }
     let headline = |tab| rows(&a, &run, 36, tab, "headline");
     assert_eq!(headline(b1), vec![vec![u(0), Value::str("You win!")]]);
@@ -208,4 +213,33 @@ fn collect_and_index_order_by_their_keys() {
         rows(&a, &run, 4, n1, "ranked2"),
         vec![rank("amy", 2, 0), rank("bob", 4, 1), rank("kim", 3, 3), rank("zed", 1, 2)]
     );
+}
+
+/// `fixtures/apps/sections.bls`: an `at Server, Browser { … }` section declares `moves` and the game's views once;
+/// each end has its own copy, and a tab's taps play a game whose win both ends see.
+#[test]
+fn a_section_of_two_roles_gives_each_end_its_own_copy() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/apps/sections.bls");
+    let a = compile(&path, &[("s", Some("Server")), ("b1", Some("Browser"))]);
+    let (s, b1) = (a.node_id("s").unwrap(), a.node_id("b1").unwrap());
+    for name in ["Server.moves", "Browser.moves", "Server.three", "Browser.three"] {
+        assert!(a.rel_named(name).is_some(), "no relation `{name}`");
+    }
+    assert!(a.rel_named("moves").is_none());
+    let u = |x: u64| Value::Int(blossom_value::value::IntValue::U64(x));
+    let tap = |t: u64, cell: u64| InputEvent {
+        node: b1,
+        tick: Tick(t),
+        rel: a.rel_named("tap").unwrap(),
+        row: Arc::from(vec![u(0), u(cell)]),
+    };
+    // X at 0, 1, 2 with O between: the tab plays both sides here, the server keeps order.
+    let inputs: Vec<InputEvent> = [0, 3, 1, 4, 2, 5].iter().enumerate().map(|(i, c)| tap(1 + 4 * i as u64, *c)).collect();
+    let run = differential(&a, &inputs, 30);
+    let three = vec![vec![u(0), Value::str("X")]];
+    assert_eq!(rows(&a, &run, 30, s, "Server.three"), three);
+    assert_eq!(rows(&a, &run, 30, b1, "Browser.three"), three);
+    // The move after the win was refused by the server: five moves at both ends.
+    assert_eq!(rows(&a, &run, 30, s, "Server.moves").len(), 5);
+    assert_eq!(rows(&a, &run, 30, b1, "Browser.moves").len(), 5);
 }

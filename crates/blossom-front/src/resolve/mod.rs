@@ -279,6 +279,8 @@ pub(crate) struct ModScope<'t> {
     pub values: BTreeMap<Symbol, (Value, TypeId)>,
     /// Relations by surface name (declared here, views, timers, protocol interfaces, relation parameters).
     pub rels: BTreeMap<Symbol, HRelId>,
+    /// Relations declared in a section of several roles: one copy per role, by role and surface name.
+    pub role_rels: BTreeMap<(HRoleId, Symbol), HRelId>,
     /// Instances by alias: their relations by name, and which of those are interfaces.
     pub instances: BTreeMap<Symbol, Instance>,
     /// Roles visible by name.
@@ -295,6 +297,9 @@ pub(crate) struct ModScope<'t> {
     pub broken: BTreeSet<Symbol>,
     /// Pure functions declared in this module, by name (LANGUAGE §16.1).
     pub fns: BTreeMap<Symbol, HFnId>,
+    /// The functions of the file this instance's module is written in (its root's, and the ones those see): a
+    /// module calls them as it uses that file's constants and types. Its own functions come first.
+    pub outer_fns: BTreeMap<Symbol, HFnId>,
     /// Generic functions (and functions with function parameters) declared in this module: their templates.
     pub generic_fns: BTreeMap<Symbol, usize>,
     /// Trees declared in this module, by name (docs/design/SUGAR.md §3).
@@ -311,6 +316,7 @@ impl ModScope<'_> {
             generics: BTreeMap::new(),
             values: BTreeMap::new(),
             rels: BTreeMap::new(),
+            role_rels: BTreeMap::new(),
             instances: BTreeMap::new(),
             roles: BTreeMap::new(),
             role_template: None,
@@ -319,6 +325,7 @@ impl ModScope<'_> {
             own_items: None,
             broken: BTreeSet::new(),
             fns: BTreeMap::new(),
+            outer_fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
             trees: BTreeMap::new(),
             fragments: BTreeMap::new(),
@@ -397,7 +404,13 @@ pub(crate) struct Resolver<'t, 'd> {
     /// Whether the instance bound was reported (once).
     pub instances_capped: bool,
     /// How many handlers of each module carry each label (a `resolve prefer` name must label exactly one).
-    pub handler_labels: BTreeMap<(ScopeIdx, Symbol), u32>,
+    pub handler_labels: BTreeMap<(ScopeIdx, Symbol, Option<HRoleId>), u32>,
+    /// The role of the `at` section being walked (`None` outside every section): a relation name resolves to that
+    /// role's copy when a section of several roles declared it.
+    pub placed_at: Option<HRoleId>,
+    /// In a section of several roles (`at A, B { … }`), the role whose copy of the section is being resolved: its
+    /// relations are that role's copies (named `A.r`), and its handlers' generated names carry the role.
+    pub section: Option<HRoleId>,
     /// The (table, handler label) pairs of `next`/`upsert` writes into tables with `resolve prefer`.
     pub prefer_writers: BTreeSet<(HRelId, Symbol)>,
 }
@@ -454,6 +467,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
             recursive: BTreeSet::new(),
             instances_capped: false,
             handler_labels: BTreeMap::new(),
+            placed_at: None,
+            section: None,
             prefer_writers: BTreeSet::new(),
         }
     }
@@ -608,9 +623,43 @@ impl<'t, 'd> Resolver<'t, 'd> {
         id
     }
 
-    /// Declares `rel` under `name` in scope `s` (BLS0201 on a duplicate).
+    /// Declares `rel` under `name` in scope `s` (BLS0201 on a duplicate). In a section of several roles it is that
+    /// role's copy, named `Role.name`.
     fn bind_rel(&mut self, s: ScopeIdx, name: Ident, id: HRelId) {
-        if let Some(prev) = self.scope(s).rels.get(&name.name).copied() {
+        if let Some(role) = self.section {
+            let prev = self.scope(s).role_rels.get(&(role, name.name)).copied().or_else(|| {
+                // A relation of the same name placed at this role outside the section.
+                self.scope(s)
+                    .rels
+                    .get(&name.name)
+                    .copied()
+                    .filter(|r| self.rel_of(*r).role == Some(role))
+            });
+            if let Some(prev) = prev {
+                let prev_span = self.rel_spans.get(&prev).copied();
+                let mut d = Diagnostic::new(code!("BLS0201"), format!("`{}` is declared twice", name.as_str()))
+                    .with_primary(name.span);
+                if let Some(p) = prev_span {
+                    d = d.with_label(p, "first declared here");
+                }
+                self.diags.push(d);
+                return;
+            }
+            let mut segs = self.scope(s).prefix.clone();
+            segs.extend(self.role_of(role).name.segments().iter().copied());
+            segs.push(name.name);
+            if let Some(r) = self.hir.rels.get_mut(id.index()) {
+                r.name = QualName::new(segs);
+            }
+            self.rel_spans.insert(id, name.span);
+            self.scope_mut(s).role_rels.insert((role, name.name), id);
+            return;
+        }
+        // A relation placed at a role whose section copy has the name already.
+        let copy = self
+            .placed_at
+            .and_then(|role| self.scope(s).role_rels.get(&(role, name.name)).copied());
+        if let Some(prev) = copy.or_else(|| self.scope(s).rels.get(&name.name).copied()) {
             let prev_span = self.rel_spans.get(&prev).copied();
             let mut d = Diagnostic::new(code!("BLS0201"), format!("`{}` is declared twice", name.as_str()))
                 .with_primary(name.span);
@@ -822,11 +871,13 @@ impl<'t, 'd> Resolver<'t, 'd> {
         let has_roles = self.scope(s).has_roles;
         self.declare(s, items, placement, has_roles, false);
         self.acls(s, items);
+        // Before the imports: an instance of a module written in this file calls its functions (`outer_fns`).
+        // Functions are pure, so they name no relation or instance.
+        self.functions(s, items);
         self.imports(s, items, placement);
         // After the imports, so a guard can name an instance's member (and be told it is not a view or table).
         self.timer_guards(s, items);
         self.trees(s, items);
-        self.functions(s, items);
         self.rules(s, items, placement);
         self.check_prefer(s);
     }
@@ -905,6 +956,37 @@ impl<'t, 'd> Resolver<'t, 'd> {
     }
 
     /// Resolves the role of an `at R` section.
+    /// Enters role `r`'s copy of an `at` section of `n` roles; [`Resolver::leave_section`] restores what was.
+    fn enter_section(&mut self, r: HRoleId, n: usize) -> (Option<HRoleId>, Option<HRoleId>) {
+        let saved = (self.placed_at, self.section);
+        self.placed_at = Some(r);
+        self.section = (n > 1).then_some(r);
+        saved
+    }
+
+    fn leave_section(&mut self, saved: (Option<HRoleId>, Option<HRoleId>)) {
+        (self.placed_at, self.section) = saved;
+    }
+
+    /// The roles an `at` section's items are placed at (unknown ones reported where `declare` reports them).
+    fn section_roles(&self, s: ScopeIdx, roles: &[Ident]) -> Vec<HRoleId> {
+        roles.iter().filter_map(|r| self.scope(s).roles.get(&r.name).copied()).collect()
+    }
+
+    /// What a section of several roles may not hold yet: each item would need a name per role.
+    fn section_limits(&mut self, items: &'t [ast::Item]) {
+        for item in items {
+            let what = match &item.kind {
+                ItemKind::Import(_) => "an `import` (import it in each role's own section)",
+                ItemKind::Invariant(_) => "an invariant (write it in each role's own section)",
+                ItemKind::Interpose(_) => "an interposition",
+                ItemKind::Rel(d) if matches!(d.resolve, Some((ast::RelPolicy::Prefer(_), _))) => "a table with `resolve prefer`",
+                _ => continue,
+            };
+            self.unsupported("LANG-009", &format!("{what} in an `at` section of several roles"), item.span);
+        }
+    }
+
     fn at_role(&mut self, s: ScopeIdx, role: Ident) -> Option<HRoleId> {
         match self.scope(s).roles.get(&role.name).copied() {
             Some(r) => {
@@ -938,17 +1020,32 @@ impl<'t, 'd> Resolver<'t, 'd> {
     ) {
         for item in items {
             match &item.kind {
-                ItemKind::At { role, items: inner } => {
+                ItemKind::At { roles, items: inner } => {
+                    let span = roles.first().map_or(item.span, |r| r.span);
                     if in_at {
-                        self.error(code!("BLS0110"), role.span, "`at` sections do not nest");
+                        self.error(code!("BLS0110"), span, "`at` sections do not nest");
                         continue;
                     }
                     if !has_roles {
-                        self.error(code!("BLS0110"), role.span, "`at` in a module that declares no roles");
+                        self.error(code!("BLS0110"), span, "`at` in a module that declares no roles");
                         continue;
                     }
-                    let r = self.at_role(s, *role);
-                    self.declare(s, inner, r, has_roles, true);
+                    let placed: Vec<HRoleId> = roles.iter().filter_map(|r| self.at_role(s, *r)).collect();
+                    if placed.len() != roles.len() {
+                        continue;
+                    }
+                    if let Some(dup) = roles.iter().enumerate().find(|(i, r)| roles[..*i].iter().any(|x| x.name == r.name)) {
+                        self.error(code!("BLS0201"), dup.1.span, format!("`{}` is named twice", dup.1.as_str()));
+                        continue;
+                    }
+                    if placed.len() > 1 {
+                        self.section_limits(inner);
+                    }
+                    for r in placed {
+                        let saved = self.enter_section(r, roles.len());
+                        self.declare(s, inner, Some(r), has_roles, true);
+                        self.leave_section(saved);
+                    }
                 }
                 ItemKind::Rel(d) => {
                     let shared = matches!(d.kind, RelKind::Channel | RelKind::Static);
@@ -1174,11 +1271,17 @@ impl<'t, 'd> Resolver<'t, 'd> {
     fn timer_guards(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         for item in items {
             match &item.kind {
-                ItemKind::At { items: inner, .. } => self.timer_guards(s, inner),
+                ItemKind::At { roles, items: inner } => {
+                    for r in self.section_roles(s, roles) {
+                        let saved = self.enter_section(r, roles.len());
+                        self.timer_guards(s, inner);
+                        self.leave_section(saved);
+                    }
+                }
                 ItemKind::Timer(t) => {
                     let Some(path) = &t.guard else { continue };
                     // A timer that failed to declare was reported.
-                    let Some(timer) = self.scope(s).rels.get(&t.name.name).copied() else {
+                    let Some(timer) = self.rel_in(s, t.name.name) else {
                         continue;
                     };
                     let span = path.last().map_or(t.span, |i| i.span);
@@ -1230,7 +1333,13 @@ impl<'t, 'd> Resolver<'t, 'd> {
     fn acls(&mut self, s: ScopeIdx, items: &'t [ast::Item]) {
         for item in items {
             match &item.kind {
-                ItemKind::At { items: inner, .. } => self.acls(s, inner),
+                ItemKind::At { roles, items: inner } => {
+                    for r in self.section_roles(s, roles) {
+                        let saved = self.enter_section(r, roles.len());
+                        self.acls(s, inner);
+                        self.leave_section(saved);
+                    }
+                }
                 ItemKind::Rel(d) if d.kind == RelKind::Channel => {
                     let mut accepts = item.attrs.iter().filter(|a| a.name.as_str() == "accept");
                     let Some(first) = accepts.next() else { continue };
@@ -1243,7 +1352,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     }
                     // A duplicate or failed declaration was reported; only the channel this item declared gets the
                     // ACL.
-                    let Some(id) = self.scope(s).rels.get(&d.name.name).copied() else {
+                    let Some(id) = self.rel_in(s, d.name.name) else {
                         continue;
                     };
                     if self.rel_of(id).span != d.name.span {
@@ -1975,7 +2084,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
         for id in rels {
             let r = self.rel_of(id);
             for (name, span) in r.prefer.iter().flatten() {
-                let labelled = self.handler_labels.get(&(s, *name)).copied().unwrap_or(0);
+                let labelled = self.handler_labels.get(&(s, *name, None)).copied().unwrap_or(0);
                 if labelled > 1 {
                     self.error(
                         code!("BLS0411"),
@@ -2090,9 +2199,16 @@ impl<'t, 'd> Resolver<'t, 'd> {
     fn imports(&mut self, s: ScopeIdx, items: &'t [ast::Item], placement: Option<HRoleId>) {
         for item in items {
             match &item.kind {
-                ItemKind::At { role, items: inner } => {
-                    let r = self.scope(s).roles.get(&role.name).copied();
-                    self.imports(s, inner, r);
+                ItemKind::At { roles, items: inner } => {
+                    // A section of several roles holds no import (`section_limits`).
+                    if let [role] = roles.as_slice() {
+                        let r = self.scope(s).roles.get(&role.name).copied();
+                        let saved = r.map(|r| self.enter_section(r, 1));
+                        self.imports(s, inner, r);
+                        if let Some(saved) = saved {
+                            self.leave_section(saved);
+                        }
+                    }
                 }
                 ItemKind::Import(imp) => self.instantiate(s, imp, placement, item.span),
                 _ => {}
@@ -2110,9 +2226,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
         let has_roles = self.scope(s).has_roles;
         for item in items {
             match &item.kind {
-                ItemKind::At { role, items: inner } => {
-                    let r = self.scope(s).roles.get(&role.name).copied();
-                    self.rules(s, inner, r);
+                ItemKind::At { roles, items: inner } => {
+                    for r in self.section_roles(s, roles) {
+                        let saved = self.enter_section(r, roles.len());
+                        self.rules(s, inner, Some(r));
+                        self.leave_section(saved);
+                    }
                 }
                 ItemKind::Handler(h) => {
                     if has_roles && placement.is_none() {
@@ -2137,7 +2256,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     self.bootstrap(s, *fresh, block, placement, item.span);
                 }
                 ItemKind::View(v) => {
-                    if let Some(id) = self.scope(s).rels.get(&v.name.name).copied() {
+                    if let Some(id) = self.rel_in(s, v.name.name) {
                         self.view(s, v, id);
                     }
                 }
@@ -2232,12 +2351,21 @@ impl<'t, 'd> Resolver<'t, 'd> {
         }
         let mut prefix = self.scope(s).prefix.clone();
         prefix.push(alias.name);
+        // A module written in the importer's file sees that file's functions (the importer's own come first).
+        let outer_fns = if file == self.scope(s).file {
+            let mut fns = self.scope(s).outer_fns.clone();
+            fns.extend(self.scope(s).fns.iter().map(|(k, v)| (*k, *v)));
+            fns
+        } else {
+            BTreeMap::new()
+        };
         let child = self.new_scope(ModScope {
             file: file.clone(),
             prefix,
             generics,
             values: BTreeMap::new(),
             rels: BTreeMap::new(),
+            role_rels: BTreeMap::new(),
             instances: BTreeMap::new(),
             roles: BTreeMap::new(),
             role_template: None,
@@ -2246,6 +2374,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             own_items: Some(&module.items),
             broken: Default::default(),
             fns: BTreeMap::new(),
+            outer_fns,
             generic_fns: BTreeMap::new(),
             trees: BTreeMap::new(),
             fragments: BTreeMap::new(),
@@ -2451,6 +2580,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             generics: bound,
             values: BTreeMap::new(),
             rels: BTreeMap::new(),
+            role_rels: BTreeMap::new(),
             instances: BTreeMap::new(),
             roles: BTreeMap::new(),
             role_template: None,
@@ -2459,6 +2589,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             own_items: Some(&p.items),
             broken: Default::default(),
             fns: BTreeMap::new(),
+            outer_fns: BTreeMap::new(),
             generic_fns: BTreeMap::new(),
             trees: BTreeMap::new(),
             fragments: BTreeMap::new(),
@@ -2483,14 +2614,23 @@ impl<'t, 'd> Resolver<'t, 'd> {
         }
     }
 
-    /// Looks up a relation by path in scope `s`: `r`, or `a.r` for an instance interface.
+    /// The relation `name` of scope `s` as the section being walked sees it: its role's copy of one declared in a
+    /// section of several roles, else the scope's.
+    pub fn rel_in(&self, s: ScopeIdx, name: Symbol) -> Option<HRelId> {
+        if let Some(role) = self.placed_at
+            && let Some(id) = self.scope(s).role_rels.get(&(role, name))
+        {
+            return Some(*id);
+        }
+        self.scope(s).rels.get(&name).copied()
+    }
+
+    /// Looks up a relation by path in scope `s`: `r`, `a.r` for an instance interface, or `R.r` for role `R`'s copy
+    /// of a relation declared in a section of several roles.
     pub fn lookup_rel(&mut self, s: ScopeIdx, path: &[Ident]) -> Option<HRelId> {
         match path {
             [name] => self
-                .scope(s)
-                .rels
-                .get(&name.name)
-                .copied()
+                .rel_in(s, name.name)
                 .or_else(|| match name.as_str() {
                     "boot" => Some(self.builtin(BuiltinRel::Boot, name.span)),
                     "recovered" => Some(self.builtin(BuiltinRel::Recovered, name.span)),
@@ -2512,6 +2652,9 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 }
                 // `Q.connected` / `Q.disconnected`: a role's link events (CLIENTS.md §1).
                 let role = self.scope(s).roles.get(&inst.name).copied()?;
+                if let Some(id) = self.scope(s).role_rels.get(&(role, name.name)) {
+                    return Some(*id);
+                }
                 match name.as_str() {
                     "connected" => Some(self.link_rel(role, true, name.span)),
                     "disconnected" => Some(self.link_rel(role, false, name.span)),

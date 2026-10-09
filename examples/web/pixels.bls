@@ -37,9 +37,14 @@ channel done(s: u64, ok: bool): Server -> Browser;
 channel square(x: u64, y: u64, c: u64, by: Node<Browser>, v: u64): Server -> Browser;
 channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Server -> Browser;
 
+/// The canvas, at the server and at every tab: each square's color, who painted it, and the canvas's version when
+/// they did. A tab keeps the newest version of each square it hears.
+at Server, Browser {
+    durable table canvas(x: u64, y: u64, c: u64, by: Node<Browser>, v: u64) key(x, y) resolve choose_most(v);
+}
+
 at Server {
     durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
-    durable table canvas(x: u64, y: u64, c: u64, by: Node<Browser>, v: u64) key(x, y);
     /// When each painter last painted.
     durable table last_paint(b: Node<Browser>, at: Instant) key(b);
     table online(b: Node<Browser>);
@@ -69,7 +74,7 @@ at Server {
         send done(s, true) to b;
     }
     stand: on asked(b, x, y, c, _), winner(x, y, b), version(v) where x < SIZE && y < SIZE && c < PALETTE.len() {
-        upsert canvas(x, y, c, b, v + 1u64);
+        next canvas(x, y, c, b, v + 1u64);
     }
     refuse: on paint(_x, _y, _c, s) from b, not take_ok(b, s) {
         send done(s, false) to b;
@@ -102,8 +107,6 @@ at Browser {
     durable table me(name: String) key();
     durable table brush(c: u64) key();
     durable table next_s(s: u64) key();
-    /// The canvas as the server has it (the newest version of each square).
-    durable table squares(x: u64, y: u64, c: u64, by: Node<Browser>, v: u64) key(x, y) resolve choose_most(v);
     /// This tab's paints the server has not answered yet.
     durable table pending(s: u64, x: u64, y: u64, c: u64);
     durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
@@ -118,7 +121,7 @@ at Browser {
     view color(c = max!(x default 0u64)) = brush(x);
 
     hear_square: on square(x, y, c, by, v) {
-        next squares(x, y, c, by, v);
+        next canvas(x, y, c, by, v);
     }
     hear_done: on done(s, _), pending(s, x, y, c) {
         delete pending(s, x, y, c);
@@ -170,17 +173,17 @@ at Browser {
     view latest_pending(x, y, s = max!(t)) = pending(t, x, y, _);
     view shown(x, y, hex) {
         latest_pending(x, y, s), pending(s, x, y, c), let hex = PALETTE.get(c).unwrap_or("#ffffff");
-        coord(x, y), not latest_pending(x, y, _), squares(x, y, c, _, _), let hex = PALETTE.get(c).unwrap_or("#ffffff");
-        coord(x, y), not latest_pending(x, y, _), not squares(x, y, _, _, _), let hex = "#ffffff";
+        coord(x, y), not latest_pending(x, y, _), canvas(x, y, c, _, _), let hex = PALETTE.get(c).unwrap_or("#ffffff");
+        coord(x, y), not latest_pending(x, y, _), not canvas(x, y, _, _, _), let hex = "#ffffff";
     }
     view name_of(b, name) {
         people(b, name, _, _) where b != self;
         me(name), let b = self;
     }
     /// Whose squares are on the canvas now, most first.
-    view owned(b, k = count!((x, y))) = squares(x, y, _, b, _);
+    view owned(b, k = count!((x, y))) = canvas(x, y, _, b, _);
     view board(name, k, i) = owned(b, k), name_of(b, name), let i = 0i64 - k as i64;
-    view total(k = count!((x, y) default 0u64)) = squares(x, y, _, _, _);
+    view total(k = count!((x, y) default 0u64)) = canvas(x, y, _, _, _);
     view here(b, name) = people(b, name, true, _), up(_) where b != self;
     view status(s, c) {
         up(_), let s = "live", let c = "status";
