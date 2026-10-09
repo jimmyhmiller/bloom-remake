@@ -100,13 +100,7 @@ impl Store {
         let cfg = NodeConfig::new(NodeId(0), None);
         let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(self.oracle.clone()));
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
-        ManualDriver::new(
-            node,
-            &self.artifact.program,
-            &self.schema,
-            self.names.clone(),
-            opened,
-        )
+        ManualDriver::new(node, &self.artifact.program, &self.schema, self.names.clone(), opened)
     }
 
     fn stored(&self, d: &ManualDriver<Box<dyn Executor>>) -> Vec<Vec<u8>> {

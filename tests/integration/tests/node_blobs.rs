@@ -108,13 +108,7 @@ impl Store {
             Box::new(OracleExecutor::new(self.oracle.clone()))
         };
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
-        ManualDriver::new(
-            node,
-            &self.artifact.program,
-            &self.schema,
-            self.names.clone(),
-            opened,
-        )
+        ManualDriver::new(node, &self.artifact.program, &self.schema, self.names.clone(), opened)
     }
 
     /// The stored rows of the released (durable) image: chunk and blob.

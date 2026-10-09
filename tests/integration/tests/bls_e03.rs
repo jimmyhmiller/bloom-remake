@@ -8,9 +8,9 @@ use blossom_driver::bls::compile_file;
 use blossom_front::api::NodeSpec;
 use std::collections::BTreeMap;
 
+use blossom_sim::FaultSchedule;
 use blossom_sim::bls::BlsSim;
 use blossom_sim::sync::{Omission, SyncRun};
-use blossom_sim::FaultSchedule;
 use blossom_value::Value;
 use blossom_value::time::{Duration, NodeId, Tick};
 
@@ -38,16 +38,32 @@ fn one_leader_is_elected_and_every_server_learns_it() {
         let sim = BlsSim::new(&artifact, blossom_value::Seed::from_u64(seed)).unwrap();
         let last = Tick(60);
         let run = sim
-            .run(&[], last, Duration::from_nanos(25_000_000), &FaultSchedule::default(), false)
+            .run(
+                &[],
+                last,
+                Duration::from_nanos(25_000_000),
+                &FaultSchedule::default(),
+                false,
+            )
             .unwrap();
         assert_one_winner_per_term(&run, won, last, seed);
         // At the end every server knows the same leader of the latest term.
         let known: Vec<Vec<blossom_oracle::Row>> = (0..3)
-            .map(|n| run.node_tick(last, NodeId(n)).unwrap().instance.rows(leader_of).cloned().collect())
+            .map(|n| {
+                run.node_tick(last, NodeId(n))
+                    .unwrap()
+                    .instance
+                    .rows(leader_of)
+                    .cloned()
+                    .collect()
+            })
             .collect();
         if known.iter().all(|k| !k.is_empty()) {
             let latest = |k: &Vec<blossom_oracle::Row>| k.iter().max().cloned();
-            assert!(known.iter().all(|k| latest(k) == latest(&known[0])), "seed {seed}: {known:?}");
+            assert!(
+                known.iter().all(|k| latest(k) == latest(&known[0])),
+                "seed {seed}: {known:?}"
+            );
             elected += 1;
         }
     }
@@ -60,12 +76,17 @@ fn assert_one_winner_per_term(run: &SyncRun, won: blossom_base::RelId, last: Tic
     let mut winners: BTreeMap<u64, u32> = BTreeMap::new();
     for t in 0..=last.0 {
         for n in 0..3 {
-            let Some(nt) = run.node_tick(Tick(t), NodeId(n)) else { continue };
+            let Some(nt) = run.node_tick(Tick(t), NodeId(n)) else {
+                continue;
+            };
             for r in nt.instance.rows(won) {
                 let Some(Value::Int(term)) = r.first() else { continue };
                 let term = u64::try_from(term.to_i128().unwrap()).unwrap();
                 if let Some(other) = winners.insert(term, n) {
-                    assert_eq!(other, n, "seed {seed}, tick {t}: nodes {other} and {n} both won term {term}");
+                    assert_eq!(
+                        other, n,
+                        "seed {seed}, tick {t}: nodes {other} and {n} both won term {term}"
+                    );
                 }
             }
         }
@@ -104,15 +125,22 @@ fn no_term_has_two_leaders_under_loss_and_a_crash() {
             }
         }
         if seed % 2 == 1 {
-            faults.crashes.insert(NodeId((seed % 3) as u32), Tick(20 + mix(seed) % 30));
+            faults
+                .crashes
+                .insert(NodeId((seed % 3) as u32), Tick(20 + mix(seed) % 30));
         }
         let sim = BlsSim::new(&artifact, blossom_value::Seed::from_u64(seed)).unwrap();
-        let run = sim.run(&[], last, Duration::from_nanos(25_000_000), &faults, false).unwrap();
+        let run = sim
+            .run(&[], last, Duration::from_nanos(25_000_000), &faults, false)
+            .unwrap();
         assert_one_winner_per_term(&run, won, last, seed);
         elections += (0..3)
             .filter_map(|n| run.node_tick(last, NodeId(n)))
             .map(|nt| nt.instance.rows(won).count())
             .sum::<usize>();
     }
-    assert!(elections > 30, "only {elections} wins across the runs: the faults stopped every election");
+    assert!(
+        elections > 30,
+        "only {elections} wins across the runs: the faults stopped every election"
+    );
 }

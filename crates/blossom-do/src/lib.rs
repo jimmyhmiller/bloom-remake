@@ -241,6 +241,7 @@ impl Object {
                 Ok(())
             }),
             externs: Arc::new(blossom_std_host::registry().map_err(|e| e.to_string())?),
+            hibernation: None,
         })
         .map_err(|e| e.to_string())?;
         Ok(Object { node, kv, entropy })

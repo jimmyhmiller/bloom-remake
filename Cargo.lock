@@ -429,6 +429,7 @@ dependencies = [
  "blossom-schema",
  "blossom-sim",
  "blossom-smt",
+ "blossom-statestore",
  "blossom-std-host",
  "blossom-std-src",
  "blossom-store",
@@ -523,6 +524,7 @@ dependencies = [
  "blossom-trace",
  "blossom-value",
  "blossom-wire",
+ "serde",
  "thiserror",
 ]
 
@@ -584,6 +586,7 @@ dependencies = [
  "blossom-node",
  "blossom-oracle",
  "blossom-schema",
+ "blossom-statestore",
  "blossom-store",
  "blossom-trace",
  "blossom-value",

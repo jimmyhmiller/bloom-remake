@@ -81,12 +81,21 @@ fn deletion_work(n: u64) -> (u64, u64, usize, usize) {
 fn deleting_rows_costs_the_rows_deleted_not_the_rows_kept() {
     let (k1, s1, left1, _) = deletion_work(2_000);
     let (k2, s2, left2, _) = deletion_work(20_000);
-    assert!(k1 >= 50 && s1 >= 50, "the deleting ticks examined {k1} and {s1} rows: the measure counts nothing");
+    assert!(
+        k1 >= 50 && s1 >= 50,
+        "the deleting ticks examined {k1} and {s1} rows: the measure counts nothing"
+    );
     assert_eq!(left1, 2_000 - 100);
     assert_eq!(left2, 20_000 - 100);
     // Ten times the rows kept: about the same work to delete a hundred of them.
-    assert!(k2 <= k1 * 2 + 50, "by key: {k2} rows examined with 20000 kept against {k1} with 2000");
-    assert!(s2 <= s1 * 2 + 50, "sweep: {s2} rows examined with 20000 kept against {s1} with 2000");
+    assert!(
+        k2 <= k1 * 2 + 50,
+        "by key: {k2} rows examined with 20000 kept against {k1} with 2000"
+    );
+    assert!(
+        s2 <= s1 * 2 + 50,
+        "sweep: {s2} rows examined with 20000 kept against {s1} with 2000"
+    );
 }
 
 #[test]
@@ -95,5 +104,8 @@ fn a_table_carried_by_its_frame_is_held_once() {
     // not once as the table and again as the state the next tick starts from.
     let (_, _, _, held) = deletion_work(20_000);
     assert!(held >= 20_000, "the engine holds {held} rows: fewer than the table's");
-    assert!(held <= 20_000 + 100, "the engine holds {held} rows for a table of 20000");
+    assert!(
+        held <= 20_000 + 100,
+        "the engine holds {held} rows for a table of 20000"
+    );
 }

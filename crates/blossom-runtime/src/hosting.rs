@@ -654,6 +654,7 @@ impl Host {
                     .into())
                 }),
                 externs: self.externs.clone(),
+                hibernation: None,
             })?;
             self.objects.insert(m.clone(), object);
             bump(&self.stats.opened, 1);

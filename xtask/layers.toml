@@ -115,7 +115,8 @@ deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema", "blosso
 
 [crates.blossom-runtime]
 layer = "L3"
-deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-kernel", "blossom-engine", "blossom-wire", "blossom-store", "blossom-trace", "blossom-node"]
+# blossom-statestore: stateless hosting (docs/design/STATELESS.md), objects on an external state store.
+deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-kernel", "blossom-engine", "blossom-wire", "blossom-store", "blossom-statestore", "blossom-trace", "blossom-node"]
 
 [crates.blossom-sim]
 layer = "L3"

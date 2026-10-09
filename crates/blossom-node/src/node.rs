@@ -316,10 +316,82 @@ fn view_presence(views: &BTreeMap<RelId, Vec<(Row, u64, u64)>>) -> (Vec<Row>, Ve
     (came, went)
 }
 
+/// A node's state between two requests of a stateless host (docs/design/STATELESS.md §5a): what a restart loses and
+/// a hibernation keeps. Its durable rows are not in it (they are in its store): its carried volatile rows, the bytes
+/// of the blobs they hold that are not durable, its timers, and its clock.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Hibernation {
+    pub carried: Vec<(RelId, Vec<Row>)>,
+    pub blobs: Vec<(blossom_value::BlobRef, Vec<u8>)>,
+    pub timers: crate::timers::TimerImage,
+    pub last_now: Instant,
+}
+
 impl<E: Executor> Node<E> {
     /// Boots a node of `program` (the program the executor runs) from recovered state: the executor starts from the
     /// durable rows (volatile state does not survive a restart).
-    pub fn boot(cfg: NodeConfig, program: &ValidatedProgram, mut exec: E, boot: Boot) -> Result<Node<E>, NodeError> {
+    pub fn boot(cfg: NodeConfig, program: &ValidatedProgram, exec: E, boot: Boot) -> Result<Node<E>, NodeError> {
+        Node::boot_from(cfg, program, exec, boot, None)
+    }
+
+    /// Resumes a node that hibernated (docs/design/STATELESS.md §5a): from its store's state and `h`, as if it had
+    /// never stopped. Its boot tick ran before it hibernated, so neither `boot` nor `recovered` holds again.
+    pub fn resume(
+        cfg: NodeConfig,
+        program: &ValidatedProgram,
+        exec: E,
+        boot: Boot,
+        h: Hibernation,
+    ) -> Result<Node<E>, NodeError> {
+        Node::boot_from(cfg, program, exec, boot, Some(h))
+    }
+
+    /// The node's state between requests: taken when it is quiescent (every message taken, nothing staged).
+    pub fn hibernate(&self) -> Result<Hibernation, NodeError> {
+        if !self.booted
+            || self.staged
+            || !self.inbox.is_empty()
+            || !self.inputs.is_empty()
+            || !self.parked.is_empty()
+            || self.state != NodeState::Running
+        {
+            return Err(internal_error!("a node hibernates only when it is running and quiescent").into());
+        }
+        let carried: Vec<(RelId, Vec<Row>)> = self
+            .exec
+            .carried()?
+            .rels
+            .into_iter()
+            .filter(|(r, rows)| !self.durable.contains(r) && !rows.is_empty())
+            .map(|(r, rows)| (r, rows.into_iter().collect()))
+            .collect();
+        let mut held = BTreeSet::new();
+        for (_, rows) in &carried {
+            row_blobs(rows, &mut held);
+        }
+        let mut blobs = Vec::new();
+        for b in held.into_iter().filter(|b| !self.durable_blobs.contains(b)) {
+            let bytes = self
+                .blob_cache
+                .get(&b)
+                .ok_or_else(|| internal_error!("a carried row holds blob {}, whose bytes are gone", b.hex()))?;
+            blobs.push((b, bytes.to_vec()));
+        }
+        Ok(Hibernation {
+            carried,
+            blobs,
+            timers: self.timers.image(),
+            last_now: self.last_now,
+        })
+    }
+
+    fn boot_from(
+        cfg: NodeConfig,
+        program: &ValidatedProgram,
+        mut exec: E,
+        boot: Boot,
+        hibernation: Option<Hibernation>,
+    ) -> Result<Node<E>, NodeError> {
         let p = program.get();
         let mut boot_rel = None;
         let mut recovered_rel = None;
@@ -351,8 +423,14 @@ impl<E: Executor> Node<E> {
         }
         let schema = DurableSchema::of(p);
         let streams = StreamInbox::new(node_streams(p, cfg.role), cfg.max_stream_bytes);
+        let mut carried = Instance::default();
+        if let Some(h) = &hibernation {
+            for (rel, rows) in &h.carried {
+                carried.rels.insert(*rel, rows.iter().cloned().collect());
+            }
+        }
         exec.reset_on(
-            Instance::default(),
+            carried,
             boot.database.clone(),
             blossom_engine::Resume {
                 statics: cfg.statics.clone(),
@@ -361,15 +439,20 @@ impl<E: Executor> Node<E> {
         )?;
         // The executor starts on the recovered rows, which are also the released ones. Every blob the store holds is
         // durable; those no row holds are candidates for collection.
-        let carried_refs = boot.database.blob_counts()?;
+        let mut carried_refs = boot.database.blob_counts()?;
         let released_refs = carried_refs.clone();
+        if let Some(h) = &hibernation {
+            for (_, rows) in &h.carried {
+                count_blobs(&mut carried_refs, rows, true)?;
+            }
+        }
         let candidates = boot
             .stored
             .iter()
             .filter(|b| !carried_refs.contains_key(*b))
             .copied()
             .collect();
-        Ok(Node {
+        let mut node = Node {
             blob_cache: BTreeMap::new(),
             recent_blobs: BTreeMap::new(),
             carried_refs,
@@ -406,7 +489,18 @@ impl<E: Executor> Node<E> {
             released: None,
             halting: false,
             state: NodeState::Running,
-        })
+        };
+        if let Some(h) = hibernation {
+            node.timers.restore(&h.timers)?;
+            node.booted = true;
+            node.recovered = false;
+            node.last_now = node.last_now.max(h.last_now);
+            for (b, bytes) in h.blobs {
+                node.cache_bytes += bytes.len() as u64;
+                node.blob_cache.insert(b, Arc::from(bytes));
+            }
+        }
+        Ok(node)
     }
 
     pub fn id(&self) -> NodeId {

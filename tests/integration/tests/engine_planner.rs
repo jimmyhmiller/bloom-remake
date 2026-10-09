@@ -97,11 +97,25 @@ fn differential_on(name: &str, nodes: &[NodeSpec], inputs: &[(u64, u32, &str, Ve
             }
             assert_eq!(a.rounds.len(), b.rounds.len(), "{name}");
         }
-        (Err(SimError::Node { tick: t1, error: e1, .. }), Err(SimError::Node { tick: t2, error: e2, .. })) => {
-            assert_eq!(t1, t2, "{name}: the oracle failed at {t1:?} ({e1}), the engine at {t2:?} ({e2})");
+        (
+            Err(SimError::Node {
+                tick: t1, error: e1, ..
+            }),
+            Err(SimError::Node {
+                tick: t2, error: e2, ..
+            }),
+        ) => {
+            assert_eq!(
+                t1, t2,
+                "{name}: the oracle failed at {t1:?} ({e1}), the engine at {t2:?} ({e2})"
+            );
             assert_eq!(code_of(&reference), code_of(&mine), "{name}: {e1} against {e2}");
         }
-        (a, b) => panic!("{name}: the oracle gave {:?}, the engine {:?}", a.as_ref().err(), b.as_ref().err()),
+        (a, b) => panic!(
+            "{name}: the oracle gave {:?}, the engine {:?}",
+            a.as_ref().err(),
+            b.as_ref().err()
+        ),
     }
     match reference {
         Ok(run) => Outcome::Ran(run),
@@ -126,7 +140,10 @@ fn code_of(r: &Result<SyncRun, SimError>) -> Option<String> {
 
 #[test]
 fn a_hoisted_let_raises_only_for_complete_valuations() {
-    assert!(matches!(differential("hoisted_let_no_completion.bls", &[], 1), Outcome::Ran(_)));
+    assert!(matches!(
+        differential("hoisted_let_no_completion.bls", &[], 1),
+        Outcome::Ran(_)
+    ));
     assert!(matches!(
         differential("hoisted_let_completed.bls", &[], 1),
         Outcome::Failed { code, .. } if code == "BLSR004"
@@ -153,7 +170,14 @@ fn range_probes_follow_inserts_deletes_and_a_moving_bound() {
     for i in 1..=12u64 {
         inputs.push((1, "add", i));
     }
-    inputs.extend([(3, "mark", 2), (4, "drop", 4), (5, "mark", 6), (6, "drop", 8), (6, "add", 20), (7, "mark", 17)]);
+    inputs.extend([
+        (3, "mark", 2),
+        (4, "drop", 4),
+        (5, "mark", 6),
+        (6, "drop", 8),
+        (6, "add", 20),
+        (7, "mark", 17),
+    ]);
     let Outcome::Ran(run) = differential("range_probe.bls", &inputs, 9) else {
         panic!("range_probe.bls failed");
     };
@@ -219,15 +243,24 @@ fn a_point_cell_changing_its_contribution_is_not_a_conflict() {
     }];
     let set = [(2, 0, "set", vec![u8v(3)])];
     let set64 = [(2, 0, "set", vec![Value::Int(IntValue::U64(3))])];
-    assert!(matches!(differential_on("point_scratch_changes.bls", &solo, &set64, 4), Outcome::Ran(_)));
-    assert!(matches!(differential_on("point_view_changes.bls", &solo, &set, 4), Outcome::Ran(_)));
+    assert!(matches!(
+        differential_on("point_scratch_changes.bls", &solo, &set64, 4),
+        Outcome::Ran(_)
+    ));
+    assert!(matches!(
+        differential_on("point_view_changes.bls", &solo, &set, 4),
+        Outcome::Ran(_)
+    ));
     let pair: Vec<NodeSpec> = (0..2)
         .map(|i| NodeSpec {
             name: format!("p{i}"),
             role: Some("P".to_owned()),
         })
         .collect();
-    assert!(matches!(differential_on("point_send_changes.bls", &pair, &set, 4), Outcome::Ran(_)));
+    assert!(matches!(
+        differential_on("point_send_changes.bls", &pair, &set, 4),
+        Outcome::Ran(_)
+    ));
 }
 
 /// Rules that read the time only by comparing `now()` with an instant (each operator, `now()` on either side, under
@@ -235,7 +268,13 @@ fn a_point_cell_changing_its_contribution_is_not_a_conflict() {
 /// they read changes and the time is before their next flip, and must re-evaluate exactly at the flip.
 #[test]
 fn rules_skipped_until_the_time_flips_them_agree_with_the_oracle() {
-    let inputs = [(1, "seen", 1), (2, "seen", 2), (6, "forget", 1), (7, "seen", 1), (9, "forget", 2)];
+    let inputs = [
+        (1, "seen", 1),
+        (2, "seen", 2),
+        (6, "forget", 1),
+        (7, "seen", 1),
+        (9, "forget", 2),
+    ];
     let Outcome::Ran(run) = differential("time_guards.bls", &inputs, 14) else {
         panic!("time_guards.bls failed");
     };
@@ -243,7 +282,10 @@ fn rules_skipped_until_the_time_flips_them_agree_with_the_oracle() {
     let artifact = compile("time_guards.bls");
     let fresh = artifact.rel_named("fresh").unwrap();
     let count = |t: u64| run.node_tick(Tick(t), NodeId(0)).unwrap().instance.rows(fresh).count();
-    assert!((3..6).any(|t| count(t) != count(t + 1)), "fresh never changed between inputs");
+    assert!(
+        (3..6).any(|t| count(t) != count(t + 1)),
+        "fresh never changed between inputs"
+    );
 }
 
 #[test]
@@ -253,8 +295,16 @@ fn rand_range_draws_spans_above_2_64_on_the_engine() {
         role: None,
     }];
     let big = 100_000_000_000_000_000_000i128;
-    let go = [(1, 0, "go", vec![Value::Int(IntValue::I128(-big)), Value::Int(IntValue::I128(big))])];
-    assert!(matches!(differential_on("rand_range_wide.bls", &solo, &go, 2), Outcome::Ran(_)));
+    let go = [(
+        1,
+        0,
+        "go",
+        vec![Value::Int(IntValue::I128(-big)), Value::Int(IntValue::I128(big))],
+    )];
+    assert!(matches!(
+        differential_on("rand_range_wide.bls", &solo, &go, 2),
+        Outcome::Ran(_)
+    ));
 }
 
 /// A lattice reply channel merges per session and key, like one to a node (§14.2): two contributions to one key in a
@@ -372,16 +422,34 @@ fn a_recursive_chain_agrees_with_the_oracle() {
 #[test]
 fn mutual_recursion_agrees_with_the_oracle() {
     let mut inputs: Vec<(u64, &str, u64)> = (0..17).map(|x| (0, "link", x)).collect();
-    inputs.extend([(1, "start", 0), (2, "unlink", 3), (3, "start", 5), (4, "unlink", 0), (5, "link", 3)]);
-    assert!(matches!(differential("recursive_mutual.bls", &inputs, 7), Outcome::Ran(_)));
+    inputs.extend([
+        (1, "start", 0),
+        (2, "unlink", 3),
+        (3, "start", 5),
+        (4, "unlink", 0),
+        (5, "link", 3),
+    ]);
+    assert!(matches!(
+        differential("recursive_mutual.bls", &inputs, 7),
+        Outcome::Ran(_)
+    ));
 }
 
 /// A table its own rules extend within the tick, with rows carried and seeded from outside the recursion.
 #[test]
 fn a_recursive_table_with_carried_rows_agrees_with_the_oracle() {
     let mut inputs: Vec<(u64, &str, u64)> = (0..13).map(|x| (0, "link", x)).collect();
-    inputs.extend([(1, "seed", 0), (2, "unlink", 1), (3, "seed", 7), (4, "unlink", 7), (5, "seed", 2)]);
-    assert!(matches!(differential("recursive_table.bls", &inputs, 7), Outcome::Ran(_)));
+    inputs.extend([
+        (1, "seed", 0),
+        (2, "unlink", 1),
+        (3, "seed", 7),
+        (4, "unlink", 7),
+        (5, "seed", 2),
+    ]);
+    assert!(matches!(
+        differential("recursive_table.bls", &inputs, 7),
+        Outcome::Ran(_)
+    ));
 }
 
 /// A recursive step that divides by zero partway along the chain: the engine fails at the oracle's tick with its
@@ -390,7 +458,10 @@ fn a_recursive_table_with_carried_rows_agrees_with_the_oracle() {
 fn an_error_inside_a_recursion_is_the_oracles() {
     let mut inputs: Vec<(u64, &str, u64)> = (0..15).map(|b| (0, "add", b)).collect();
     inputs.push((1, "ask", 1000));
-    assert!(matches!(differential("recursive_error.bls", &inputs, 3), Outcome::Failed { .. }));
+    assert!(matches!(
+        differential("recursive_error.bls", &inputs, 3),
+        Outcome::Failed { .. }
+    ));
     let mut short: Vec<(u64, &str, u64)> = (0..15).map(|b| (0, "add", b)).collect();
     short.push((1, "ask", 15));
     differential("recursive_error.bls", &short, 3);
@@ -411,23 +482,24 @@ fn chain_work(n: u64) -> u64 {
     let mut engine = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg).unwrap();
     let rel = |r: &str| artifact.rel_named(r).unwrap();
     let u = |x: u64| -> blossom_ir::tick::Row { Arc::from(vec![Value::Int(IntValue::U64(x))]) };
-    let step = |engine: &mut blossom_engine::Engine, tick: u64, events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)>| {
-        engine
-            .step(
-                &StepInput {
-                    node: NodeId(0),
-                    incarnation: 1,
-                    tick: Tick(tick),
-                    now: Instant(tick as i64),
-                    events: &events,
-                    delivered: &[],
-                    ingress: &[],
-                    blobs: &blossom_value::NoBlobs,
-                },
-                &[],
-            )
-            .unwrap();
-    };
+    let step =
+        |engine: &mut blossom_engine::Engine, tick: u64, events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)>| {
+            engine
+                .step(
+                    &StepInput {
+                        node: NodeId(0),
+                        incarnation: 1,
+                        tick: Tick(tick),
+                        now: Instant(tick as i64),
+                        events: &events,
+                        delivered: &[],
+                        ingress: &[],
+                        blobs: &blossom_value::NoBlobs,
+                    },
+                    &[],
+                )
+                .unwrap();
+        };
     step(&mut engine, 0, (0..n).map(|b| (rel("add"), u(b))).collect());
     let before = engine.rows_examined();
     step(&mut engine, 1, vec![(rel("ask"), u(u64::MAX))]);
@@ -443,7 +515,10 @@ fn chain_work(n: u64) -> u64 {
 #[test]
 fn a_recursive_chain_costs_its_length_not_its_square() {
     let (small, large) = (chain_work(400), chain_work(800));
-    assert!(large < 3 * small, "a chain of 400 examined {small} rows, of 800 {large}");
+    assert!(
+        large < 3 * small,
+        "a chain of 400 examined {small} rows, of 800 {large}"
+    );
     assert!(large < 40 * 800, "a chain of 800 examined {large} rows");
 }
 
@@ -456,12 +531,18 @@ fn a_binding_keys_a_probe_only_past_checks_that_cannot_fail() {
         differential("key_after_fallible.bls", &fails, 2),
         Outcome::Failed { tick: Tick(1), code } if code == "BLSR004"
     ));
-    let Outcome::Ran(run) = differential("key_after_fallible.bls", &[(0, "put", 6), (0, "put", 7), (1, "go", 5)], 2)
-    else {
+    let Outcome::Ran(run) = differential(
+        "key_after_fallible.bls",
+        &[(0, "put", 6), (0, "put", 7), (1, "go", 5)],
+        2,
+    ) else {
         panic!("key_after_fallible.bls failed without a zero")
     };
     let u = |x: u64| Value::Int(IntValue::U64(x));
-    assert_eq!(rows_at(&run, "key_after_fallible.bls", "out", 1), vec![vec![u(5), u(6)]]);
+    assert_eq!(
+        rows_at(&run, "key_after_fallible.bls", "out", 1),
+        vec![vec![u(5), u(6)]]
+    );
 }
 
 /// A recursion that never converges fails with BLSR007 once the rounds reach the bound (CR-53); the semi-naive
@@ -479,7 +560,10 @@ fn a_recursion_that_never_converges_fails_at_the_round_bound() {
         ..blossom_engine::EngineConfig::default()
     };
     let mut engine = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg).unwrap();
-    let events = vec![(artifact.rel_named("start").unwrap(), Arc::from(vec![Value::Int(IntValue::U64(0))]))];
+    let events = vec![(
+        artifact.rel_named("start").unwrap(),
+        Arc::from(vec![Value::Int(IntValue::U64(0))]),
+    )];
     let r = engine.step(
         &StepInput {
             node: NodeId(0),
@@ -527,7 +611,12 @@ fn bounded_tick(
     let engine = EngineEvaluator::new(artifact.program.clone(), cfg);
     let events: Vec<(blossom_base::RelId, blossom_ir::tick::Row)> = events
         .iter()
-        .map(|(r, v)| (artifact.rel_named(r).unwrap(), Arc::from(vec![Value::Int(IntValue::U64(*v))])))
+        .map(|(r, v)| {
+            (
+                artifact.rel_named(r).unwrap(),
+                Arc::from(vec![Value::Int(IntValue::U64(*v))]),
+            )
+        })
         .collect();
     let carried = Instance::default();
     let input = TickInput {
@@ -575,6 +664,9 @@ fn semi_naive_rounds_are_the_naive_rounds() {
             outcomes.insert(o.as_ref().err().cloned().unwrap_or_else(|| "converged".into()));
         }
         // The sweep reaches both sides of the bound.
-        assert!(outcomes.contains("BLSR007") && outcomes.len() > 1, "{name}: {outcomes:?}");
+        assert!(
+            outcomes.contains("BLSR007") && outcomes.len() > 1,
+            "{name}: {outcomes:?}"
+        );
     }
 }

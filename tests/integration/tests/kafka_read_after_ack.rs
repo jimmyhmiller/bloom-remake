@@ -162,22 +162,13 @@ impl Broker {
         let exec: Box<dyn Executor> =
             Box::new(blossom_engine::Engine::new(self.artifact.program.clone(), NodeId(0), ecfg).unwrap());
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
-        ManualDriver::new(
-            node,
-            &self.artifact.program,
-            &self.schema,
-            self.names.clone(),
-            opened,
-        )
+        ManualDriver::new(node, &self.artifact.program, &self.schema, self.names.clone(), opened)
     }
 }
 
 /// The broker's stream writes in released ticks, by connection.
 #[cfg(test)]
-fn writes(
-    d: &ManualDriver<Box<dyn Executor>>,
-    ticks: Vec<blossom_node::node::ReleasedTick>,
-) -> Vec<(ConnId, Vec<u8>)> {
+fn writes(d: &ManualDriver<Box<dyn Executor>>, ticks: Vec<blossom_node::node::ReleasedTick>) -> Vec<(ConnId, Vec<u8>)> {
     let blobs = d.node.blobs();
     let mut out = Vec::new();
     for t in ticks {

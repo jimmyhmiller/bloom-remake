@@ -176,6 +176,25 @@ Two instances racing on one object make progress: each conflict means another co
 because a node's input is the request alone: a page's frames carry their own numbers, so running the same `MSG` again
 against the state that won delivers it once (the link drops a batch it took, CLIENTS.md §3).
 
+## 5a. Hibernation: a request boundary is not a restart
+
+Between two requests an object's node does not crash; it pauses. A restart (a process that dies and recovers) loses
+the node's volatile tables and runs its `boot` and `recovered` events, and its pages' links drop; a pause must lose
+nothing, or a program behaves differently on a stateless host than in one process. (The keyed chat showed it: its
+`online` table is volatile, so a room loaded by another instance fanned lines out to nobody while its pages' links,
+kept in the store, said they were still connected.)
+
+So each commit also writes the node's **hibernation** (`H/n`, `blossom_node::Hibernation`): the carried rows of its
+volatile relations, the bytes of the non-durable blobs they hold, its timers' state and its clock. A load recovers the
+node's store as on any start, then resumes the node from its hibernation (`Node::resume`): the executor starts from
+the durable rows and the hibernated volatile ones, the timers keep their phase, and neither `boot` nor `recovered`
+holds again, as for a node that never stopped. A node hibernates only when quiescent (every message it was given
+taken, nothing staged), which it is at the end of every request. An object never restarts from its program's point of
+view: its commits are atomic, so a host that dies mid-request loses only an attempt that never committed.
+
+The cost is the volatile state's size on every commit that changes it; a program whose volatile tables are large pays
+for it per request.
+
 ## 6. Links without a connection
 
 On `blossom run` and on Durable Objects, a page's link lives in the node's memory: the numbering, the replay buffer of

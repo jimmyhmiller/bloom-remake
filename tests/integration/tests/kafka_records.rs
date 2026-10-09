@@ -61,7 +61,11 @@ fn batch(rng: &mut Rng, n: usize, compressed: bool) -> Vec<u8> {
             // A producer without idempotence sends base sequence -1; the encoder derives the rest from it.
             sequence: i as i32 - 1,
             timestamp: 1_700_000_000_000 + rng.below(1000) as i64,
-            key: if rng.below(2) == 0 { None } else { Some(Bytes::from(rng.bytes(20))) },
+            key: if rng.below(2) == 0 {
+                None
+            } else {
+                Some(Bytes::from(rng.bytes(20)))
+            },
             value: Some(Bytes::from(rng.bytes(200))),
             headers: Default::default(),
         })
@@ -69,7 +73,11 @@ fn batch(rng: &mut Rng, n: usize, compressed: bool) -> Vec<u8> {
     let mut buf = BytesMut::new();
     let options = RecordEncodeOptions {
         version: 2,
-        compression: if compressed { Compression::Gzip } else { Compression::None },
+        compression: if compressed {
+            Compression::Gzip
+        } else {
+            Compression::None
+        },
     };
     RecordBatchEncoder::encode_with_custom_compression(
         &mut buf,
@@ -118,7 +126,10 @@ fn run(artifact: &BlsArtifact, inputs: &[InputEvent]) -> SyncRun {
         .run_on(&engine, inputs, Tick(1), round, &FaultSchedule::default(), false)
         .unwrap();
     for (t, (a, b)) in reference.rounds.iter().zip(&mine.rounds).enumerate() {
-        assert_eq!(a[0].instance, b[0].instance, "tick {t}: the oracle and the engine differ");
+        assert_eq!(
+            a[0].instance, b[0].instance,
+            "tick {t}: the oracle and the engine differ"
+        );
     }
     reference
 }
@@ -146,7 +157,10 @@ fn rows(artifact: &BlsArtifact, run: &SyncRun, view: &str) -> BTreeSet<Vec<Value
 #[test]
 fn batches_split_check_and_take_offsets_as_kafka_reads_them() {
     let artifact = compile();
-    let (field, assign) = (artifact.rel_named("field").unwrap(), artifact.rel_named("assign").unwrap());
+    let (field, assign) = (
+        artifact.rel_named("field").unwrap(),
+        artifact.rel_named("assign").unwrap(),
+    );
     let mut rng = Rng(7);
     let mut inputs = Vec::new();
     // Per field: its id, the number of batches, and which are sound (`None`: malformed).
@@ -222,12 +236,17 @@ fn batches_split_check_and_take_offsets_as_kafka_reads_them() {
             Some(s) => Value::some(Value::Vec(s.iter().map(|x| Value::Bool(*x)).collect())),
         };
         let got = oks.iter().find(|r| r[0] == u(*id));
-        assert!(oks.contains(&vec![u(*id), want.clone()]), "field {id}: want {want:?}, got {got:?}");
+        assert!(
+            oks.contains(&vec![u(*id), want.clone()]),
+            "field {id}: want {want:?}, got {got:?}"
+        );
     }
     let assigned = rows(&artifact, &r, "v_assigned");
     for (id, b, base, epoch) in &assigns {
         let row = assigned.iter().find(|x| x[0] == u(*id)).unwrap();
-        let Value::Option(Some(out)) = &row[1] else { panic!("{row:?}") };
+        let Value::Option(Some(out)) = &row[1] else {
+            panic!("{row:?}")
+        };
         let Value::Bytes(out) = &**out else { panic!("{out:?}") };
         // Only the base offset and the leader epoch changed.
         assert_eq!(&out[..8], &base.to_be_bytes());

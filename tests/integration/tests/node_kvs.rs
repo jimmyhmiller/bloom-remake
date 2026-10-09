@@ -118,13 +118,7 @@ impl Kvs {
         cfg.halt = self.artifact.halt;
         let exec: Box<dyn Executor> = Box::new(OracleExecutor::new(self.oracle.clone()));
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
-        ManualDriver::new(
-            node,
-            &self.artifact.program,
-            &self.schema,
-            self.names.clone(),
-            opened,
-        )
+        ManualDriver::new(node, &self.artifact.program, &self.schema, self.names.clone(), opened)
     }
 
     fn put(&self, session: u64, id: u64, key: &str, val: &[u8]) -> Ingress {

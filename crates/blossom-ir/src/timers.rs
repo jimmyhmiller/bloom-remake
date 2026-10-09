@@ -185,7 +185,44 @@ pub struct TimerTable {
     timers: Vec<Timer>,
 }
 
+/// A timer table's state, as a host keeps it between requests (docs/design/STATELESS.md §5a): its anchor, the ticks
+/// run, the latest tick's clock, and whether each timer's guard held.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TimerImage {
+    pub boot: Instant,
+    pub ran: u64,
+    pub last: Option<Instant>,
+    /// Per timer, by relation: whether its guard held.
+    pub held: Vec<(RelId, bool)>,
+}
+
 impl TimerTable {
+    /// The table's state.
+    pub fn image(&self) -> TimerImage {
+        TimerImage {
+            boot: self.boot,
+            ran: self.ran,
+            last: self.last,
+            held: self.timers.iter().map(|t| (t.rel, t.held)).collect(),
+        }
+    }
+
+    /// Takes up a state [`TimerTable::image`] gave, of a table of the same timers.
+    pub fn restore(&mut self, image: &TimerImage) -> Result<(), TimerError> {
+        let same = image.held.len() == self.timers.len()
+            && image.held.iter().zip(&self.timers).all(|((rel, _), t)| *rel == t.rel);
+        if !same {
+            return Err(internal_error!("a timer image of other timers than the node's").into());
+        }
+        for ((_, held), t) in image.held.iter().zip(self.timers.iter_mut()) {
+            t.held = *held;
+        }
+        self.boot = image.boot;
+        self.ran = image.ran;
+        self.last = image.last;
+        Ok(())
+    }
+
     /// The timers of `program` that run on a node of `role`, anchored at `boot`.
     pub fn new(program: &Program, role: Option<RoleId>, boot: Instant) -> Result<TimerTable, TimerError> {
         let mut timers = Vec::new();

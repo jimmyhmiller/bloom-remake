@@ -19,6 +19,7 @@ blossom-store.workspace = true
 blossom-trace.workspace = true
 blossom-oracle.workspace = true
 thiserror.workspace = true
+serde.workspace = true
 blake3.workspace = true
 
 [lints]
