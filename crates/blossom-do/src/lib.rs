@@ -12,19 +12,24 @@
 //!
 //! - storage entries (`entries`, [`Object::take_writes`]): per entry `op: u8` (0 a value, 1 a deletion), `key_len:
 //!   u32`, the key (UTF-8), and for a value `len: u32` and its bytes;
-//! - output ([`Object::take_output`]): per item `kind: u8` (0 a frame, 1 a close), `conn: u64`, and for a frame `len:
-//!   u32` and its bytes.
+//! - output ([`Object::take_output`]): per item `kind: u8`; 0 a frame (`conn: u64`, `len: u32` and its bytes), 1 a
+//!   close (`conn: u64`), 2 a message to another object by RPC (the object's name and the sender's, each `len: u32`
+//!   and UTF-8, then `len: u32` and the frame).
+//!
+//! A deployment's objects are named (docs/design/KEYED.md §4): `node/NAME` runs the deployment's node `NAME`,
+//! `member/ROLE/KEY` the keyed member of `ROLE` named `KEY`, and `registry` mints its pages' tokens.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use blossom_artifact::bls::BlsArtifact;
 use blossom_front::api::{BlsError, NodeSpec, ParamBinding};
 use blossom_front::ded::LoadedFile;
 use blossom_front::modules::Loader;
 use blossom_runtime::RuntimeError;
 use blossom_runtime::deploy::{DeploymentSpec, ParamValue};
-use blossom_runtime::object::{ObjectConfig, ObjectNode, Output};
+use blossom_runtime::object::{ObjectConfig, ObjectNode, Output, Target};
 use blossom_store::{JournalKv, KvFs, KvStore};
 use blossom_value::Seed;
 use blossom_value::time::Instant;
@@ -46,6 +51,98 @@ impl Loader for Files<'_> {
             })
             .ok_or_else(|| format!("no file `{path}`"))
     }
+}
+
+/// A deployment's program, compiled from sources in memory for its nodes.
+fn compile(files: &BTreeMap<String, String>, deploy: &str) -> Result<(DeploymentSpec, BlsArtifact), String> {
+    let spec = DeploymentSpec::parse(deploy, Path::new("/")).map_err(|e| e.to_string())?;
+    let root = spec
+        .source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("the deployment's source {} names no file", spec.source.display()))?
+        .to_owned();
+    let nodes: Vec<NodeSpec> = spec
+        .nodes
+        .iter()
+        .map(|n| NodeSpec {
+            name: n.name.clone(),
+            role: n.role.clone(),
+        })
+        .collect();
+    let params: BTreeMap<String, ParamBinding> = spec.params.iter().map(|(k, v)| (k.clone(), param(v))).collect();
+    let (compiled, sources) = blossom_driver::bls::compile_with_loader(&root, &nodes, &params, &mut Files(files));
+    let (artifact, _warnings) = compiled.map_err(|e| rendered(e, &sources))?;
+    Ok((spec, artifact))
+}
+
+/// An object's name for a target of its messages.
+fn object_name(t: &Target) -> String {
+    match t {
+        Target::Node(n) => format!("node/{n}"),
+        Target::Member(m) => format!("member/{}/{}", m.role_name, m.key),
+    }
+}
+
+/// What the Worker serves for the deployment itself, no object needed: `/blossom/app.json`, each client role's part
+/// of the program, and the keyed role whose members the pages link to; and the registry's tokens.
+pub struct Site {
+    app: String,
+    clients: BTreeMap<String, Vec<u8>>,
+    keyed: Option<String>,
+}
+
+impl Site {
+    /// The site of the deployment `deploy` (its pages served by node `node`).
+    pub fn open(files: &BTreeMap<String, String>, deploy: &str, node: &str) -> Result<Site, String> {
+        let (spec, artifact) = compile(files, deploy)?;
+        let p = artifact.program.get();
+        let (me, _) = spec.node(node).map_err(|e| e.to_string())?;
+        let keyed = artifact
+            .roles
+            .get(me.0 as usize)
+            .copied()
+            .flatten()
+            .filter(|r| p.is_keyed(*r))
+            .and_then(|r| p.roles.get(r))
+            .map(|r| r.name.to_string());
+        let clients = blossom_runtime::members::project_clients(&artifact).map_err(|e| e.to_string())?;
+        let names: Vec<String> = clients.keys().cloned().collect();
+        let app = blossom_runtime::web::app_json(&spec, &names, node, blossom_runtime::web::Transport::WebSocket)?;
+        let mut desc: serde_json::Value = serde_json::from_str(&app).map_err(|e| e.to_string())?;
+        if let (Some(role), serde_json::Value::Object(fields)) = (&keyed, &mut desc) {
+            // The pages link to members, each with a token the registry gave it first.
+            fields.insert("keyed".into(), serde_json::Value::String(role.clone()));
+            fields.insert("tokens".into(), serde_json::Value::String("/blossom/token".into()));
+        }
+        Ok(Site {
+            app: serde_json::to_string(&desc).map_err(|e| e.to_string())?,
+            clients: clients
+                .into_iter()
+                .map(|(name, c)| (name, c.artifact.to_vec()))
+                .collect(),
+            keyed,
+        })
+    }
+
+    pub fn app_json(&self) -> &str {
+        &self.app
+    }
+
+    pub fn client_part(&self, role: &str) -> Option<&[u8]> {
+        self.clients.get(role).map(Vec::as_slice)
+    }
+
+    /// The keyed role whose members the pages link to, when the node serving them hosts one.
+    pub fn keyed_role(&self) -> Option<&str> {
+        self.keyed.as_deref()
+    }
+}
+
+/// A page's token for client role `role`, serial `serial`, signed for the deployment seeded `seed` (the registry
+/// object's mint).
+pub fn mint_token(seed: [u8; 16], role: &str, serial: u32) -> Vec<u8> {
+    blossom_runtime::members::signed_token(Seed(seed), role, serial)
 }
 
 /// A Durable Object's node.
@@ -81,35 +178,37 @@ pub fn instant_of_ms(ms: f64) -> Instant {
 }
 
 impl Object {
-    /// Starts the node `node` of the deployment `deploy` (a deployment spec's text; its `source` names the root among
-    /// `files`), its store the one `entries` hold (none on the object's first start).
+    /// Starts the object named `name` (`node/NAME` or `member/ROLE/KEY`) of the deployment `deploy` (a deployment
+    /// spec's text; its `source` names the root among `files`), its store the one `entries` hold (none on the
+    /// object's first start). A member's object runs it for the deployment's node of its role (its host).
     pub fn open(
         files: &BTreeMap<String, String>,
         deploy: &str,
-        node: &str,
+        name: &str,
         seed: [u8; 16],
         entries: &[u8],
         now: Instant,
         nonce: u64,
     ) -> Result<Object, String> {
-        let spec = DeploymentSpec::parse(deploy, Path::new("/")).map_err(|e| e.to_string())?;
-        let root = spec
-            .source
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| format!("the deployment's source {} names no file", spec.source.display()))?
-            .to_owned();
-        let nodes: Vec<NodeSpec> = spec
-            .nodes
-            .iter()
-            .map(|n| NodeSpec {
-                name: n.name.clone(),
-                role: n.role.clone(),
-            })
-            .collect();
-        let params: BTreeMap<String, ParamBinding> = spec.params.iter().map(|(k, v)| (k.clone(), param(v))).collect();
-        let (compiled, sources) = blossom_driver::bls::compile_with_loader(&root, &nodes, &params, &mut Files(files));
-        let (artifact, _warnings) = compiled.map_err(|e| rendered(e, &sources))?;
+        let (spec, artifact) = compile(files, deploy)?;
+        let (node, member) = if let Some(node) = name.strip_prefix("node/") {
+            (node.to_owned(), None)
+        } else if let Some((role, key)) = name.strip_prefix("member/").and_then(|r| r.split_once('/')) {
+            let p = artifact.program.get();
+            let id = p
+                .keyed_role_named(role)
+                .ok_or_else(|| format!("`{role}` is not a keyed role of the program"))?;
+            let host = spec
+                .nodes
+                .iter()
+                .zip(&artifact.roles)
+                .find(|(_, r)| **r == Some(id))
+                .map(|(n, _)| n.name.clone())
+                .ok_or_else(|| format!("the deployment has no node of the keyed role `{role}` to run its members"))?;
+            (host, Some(p.member(id, key)))
+        } else {
+            return Err(format!("`{name}` names no object (node/NAME or member/ROLE/KEY)"));
+        };
         let kv = Arc::new(JournalKv::load(decode_entries(entries)?));
         let fs = KvFs::open(kv.clone() as Arc<dyn KvStore>).map_err(|e| e.to_string())?;
         let entropy: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -117,11 +216,11 @@ impl Object {
         let node = ObjectNode::open(ObjectConfig {
             spec,
             artifact: Arc::new(artifact),
-            node: node.to_owned(),
-            member: None,
+            node,
+            member,
             members: Arc::new(blossom_ir::members::Members::open()),
             fs: Arc::new(fs),
-            dir: Path::new("/node").join(node),
+            dir: Path::new("/").join(name),
             seed: Seed(seed),
             now,
             nonce,
@@ -172,6 +271,22 @@ impl Object {
         self.node.closed(conn, now).map_err(|e| e.to_string())
     }
 
+    /// The node's committed rows of a durable relation, by its name (for tests and tools).
+    pub fn rows(&self, rel: &str) -> Result<Vec<Vec<blossom_value::Value>>, String> {
+        Ok(self
+            .node
+            .rows(rel)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| r.to_vec())
+            .collect())
+    }
+
+    /// A frame another object sent this one by RPC (`sender`: the deployment node that sent a `BATCH`).
+    pub fn rpc(&mut self, sender: Option<&str>, bytes: &[u8], now: Instant) -> Result<(), String> {
+        self.node.rpc_frame(sender, bytes, now).map_err(|e| e.to_string())
+    }
+
     pub fn wake(&mut self, now: Instant) -> Result<(), String> {
         self.node.wake(now).map_err(|e| e.to_string())
     }
@@ -193,8 +308,10 @@ impl Object {
     /// The frames to write and the connections to close (see the crate's documentation for the encoding).
     pub fn take_output(&mut self) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
+        let mut sends = Vec::new();
         for o in self.node.take_output() {
             match o {
+                Output::Send { to, rel, row, tick } => sends.push((to, rel, row, tick)),
                 Output::Frame { conn, bytes } => {
                     out.push(0);
                     out.extend_from_slice(&conn.to_le_bytes());
@@ -204,18 +321,77 @@ impl Object {
                     out.push(1);
                     out.extend_from_slice(&conn.to_le_bytes());
                 }
-                // Objects reach each other by RPC, which this prototype does not do yet.
-                Output::Send { .. } => {
-                    return Err(
-                        "a send to another node or a keyed member: an object reaches others by RPC, which \
-                                this prototype does not do yet (docs/design/KEYED.md §4, sub-slice 4)"
-                            .into(),
-                    );
-                }
             }
+        }
+        // Messages to other objects: the node's and members' (a member's frames name it; a node's RPC names it).
+        let sender = match self.node.member() {
+            Some(_) => String::new(),
+            None => self.node.name().to_owned(),
+        };
+        for (target, frame) in self.node.rpc_frames(&sends).map_err(|e| e.to_string())? {
+            out.push(2);
+            put_bytes(&mut out, object_name(&target).as_bytes())?;
+            put_bytes(&mut out, sender.as_bytes())?;
+            put_bytes(&mut out, &frame)?;
         }
         Ok(out)
     }
+}
+
+/// One item of [`Object::take_output`], as the Worker reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OutputItem {
+    Frame {
+        conn: u64,
+        bytes: Vec<u8>,
+    },
+    Close {
+        conn: u64,
+    },
+    /// A message to the object named `to`; `from` names the deployment node that sent it (empty for a member).
+    Rpc {
+        to: String,
+        from: String,
+        frame: Vec<u8>,
+    },
+}
+
+/// Reads [`Object::take_output`]'s bytes.
+pub fn decode_output(mut b: &[u8]) -> Result<Vec<OutputItem>, String> {
+    let mut out = Vec::new();
+    let text = |b: &mut &[u8]| -> Result<String, String> {
+        let n = take_len(b)?;
+        String::from_utf8(take(b, n)?.to_vec()).map_err(|_| "a name that is not UTF-8".to_string())
+    };
+    while let Some((&kind, rest)) = b.split_first() {
+        b = rest;
+        if kind == 2 {
+            let to = text(&mut b)?;
+            let from = text(&mut b)?;
+            let n = take_len(&mut b)?;
+            out.push(OutputItem::Rpc {
+                to,
+                from,
+                frame: take(&mut b, n)?.to_vec(),
+            });
+            continue;
+        }
+        let conn = u64::from_le_bytes(
+            take(&mut b, 8)?
+                .try_into()
+                .map_err(|_| "a short connection id".to_string())?,
+        );
+        if kind == 0 {
+            let n = take_len(&mut b)?;
+            out.push(OutputItem::Frame {
+                conn,
+                bytes: take(&mut b, n)?.to_vec(),
+            });
+        } else {
+            out.push(OutputItem::Close { conn });
+        }
+    }
+    Ok(out)
 }
 
 /// Storage writes as the Worker reads them: values, or `None` for deletions.

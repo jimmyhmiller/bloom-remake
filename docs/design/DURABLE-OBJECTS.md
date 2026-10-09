@@ -120,7 +120,8 @@ WebSocket accepted for hibernation; the link (CLIENTS.md §3) runs over it uncha
 The apps of APPS.md run on one server node. On Durable Objects the natural shape is an object per thing: per poll,
 per board, per game, so load and storage spread and each object stays small. Blossom has no way to say that today.
 
-A sketch, to be designed properly before anything is built:
+Built since (docs/design/KEYED.md, where it is called a *keyed* role, `role Game: keyed;`): the language, `blossom
+run`'s hosts, pages linked to members, and an object per member here (see §The prototype). The sketch it started from:
 
 ```blossom
 role Lobby;                    // one object, as today
@@ -192,12 +193,32 @@ does not.
 ## The prototype
 
 ```sh
-scripts/build-do.sh polls                     # or board, tictactoe, pixels
-cd do && npm ci && npx wrangler dev --port 8787
+scripts/build-do.sh polls                     # or board, tictactoe, pixels; `rooms Room` for a keyed role
+cd do && npm ci && npx wrangler dev --config build/polls/wrangler.toml --port 8787
 ```
 
-then open http://127.0.0.1:8787/ in two tabs. The page is the same browser host; everything under `/blossom/` goes to
-one object (`idFromName("main")`).
+then open http://127.0.0.1:8787/ in two tabs (rooms: `/?member=lunch`). The page is the same browser host. Each app
+builds into `do/build/APP` (its WebAssembly, page, sources, deployment, an entry module over `do/src/worker.js`, and
+its wrangler config), so apps build and run side by side.
+
+**Objects.** Every node of the deployment is an object, `node/NAME`; every member of a keyed role is one too,
+`member/ROLE/KEY`, created by the first request for it; and `registry` mints the pages' tokens. The Worker answers
+`/blossom/app.json`, the client parts and the stylesheet itself (`DoSite`: the program compiled once per isolate,
+no object), sends a page's link to its node's object, or with `?member=KEY` to that member's, and a token request to
+the registry. An object learns its name from its first request (a header the Worker sets) and keeps it in its
+storage. The deployment's seed is the Worker's secret `BLOSSOM_SEED` (`do/APP.dev.vars` locally), shared by every
+object: members' seeds, choices and tokens agree.
+
+**Page tokens.** A member's object cannot mint page ids alone: two rooms would give out the same one. So the registry
+object hands out serials, one per new page, and signs each token with a key derived from the seed (`signed_token`: a
+keyed BLAKE3 over the role and serial); any member's object checks a token without asking anyone, and a page's id is
+`#serial@s` wherever it links. A page fetches its token (`POST /blossom/token`, announced by `app.json`'s `tokens`)
+before it links; a token the deployment did not sign is refused (`REJECT token`), and the page gets a new one.
+
+**Messages between objects** are requests: a released tick's sends to other nodes and members leave its object as
+`BATCH` frames (from a node, whose name the request carries) or `FROM_MEMBER` frames (from a member), one request per
+frame to the destination object's `/blossom/deliver`, which the Worker never routes from outside. The output gate
+holds them until the tick's writes are durable; a failed one is a lost message, as Blossom's channels allow.
 
 - **`blossom-runtime::object::ObjectNode`**: one node of a deployment over any `Vfs`, with its client members'
   links, driven by calls: `frame` (a WebSocket message), `closed`, `wake` (the alarm). Each call runs the node's ticks
@@ -217,9 +238,12 @@ one object (`idFromName("main")`).
   false, and the program's greeting resends). A node fault closes every link and discards the call's writes; the next
   event starts the node from storage, as a crash and restart would.
 - **Tests**: tests/integration/tests/object_node.rs (polls on an `ObjectNode` over `KvFs`, two page engines exchanging
-  frames in memory, a restart from only the keys); tests/web/object.spec.mjs (polls on workerd with Chromium tabs:
-  votes through the object, workerd killed and started again over the same storage, the open tabs reconnect as the same
-  members, a new tab gets everything). `scripts/test-tiers.sh web` runs it.
+  frames in memory, a restart from only the keys); crates/blossom-do/tests/rpc.rs (a lobby node and keyed games as
+  objects over storages in memory, their messages routed by name: replies, member to member, a restart of every
+  object from its storage); tests/web/object.spec.mjs (polls on workerd with Chromium tabs: votes through the object,
+  workerd killed and started again over the same storage, the open tabs reconnect as the same members, a new tab gets
+  everything; rooms: two rooms, each its own object, tokens from the registry, a game played, workerd killed and both
+  rooms back). `scripts/test-tiers.sh web` runs them.
 
 Measured on this machine: the first request to a new object (compiling polls and opening its store) takes about 140
 ms, later ones about 3 ms; a pixel painted in one tab reaches the other in under 20 ms.
@@ -231,7 +255,10 @@ What the prototype does not do yet:
   database behind `ColdTables` with the Worker answering its queries.
 - **Resume across hibernation**: the replay buffer is memory, so every wake is a non-resumed reconnect.
 - **Precompiled programs**: an encoding of the whole artifact would remove the compile from every start.
-- **More than one object**: the keyed role (above) and RPC between objects.
+- **Messages between objects on workerd**: the requests are tested at the object API (rpc.rs) but no app on workerd
+  sends one yet (rooms talks only to its pages).
+- **A front for several hosts' pages**: on workerd every member is reachable from the one Worker; on `blossom run` a
+  page must reach the host that runs its member.
 
 ## The pieces, in order
 
@@ -245,7 +272,9 @@ Everything below can be built and tested on a laptop with `workerd`, the open-so
 3. **An object driver**: done, `ObjectNode` and do/src/worker.js (a thin JavaScript class over the wasm module).
 4. **The server side of the client link without threads**: done, shared with the runtime (`LinkConn`).
 5. **One app end to end**: done, polls on a local workerd with Playwright; the other three apps run too.
-6. **Way B**, then **the keyed role** (a design document of its own first: LANGUAGE §6.10, CLIENTS.md, the simulator).
+6. **The keyed role**: done (KEYED.md): an object per member, page tokens from a registry object, requests between
+   objects; rooms on a local workerd with Playwright.
+7. **Way B**.
 
 ## Sources
 

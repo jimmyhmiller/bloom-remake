@@ -66,6 +66,14 @@ pub enum Output {
     },
 }
 
+/// Where a message to another node goes when objects reach each other by RPC (Durable Objects, KEYED.md §4): a node of
+/// the deployment's object (by name), or a keyed member's.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Target {
+    Node(String),
+    Member(MemberRef),
+}
+
 /// Fills a buffer with secret random bytes.
 pub type Random = Box<dyn FnMut(&mut [u8]) -> Result<(), RuntimeError> + Send>;
 
@@ -169,6 +177,10 @@ pub struct ObjectNode {
     /// The keyed member this object runs, if it runs one, and this node as rows addressed to it name it.
     member: Option<MemberRef>,
     me_value: blossom_value::Value,
+    /// The deployment's node this object is, or hosts its member for (a member's pages' ids are that node's).
+    host: NodeId,
+    /// Each deployment node's principal, by id.
+    principals: Vec<String>,
     pub stats: ObjectStats,
 }
 
@@ -289,6 +301,8 @@ impl ObjectNode {
             random: cfg.random,
             next_conn: 0,
             me_value: members.value(me),
+            host,
+            principals: spec.nodes.iter().map(|n| n.principal.clone()).collect(),
             member: cfg.member.clone(),
             members_table: members,
             stats: ObjectStats::default(),
@@ -423,9 +437,135 @@ impl ObjectNode {
         self.run(now)
     }
 
+    /// The keyed member this object runs, if it runs one.
+    pub fn member(&self) -> Option<&MemberRef> {
+        self.member.as_ref()
+    }
+
+    /// The deployment node this object is, or hosts its member for.
+    pub fn name(&self) -> &str {
+        self.names.get(self.host.0 as usize).map_or("", |n| n)
+    }
+
     /// This node's id: a deployment node's, or a keyed member's in the host's table.
     pub fn me(&self) -> NodeId {
         self.me
+    }
+
+    /// Frames for what the node sent other nodes and members (`Output::Send`s), when objects reach each other by
+    /// RPC: per destination object and channel, `BATCH`es from a deployment node (the RPC names the sender) or
+    /// `FROM_MEMBER`s from a keyed member.
+    pub fn rpc_frames(&self, sends: &[(NodeId, RelId, Row, u64)]) -> Result<Vec<(Target, Vec<u8>)>, RuntimeError> {
+        let p = self.artifact.program.get();
+        let codec = crate::net::wire_codec(p);
+        let mut by: BTreeMap<(Target, RelId, u64), Vec<&Row>> = BTreeMap::new();
+        for (to, rel, row, tick) in sends {
+            let target =
+                match self.members_table.get(*to) {
+                    Some(m) => Target::Member(m),
+                    None => Target::Node(self.names.get(to.0 as usize).map(|n| n.to_string()).ok_or_else(|| {
+                        RuntimeError::Fault(format!("a send to node {}, not in the deployment", to.0))
+                    })?),
+                };
+            by.entry((target, *rel, *tick)).or_default().push(row);
+        }
+        let mut out = Vec::new();
+        for ((target, rel, tick), rows) in by {
+            let sid = self
+                .catalog
+                .sid(rel)
+                .ok_or_else(|| internal_error!("{rel:?} is not a channel"))?;
+            let (batches, oversized) = crate::net::batches(&codec, p, sid, rel, tick, &rows)?;
+            bump(&self.stats.dropped_unroutable, oversized);
+            for batch in batches {
+                let frame = match &self.member {
+                    Some(m) => Frame::FromMember {
+                        role: m.role.raw(),
+                        key: m.key.to_string(),
+                        batch,
+                    },
+                    None => Frame::Batch(batch),
+                };
+                out.push((target.clone(), frame.encode()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// A frame another object of the deployment sent this one by RPC: a `BATCH` from the deployment's node `sender`
+    /// (the RPC names it), or a `FROM_MEMBER` from a keyed member; then the ticks it makes ready. A frame that is
+    /// neither, or names no sender, is refused (counted), not a fault.
+    pub fn rpc_frame(&mut self, sender: Option<&str>, bytes: &[u8], now: Instant) -> Result<(), RuntimeError> {
+        let p = self.artifact.program.clone();
+        let program = p.get();
+        let frame = match Frame::parse(bytes, &WireLimits::default()) {
+            Ok(Some((f, used))) if used == bytes.len() => f,
+            _ => {
+                bump(&self.stats.rejected_schema, 1);
+                return Ok(());
+            }
+        };
+        let sender_node = |name: &str| self.names.iter().position(|n| **n == *name).map(|i| NodeId(i as u32));
+        let (from, via, batch) = match (frame, sender) {
+            (Frame::Batch(b), Some(name)) => match sender_node(name) {
+                Some(n) => (n, n, b),
+                None => {
+                    bump(&self.stats.dropped_unroutable, b.count);
+                    return Ok(());
+                }
+            },
+            (Frame::FromMember { role, key, batch }, _) => {
+                let m = crate::keyed::member_of(program, role, key)?;
+                let id = self
+                    .members_table
+                    .id(&m)
+                    .ok_or_else(|| RuntimeError::Fault("this object has given every keyed member id".into()))?;
+                // A member's principal is its role's host's: the deployment's first node of the role.
+                let host = self
+                    .artifact
+                    .roles
+                    .iter()
+                    .position(|r| *r == Some(m.role))
+                    .map_or(id, |i| NodeId(i as u32));
+                (id, host, batch)
+            }
+            _ => {
+                bump(&self.stats.rejected_schema, 1);
+                return Ok(());
+            }
+        };
+        let inbound = self.catalog.accept(&self.catalog.schemas());
+        let Some(&rel) = inbound.get(&batch.sid) else {
+            bump(&self.stats.rejected_schema, batch.count);
+            return Ok(());
+        };
+        let codec = crate::net::wire_codec(program);
+        let principal = self.principals.get(via.0 as usize).cloned().unwrap_or_default();
+        for row in crate::net::batch_rows(&codec, program, rel, &batch)? {
+            if row.first() != Some(&self.me_value) {
+                bump(&self.stats.dropped_unroutable, 1);
+                continue;
+            }
+            let role = match self.members_table.get(from) {
+                Some(m) => Some(m.role),
+                None => self.artifact.roles.get(from.0 as usize).copied().flatten(),
+            };
+            if self.driver.admits(
+                &self.acl,
+                self.oracle.static_facts(),
+                rel,
+                Source::Node {
+                    role,
+                    principal: &principal,
+                },
+            )? {
+                bump(&self.stats.delivered, 1);
+                self.driver.node.offer_delivery(Delivery { rel, from, row });
+            } else {
+                bump(&self.stats.rejected_acl, 1);
+            }
+        }
+        self.run(now)
     }
 
     fn close(&mut self, conn: u64) {
@@ -437,24 +577,38 @@ impl ObjectNode {
     }
 
     fn hello(&mut self, conn: u64, h: blossom_wire::frame::Hello) -> Result<(), RuntimeError> {
-        if self.member.is_some() {
-            // A host admits its members' pages (crate::hosting); an object that is a member of its own needs ids for
-            // them that name it.
-            return Err(blossom_base::unimplemented_error!(
-                "LANG-153",
-                "a page's link straight to an object that runs a keyed member (KEYED.md §4, sub-slice 4)"
-            )
-            .into());
-        }
         let (registry, me, random) = (&mut self.registry, self.me, &mut self.random);
-        let admitted = admit_with(
-            &self.id,
-            &self.catalog,
-            &self.client_roles,
-            &crate::members::no_keyed,
-            h,
-            &mut |role, token| identify_in(registry, me, role, token, random),
-        );
+        let admitted = match &self.member {
+            // A keyed member's pages bring tokens the deployment signed (one registry object minted them, KEYED.md):
+            // their ids are the host node's, so every member names a page alike.
+            Some(own) => {
+                let (seed, host) = (self.seed, self.host);
+                let own = own.clone();
+                let keyed = move |t: Option<&(String, String)>| match t {
+                    Some((role, key)) if *role == *own.role_name && *key == *own.key => Ok(Some(own.clone())),
+                    _ => Err((
+                        RejectReason::NotAllowed,
+                        format!("this object runs {}", blossom_ir::members::member_name(&own)),
+                    )),
+                };
+                admit_with(
+                    &self.id,
+                    &self.catalog,
+                    &self.client_roles,
+                    &keyed,
+                    h,
+                    &mut |role, token| crate::members::identify_signed(seed, host, role, token),
+                )
+            }
+            None => admit_with(
+                &self.id,
+                &self.catalog,
+                &self.client_roles,
+                &crate::members::no_keyed,
+                h,
+                &mut |role, token| identify_in(registry, me, role, token, random).map_err(AdmitError::Failed),
+            ),
+        };
         let a: Admitted = match admitted {
             Ok(a) => a,
             Err(AdmitError::Refused(reason, detail)) => {
@@ -493,7 +647,7 @@ impl ObjectNode {
             token: a.token,
             received: a.received,
             acked: a.acked,
-            keyed: None,
+            keyed: a.keyed,
             conn,
             link: Box::new(link),
         })
