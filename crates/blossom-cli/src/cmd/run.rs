@@ -134,6 +134,34 @@ fn write_stats(path: &std::path::Path, stats: &blossom_runtime::server::Stats) {
     }
 }
 
+/// Runs a host of keyed members until it stops.
+fn host(cfg: ServerConfig, args: &Args) -> ExitCode {
+    if args.stats.is_some() {
+        eprintln!("blossom run: `--stats` at a host of keyed members is not supported yet");
+        return Exit::Refused.into();
+    }
+    let hosting = match blossom_runtime::hosting::Hosting::start(cfg) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("blossom run: {e}");
+            return exit_of(&e).into();
+        }
+    };
+    println!(
+        "blossom: node {} ready: peers on {}, hosting keyed members (incarnation {})",
+        args.node, hosting.peer_addr, hosting.restarts
+    );
+    // The readiness line is how supervisors and tests know the node serves; a closed stdout is not fatal.
+    let _ = std::io::stdout().flush();
+    match hosting.wait() {
+        Ok(()) => Exit::Ok.into(),
+        Err(e) => {
+            eprintln!("blossom run: {e}");
+            exit_of(&e).into()
+        }
+    }
+}
+
 /// Runs the command.
 pub fn run(args: Args, cx: &Context) -> ExitCode {
     let _ = cx;
@@ -169,7 +197,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
             return Exit::Internal.into();
         }
     };
-    let server = match Server::start(ServerConfig {
+    let cfg = ServerConfig {
         spec,
         artifact,
         node: args.node.clone(),
@@ -178,13 +206,29 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         } else {
             OpenMode::Existing
         },
-        dir: args.store,
+        dir: args.store.clone(),
         backend: args.evaluator,
         externs,
         record: args.record.clone(),
         web,
         admin: args.admin,
-    }) {
+    };
+    // A node of a keyed role hosts that role's members (docs/design/KEYED.md).
+    let hosts = match cfg
+        .spec
+        .node(&args.node)
+        .and_then(|(me, _)| blossom_runtime::keyed::Routing::of(&cfg.spec, &cfg.artifact).map(|r| r.is_host(me)))
+    {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("blossom run: {e}");
+            return exit_of(&e).into();
+        }
+    };
+    if hosts {
+        return host(cfg, &args);
+    }
+    let server = match Server::start(cfg) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("blossom run: {e}");

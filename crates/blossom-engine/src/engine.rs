@@ -401,7 +401,7 @@ impl Engine {
                 }
                 // A keyed member's seed derives from its member name (`Game:"game-17"`), wherever it runs.
                 if let Some(m) = cfg.members.get(node) {
-                    let name = blossom_ir::members::member_name(p, m);
+                    let name = blossom_ir::members::member_name(p, &m);
                     own_seed = Some(
                         blossom_value::Seeds::derive(root, &name)
                             .map_err(|e| internal_error!("deriving the seed of member {name}: {e}"))?

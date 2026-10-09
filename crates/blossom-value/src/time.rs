@@ -51,6 +51,20 @@ impl NodeId {
             .then_some(NodeId(Self::CLIENT | server.0 << 20 | serial))
     }
 
+    /// The first id of the range a running node gives the keyed members it knows (docs/design/KEYED.md): below the
+    /// client ids, above every deployment's dense ids. Such an id never reaches a value.
+    pub const MEMBERS: u32 = 1 << 30;
+
+    /// The `i`th id of the keyed members' range; `None` past it.
+    pub fn member(i: u32) -> Option<NodeId> {
+        (i < Self::MEMBERS).then_some(NodeId(Self::MEMBERS | i))
+    }
+
+    /// Whether this is an id a running node gave a keyed member.
+    pub fn is_member(self) -> bool {
+        self.0 & (Self::CLIENT | Self::MEMBERS) == Self::MEMBERS
+    }
+
     /// Whether this is a client member's id.
     pub fn is_client(self) -> bool {
         self.0 & Self::CLIENT != 0

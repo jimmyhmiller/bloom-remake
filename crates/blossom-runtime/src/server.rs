@@ -462,10 +462,26 @@ impl Server {
         if names.len() != artifact.nodes.len() || names.iter().zip(&artifact.nodes).any(|(a, b)| **a != *b.as_str()) {
             return Err(internal_error!("the program was compiled for other nodes than the deployment's").into());
         }
-        crate::refuse_keyed(program)?;
         let (me, entry) = spec.node(&cfg.node)?;
         let role = artifact.roles.get(me.0 as usize).copied().flatten();
         let seed: Seed = spec.seed()?;
+        // Keyed members (docs/design/KEYED.md): this node gives those it meets ids as it meets them, and reaches each
+        // through the host that runs it.
+        let members = Arc::new(blossom_ir::members::Members::open());
+        let routing = Arc::new(crate::keyed::Routing::of(spec, &artifact)?);
+        if routing.is_host(me) {
+            return Err(RuntimeError::Config(format!(
+                "node {} hosts a keyed role: it runs that role's members (`Hosting::start`, as `blossom run` does)",
+                cfg.node
+            )));
+        }
+        if cfg.record.is_some() && !routing.is_empty() {
+            return Err(blossom_base::unimplemented_error!(
+                "LANG-153",
+                "recording a node of a program with keyed roles: a trace would name members by this incarnation's ids"
+            )
+            .into());
+        }
         let executors = Executors::new(
             cfg.backend,
             artifact.program.clone(),
@@ -473,6 +489,7 @@ impl Server {
             names.to_vec(),
             seed,
             cfg.externs.clone(),
+            members.clone(),
         )?
         .tiered(spec.tiered);
         let oracle = executors.oracle().clone();
@@ -690,6 +707,8 @@ impl Server {
                 next_session: Arc::new(AtomicU64::new(0)),
                 incarnations: Arc::new(Mutex::new(BTreeMap::new())),
                 spec: Arc::new(spec.clone()),
+                keyed: members.clone(),
+                routing: routing.clone(),
             };
             let c = ctx.clone();
             threads.push(spawn("peer-listener", move || accept_loop(peer_listener, c, false))?);
@@ -771,6 +790,8 @@ impl Server {
                 peers,
                 sessions,
                 members: MemberLinks::of(program),
+                keyed: members,
+                routing,
                 seed,
                 data: data.clone(),
                 inbox_cap,
@@ -872,7 +893,7 @@ impl Drop for Server {
     }
 }
 
-fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, RuntimeError> {
+pub(crate) fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<JoinHandle<()>, RuntimeError> {
     std::thread::Builder::new()
         .name(name.into())
         .spawn(f)
@@ -993,7 +1014,7 @@ fn committer(
 /// A peer writer: connect (retrying), handshake, then send frames until the connection breaks, and reconnect.
 /// Frames wait in the queue meanwhile (a delay, which channels allow); a full queue drops (an omission).
 #[allow(clippy::too_many_arguments)]
-fn peer_writer(
+pub(crate) fn peer_writer(
     addr: SocketAddr,
     id: Identity,
     me: NodeId,
@@ -1074,6 +1095,9 @@ struct Accept {
     next_session: Arc<AtomicU64>,
     /// The newest incarnation (restart count) seen of each peer (ARCHITECTURE §5.8).
     incarnations: Arc<Mutex<BTreeMap<u32, u64>>>,
+    /// The keyed members this node has met, and their hosts (docs/design/KEYED.md).
+    keyed: Arc<blossom_ir::members::Members>,
+    routing: Arc<crate::keyed::Routing>,
 }
 
 fn accept_loop(listener: TcpListener, ctx: Accept, clients: bool) {
@@ -1109,6 +1133,36 @@ fn accept_loop(listener: TcpListener, ctx: Accept, clients: bool) {
     }
 }
 
+/// Whether a peer's `HELLO` is another node's of the deployment, of no older an incarnation than one already seen
+/// (`stale_incarnation`, ARCHITECTURE §5.8).
+pub(crate) fn admit_peer(
+    h: &blossom_wire::frame::Hello,
+    me: NodeId,
+    nodes: usize,
+    incarnations: &Mutex<BTreeMap<u32, u64>>,
+) -> Result<(), (RejectReason, String)> {
+    match h.peer {
+        Peer::Node(n) if (n as usize) < nodes && n != me.0 => {
+            let mut seen = incarnations
+                .lock()
+                .map_err(|_| (RejectReason::Protocol, "internal: poisoned lock".to_string()))?;
+            let newest = seen.entry(n).or_insert(h.restarts);
+            if h.restarts < *newest {
+                return Err((
+                    RejectReason::NotAllowed,
+                    format!("stale incarnation {} of node {n}", h.restarts),
+                ));
+            }
+            *newest = h.restarts;
+            Ok(())
+        }
+        _ => Err((
+            RejectReason::NotAllowed,
+            format!("{:?} is not a peer of this node", h.peer),
+        )),
+    }
+}
+
 fn peer_reader(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
     let mut conn = Conn::new(stream)?;
     let nodes = ctx.spec.nodes.len();
@@ -1119,28 +1173,7 @@ fn peer_reader(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
         ctx.restarts,
         ctx.nonce,
         &ctx.catalog,
-        &|h| match h.peer {
-            Peer::Node(n) if (n as usize) < nodes && n != ctx.me.0 => {
-                // A HELLO from an older incarnation than one already seen is refused (`stale_incarnation`).
-                let mut seen = ctx
-                    .incarnations
-                    .lock()
-                    .map_err(|_| (RejectReason::Protocol, "internal: poisoned lock".to_string()))?;
-                let newest = seen.entry(n).or_insert(h.restarts);
-                if h.restarts < *newest {
-                    return Err((
-                        RejectReason::NotAllowed,
-                        format!("stale incarnation {} of node {n}", h.restarts),
-                    ));
-                }
-                *newest = h.restarts;
-                Ok(())
-            }
-            _ => Err((
-                RejectReason::NotAllowed,
-                format!("{:?} is not a peer of this node", h.peer),
-            )),
-        },
+        &|h| admit_peer(h, ctx.me, nodes, &ctx.incarnations),
     )?;
     conn.reader.get_ref().set_read_timeout(None).map_err(RuntimeError::Io)?;
     let Peer::Node(from) = hello.peer else {
@@ -1150,8 +1183,22 @@ fn peer_reader(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
     let program = ctx.artifact.program.get();
     let codec = net::wire_codec(program);
     while let Some(frame) = conn.read()? {
-        let Frame::Batch(b) = frame else {
-            continue;
+        // A batch from the peer, or one a keyed member it hosts sent (docs/design/KEYED.md): a member is a sender
+        // only through the host that runs it.
+        let (sender, b) = match frame {
+            Frame::Batch(b) => (from, b),
+            Frame::FromMember { role, key, batch } => {
+                let m = crate::keyed::member_of(program, role, key)?;
+                if ctx.routing.host_of(&m)? != from {
+                    bump(&ctx.stats.rejected_unknown_dest, batch.count);
+                    continue;
+                }
+                let Some(id) = ctx.keyed.id(&m) else {
+                    return Err(RuntimeError::Fault("this node has given every keyed member id".into()));
+                };
+                (id, batch)
+            }
+            _ => continue,
         };
         let Some(&rel) = hello.inbound.get(&b.sid) else {
             bump(&ctx.stats.rejected_schema, b.count);
@@ -1162,7 +1209,7 @@ fn peer_reader(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
                 bump(&ctx.stats.rejected_unknown_dest, 1);
                 continue;
             }
-            if !ctx.data.push(Data::Deliver { from, rel, row }) {
+            if !ctx.data.push(Data::Deliver { from: sender, rel, row }) {
                 return Ok(());
             }
         }
@@ -1371,6 +1418,9 @@ struct Engine {
     sessions: Sessions,
     /// Client members' links (docs/design/CLIENTS.md §3).
     members: MemberLinks,
+    /// The keyed members this node has met, and their hosts (docs/design/KEYED.md).
+    keyed: Arc<blossom_ir::members::Members>,
+    routing: Arc<crate::keyed::Routing>,
     /// The deployment's root seed (members' seeds derive from it).
     seed: Seed,
     data: Arc<DataQueue>,
@@ -1548,13 +1598,18 @@ impl Engine {
     fn admit_and_offer(&mut self, d: Data) -> Result<(), RuntimeError> {
         match d {
             Data::Deliver { from, rel, row } => {
+                // A keyed member's message came through its host: the member's role, the host's principal.
+                let (role, via) = match self.keyed.get(from) {
+                    Some(m) => (Some(m.role), self.routing.host_of(&m)?),
+                    None => (self.roles.get(from.0 as usize).copied().flatten(), from),
+                };
                 let principal = self
                     .principals
-                    .get(from.0 as usize)
+                    .get(via.0 as usize)
                     .cloned()
                     .unwrap_or_else(|| Arc::from(""));
                 let source = Source::Node {
-                    role: self.roles.get(from.0 as usize).copied().flatten(),
+                    role,
                     principal: &principal,
                 };
                 if self.admit(rel, source)? {
@@ -1716,7 +1771,11 @@ impl Engine {
             let mut to_peers: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
             let mut to_members: BTreeMap<(NodeId, RelId), Vec<&Row>> = BTreeMap::new();
             for s in &t.sends {
-                if s.to.is_client() {
+                if let Some(m) = self.keyed.get(s.to) {
+                    // A keyed member: its host runs it (the row names it, column 0).
+                    let host = self.routing.host_of(&m)?;
+                    to_peers.entry((host, s.rel)).or_default().push(&s.row);
+                } else if s.to.is_client() {
                     to_members.entry((s.to, s.rel)).or_default().push(&s.row);
                 } else if s.to == self.me {
                     self.node.offer_delivery(Delivery {

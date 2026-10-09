@@ -44,6 +44,8 @@ fn open(kv: &Arc<MemKv>, now: i64) -> ObjectNode {
         spec,
         artifact,
         node: "s".into(),
+        member: None,
+        members: Arc::new(blossom_ir::members::Members::open()),
         fs: Arc::new(KvFs::open(kv.clone() as Arc<dyn KvStore>).unwrap()),
         dir: "/s".into(),
         seed: blossom_value::Seed([5; 16]),
@@ -195,6 +197,7 @@ fn pump(obj: &mut ObjectNode, pages: &mut [&mut Page]) {
                         p.conn = None;
                     }
                 }
+                Output::Send { to, .. } => panic!("the polls server sent to node {}", to.0),
             }
         }
     }

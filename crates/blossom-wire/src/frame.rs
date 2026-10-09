@@ -12,6 +12,7 @@
 //! BATCH    0x10 := sid:varint send_tick:varint kind:u8 count:varint tuple{count}
 //! MSG      0x11 := seq:varint BATCH-body                         (a batch on a member link, numbered)
 //! ACK      0x12 := seq:varint                                    (everything up to seq was taken)
+//! MEMBER   0x13 := role:u32 key:str BATCH-body                    (a batch a keyed member sent, from its host)
 //! ```
 //!
 //! The architecture's HELLO names only a node; a client session's HELLO carries the principal it claims, which only
@@ -33,6 +34,7 @@ const T_WELCOME: u8 = 0x05;
 const T_BATCH: u8 = 0x10;
 const T_MSG: u8 = 0x11;
 const T_ACK: u8 = 0x12;
+const T_MEMBER: u8 = 0x13;
 
 /// Who opened a connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +148,13 @@ pub enum Frame {
     /// Everything up to `seq` on that direction of a member link was taken.
     Ack {
         seq: u64,
+    },
+    /// A batch a keyed member sent (docs/design/KEYED.md), on its host's link: the member's role (its id in the
+    /// program both ends checked) and key.
+    FromMember {
+        role: u32,
+        key: String,
+        batch: Batch,
     },
 }
 
@@ -300,6 +309,12 @@ impl Frame {
                 put_varint(&mut body, *seq);
                 T_ACK
             }
+            Frame::FromMember { role, key, batch } => {
+                body.extend_from_slice(&role.to_le_bytes());
+                put_str(&mut body, key);
+                put_batch(&mut body, batch);
+                T_MEMBER
+            }
         };
         let mut out = Vec::with_capacity(body.len() + 5);
         let len = (body.len() + 1) as u32;
@@ -417,6 +432,15 @@ impl Frame {
             T_ACK => Frame::Ack {
                 seq: get_varint(input)?,
             },
+            T_MEMBER => {
+                let role = u32::from_le_bytes(le(input, "a member's role")?);
+                let key = get_str(input)?;
+                Frame::FromMember {
+                    role,
+                    key,
+                    batch: get_batch(input, limits)?,
+                }
+            }
             other => return Err(WireError::Malformed(format!("frame type {other:#x}"))),
         };
         if !input.is_empty() {

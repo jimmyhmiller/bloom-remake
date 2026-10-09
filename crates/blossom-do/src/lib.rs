@@ -118,6 +118,8 @@ impl Object {
             spec,
             artifact: Arc::new(artifact),
             node: node.to_owned(),
+            member: None,
+            members: Arc::new(blossom_ir::members::Members::open()),
             fs: Arc::new(fs),
             dir: Path::new("/node").join(node),
             seed: Seed(seed),
@@ -201,6 +203,14 @@ impl Object {
                 Output::Close { conn } => {
                     out.push(1);
                     out.extend_from_slice(&conn.to_le_bytes());
+                }
+                // Objects reach each other by RPC, which this prototype does not do yet.
+                Output::Send { .. } => {
+                    return Err(
+                        "a send to another node or a keyed member: an object reaches others by RPC, which \
+                                this prototype does not do yet (docs/design/KEYED.md §4, sub-slice 4)"
+                            .into(),
+                    );
                 }
             }
         }

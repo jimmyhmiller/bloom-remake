@@ -410,6 +410,9 @@ pub struct Executors {
 }
 
 impl Executors {
+    /// The executors of a deployment's nodes: `roles[n]` and `names[n]` are node `n`'s, and `members` names the keyed
+    /// members the host gave node ids (docs/design/KEYED.md; simulation's are its nodes of keyed roles,
+    /// [`blossom_ir::members::of_deployment`]; a running node's table gives ids as it meets members).
     pub fn new(
         backend: Backend,
         program: blossom_ir::ValidatedProgram,
@@ -417,12 +420,8 @@ impl Executors {
         names: Vec<std::sync::Arc<str>>,
         seed: blossom_value::Seed,
         externs: std::sync::Arc<blossom_value::ExternRegistry>,
+        members: std::sync::Arc<blossom_ir::members::Members>,
     ) -> Result<Executors, EvalError> {
-        // A node of a keyed role is the member its name keys (docs/design/KEYED.md).
-        let members = std::sync::Arc::new(
-            blossom_ir::members::of_deployment(program.get(), &names, &roles)
-                .map_err(|e| blossom_base::internal_error!("the deployment's members: {e}"))?,
-        );
         let oracle = std::sync::Arc::new(
             Oracle::with_externs(program.clone(), blossom_oracle::Limits::default(), externs.clone())?
                 .with_roles(roles.clone())
