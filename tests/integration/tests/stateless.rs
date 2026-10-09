@@ -456,3 +456,30 @@ fn a_session_not_seen_for_its_lease_ends_at_the_sweep() {
         .receive(&object, conn, &secret, at, Duration::ZERO)
         .unwrap();
 }
+
+#[test]
+fn an_instance_keeps_at_most_its_cache_of_objects_and_loads_the_others_again() {
+    let deploy = deployment();
+    let shared: Arc<dyn StateStore> = Arc::new(MemStore::new());
+    let mut hosts = Hosts {
+        hosts: vec![Objects::new(deploy.clone(), shared.clone()).with_cache(2)],
+        rng: Rng(3),
+    };
+    let mut tabs: Vec<Tab> = ["a", "b", "c", "a"]
+        .iter()
+        .map(|r| tab(&mut hosts, &deploy, r))
+        .collect();
+    pump(&mut hosts, &mut tabs);
+    for (i, t) in tabs.iter_mut().enumerate() {
+        t.say(&mut hosts, &format!("line from tab {i}"));
+    }
+    pump(&mut hosts, &mut tabs);
+    assert!(
+        hosts.hosts[0].cached().unwrap() <= 2,
+        "the cache keeps at most 2 objects"
+    );
+    assert_eq!(tabs[0].lines(), ["line from tab 0", "line from tab 3"]);
+    assert_eq!(tabs[3].lines(), ["line from tab 0", "line from tab 3"]);
+    assert_eq!(tabs[1].lines(), ["line from tab 1"]);
+    assert_eq!(tabs[2].lines(), ["line from tab 2"]);
+}

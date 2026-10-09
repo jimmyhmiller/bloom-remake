@@ -180,11 +180,42 @@ pub struct Done<R> {
     pub frames: Vec<(u64, Vec<u8>)>,
 }
 
+/// How many objects an instance keeps what it knows of, by default.
+pub const DEFAULT_CACHE: usize = 1024;
+
+/// What an instance knows of its objects, each with when a request last used it; at most `cap` of them (an object a
+/// request is using stays past it).
+struct Slots {
+    by_object: BTreeMap<String, (Arc<Mutex<Slot>>, u64)>,
+    clock: u64,
+    cap: usize,
+}
+
+impl Slots {
+    /// Forgets the least recently used objects no request holds, down to the cap.
+    fn evict(&mut self) {
+        let over = self.by_object.len().saturating_sub(self.cap);
+        if over == 0 {
+            return;
+        }
+        let mut idle: Vec<(u64, String)> = self
+            .by_object
+            .iter()
+            .filter(|(_, (slot, _))| Arc::strong_count(slot) == 1)
+            .map(|(o, (_, used))| (*used, o.clone()))
+            .collect();
+        idle.sort_unstable();
+        for (_, o) in idle.into_iter().take(over) {
+            self.by_object.remove(&o);
+        }
+    }
+}
+
 /// A deployment's objects on a state store.
 pub struct Objects {
     pub deploy: Arc<Deployment>,
     pub store: Arc<dyn StateStore>,
-    slots: Mutex<BTreeMap<String, Arc<Mutex<Slot>>>>,
+    slots: Mutex<Slots>,
 }
 
 /// Milliseconds since the epoch of an instant.
@@ -225,12 +256,41 @@ impl Objects {
         Objects {
             deploy,
             store,
-            slots: Mutex::new(BTreeMap::new()),
+            slots: Mutex::new(Slots {
+                by_object: BTreeMap::new(),
+                clock: 0,
+                cap: DEFAULT_CACHE,
+            }),
         }
     }
 
+    /// Keeps at most `cap` objects' nodes and links in memory (`blossom serve --cache`).
+    pub fn with_cache(self, cap: usize) -> Objects {
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.cap = cap.max(1);
+        }
+        self
+    }
+
+    /// How many objects this instance keeps in memory now.
+    pub fn cached(&self) -> Result<usize, ServeError> {
+        Ok(lock(&self.slots)?.by_object.len())
+    }
+
     fn slot(&self, object: &str) -> Result<Arc<Mutex<Slot>>, ServeError> {
-        Ok(lock(&self.slots)?.entry(object.to_owned()).or_default().clone())
+        let mut slots = lock(&self.slots)?;
+        slots.clock += 1;
+        let now = slots.clock;
+        let slot = {
+            let entry = slots
+                .by_object
+                .entry(object.to_owned())
+                .or_insert_with(|| (Arc::default(), now));
+            entry.1 = now;
+            entry.0.clone()
+        };
+        slots.evict();
+        Ok(slot)
     }
 
     /// Brings a slot's links and sessions to the store's version (reading the entries if it moved).
@@ -785,7 +845,7 @@ impl Objects {
 
     /// Forgets everything this instance knows of its objects (tests: an instance that restarts).
     pub fn forget_all(&self) -> Result<(), ServeError> {
-        lock(&self.slots)?.clear();
+        lock(&self.slots)?.by_object.clear();
         Ok(())
     }
 }
