@@ -44,6 +44,7 @@ pub trait VfsLock: Send {}
 pub struct RealFs;
 struct RealFile(Mutex<File>);
 impl VfsFile for RealFile {
+    #[cfg(unix)]
     fn pread(&self, off: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
         use std::os::unix::fs::FileExt;
         Ok(self
@@ -51,6 +52,13 @@ impl VfsFile for RealFile {
             .lock()
             .map_err(|_| crate::invalid("file mutex poisoned"))?
             .read_at(buf, off)?)
+    }
+    /// Without a positional read, a seek and a read under the file's lock (appends seek to the end themselves).
+    #[cfg(not(unix))]
+    fn pread(&self, off: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
+        let mut f = self.0.lock().map_err(|_| crate::invalid("file mutex poisoned"))?;
+        f.seek(SeekFrom::Start(off))?;
+        Ok(f.read(buf)?)
     }
     fn append(&mut self, data: &[u8]) -> Result<(), StoreError> {
         let f = self.0.get_mut().map_err(|_| crate::invalid("file mutex poisoned"))?;
