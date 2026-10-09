@@ -115,15 +115,16 @@ pub fn authorization(creds: &Credentials, region: &str, amz_date: &str, req: &Re
     let mut headers: Vec<(String, String)> = req
         .headers
         .iter()
-        .map(|(k, v)| (k.to_ascii_lowercase(), v.split_whitespace().collect::<Vec<_>>().join(" ")))
+        .map(|(k, v)| {
+            (
+                k.to_ascii_lowercase(),
+                v.split_whitespace().collect::<Vec<_>>().join(" "),
+            )
+        })
         .collect();
     headers.sort();
     let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
-    let signed_headers = headers
-        .iter()
-        .map(|(k, _)| k.as_str())
-        .collect::<Vec<_>>()
-        .join(";");
+    let signed_headers = headers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(";");
     let canonical = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         req.method,
@@ -135,7 +136,10 @@ pub fn authorization(creds: &Credentials, region: &str, amz_date: &str, req: &Re
     );
     let date = amz_date.get(..8).unwrap_or(amz_date);
     let scope = format!("{date}/{region}/s3/aws4_request");
-    let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", sha256_hex(canonical.as_bytes()));
+    let to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical.as_bytes())
+    );
     let k_date = hmac(format!("AWS4{}", creds.secret_key).as_bytes(), date.as_bytes());
     let k_region = hmac(&k_date, region.as_bytes());
     let k_service = hmac(&k_region, b"s3");
@@ -198,7 +202,10 @@ mod tests {
     #[test]
     fn put_object() {
         let payload = sha256_hex(b"Welcome to Amazon S3.");
-        assert_eq!(payload, "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072");
+        assert_eq!(
+            payload,
+            "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072"
+        );
         let headers = h(&[
             ("date", "Fri, 24 May 2013 00:00:00 GMT"),
             ("host", "examplebucket.s3.amazonaws.com"),

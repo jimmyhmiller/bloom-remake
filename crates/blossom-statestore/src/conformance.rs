@@ -86,7 +86,11 @@ pub fn version_check(h: &dyn Harness) -> Outcome {
         s.commit("check/never", 3, &[put("a", b"z")]).map_err(e)?,
         Commit::Conflict { current: 0 },
     )?;
-    expect("the never-committed object", s.load("check/never").map_err(e)?, Snapshot::default())?;
+    expect(
+        "the never-committed object",
+        s.load("check/never").map_err(e)?,
+        Snapshot::default(),
+    )?;
     expect(
         "the object",
         s.load("check/o").map_err(e)?,
@@ -127,7 +131,11 @@ pub fn writes_in_order(h: &dyn Harness) -> Outcome {
             entries: entries(&[("a", b"2"), ("c", b"1"), ("x", b"2")]),
         },
     )?;
-    expect("empty commit", s.commit("order/o", 2, &[]).map_err(e)?, Commit::Done { version: 3 })?;
+    expect(
+        "empty commit",
+        s.commit("order/o", 2, &[]).map_err(e)?,
+        Commit::Done { version: 3 },
+    )?;
     s.commit("order/o", 3, &[del("a"), del("c"), del("x")]).map_err(e)?;
     expect(
         "emptied",
@@ -200,16 +208,25 @@ pub fn strange_keys(h: &dyn Harness) -> Outcome {
     s.commit("strange/o/é/..", 0, &writes).map_err(e)?;
     keys.sort_unstable();
     let want: Vec<(String, Vec<u8>)> = keys.iter().map(|k| (k.to_string(), k.as_bytes().to_vec())).collect();
-    expect("keys", h.open().map_err(e)?.load("strange/o/é/..").map_err(e)?.entries, want)
+    expect(
+        "keys",
+        h.open().map_err(e)?.load("strange/o/é/..").map_err(e)?.entries,
+        want,
+    )
 }
 
 /// Large values and many keys round-trip byte for byte.
 pub fn large_values(h: &dyn Harness) -> Outcome {
     let s = h.open().map_err(e)?;
-    let big: Vec<u8> = (0..5 * 1024 * 1024u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    let big: Vec<u8> = (0..5 * 1024 * 1024u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
     let mut writes = vec![put("big", &big), put("empty", b"")];
     for i in 0..300u32 {
-        writes.push(put(&format!("k/{i:05}"), &i.to_le_bytes().repeat((i % 7 + 1) as usize * 100)));
+        writes.push(put(
+            &format!("k/{i:05}"),
+            &i.to_le_bytes().repeat((i % 7 + 1) as usize * 100),
+        ));
     }
     s.commit("large/o", 0, &writes).map_err(e)?;
     let got = h.open().map_err(e)?.load("large/o").map_err(e)?;
@@ -307,7 +324,11 @@ pub fn concurrent_committers(h: &dyn Harness) -> Outcome {
     let total = THREADS as u64 * EACH;
     let snap = h.open().map_err(e)?.load("race/o").map_err(e)?;
     expect("version", snap.version, total)?;
-    let counter = snap.entries.iter().find(|(k, _)| k == "counter").map(|(_, v)| v.clone());
+    let counter = snap
+        .entries
+        .iter()
+        .find(|(k, _)| k == "counter")
+        .map(|(_, v)| v.clone());
     expect("counter", counter, Some(total.to_le_bytes().to_vec()))?;
     // Each winner wrote its key at the version it won from: every version from 0 to total - 1, once.
     let mut from: Vec<u64> = snap
@@ -321,14 +342,22 @@ pub fn concurrent_committers(h: &dyn Harness) -> Outcome {
         })
         .collect::<Result<_, _>>()?;
     from.sort_unstable();
-    expect("the versions the winners committed from", from, (0..total).collect::<Vec<_>>())
+    expect(
+        "the versions the winners committed from",
+        from,
+        (0..total).collect::<Vec<_>>(),
+    )
 }
 
 /// `wait` returns at once for a version already past, when another handle commits, and after its timeout otherwise.
 pub fn waits(h: &dyn Harness) -> Outcome {
     let s = h.open().map_err(e)?;
     s.commit("wait/o", 0, &[put("a", b"1")]).map_err(e)?;
-    expect("already past", s.wait("wait/o", 0, Duration::from_secs(30)).map_err(e)?, 1)?;
+    expect(
+        "already past",
+        s.wait("wait/o", 0, Duration::from_secs(30)).map_err(e)?,
+        1,
+    )?;
     expect(
         "a timeout with nothing new",
         s.wait("wait/o", 1, Duration::from_millis(200)).map_err(e)?,
@@ -363,7 +392,10 @@ pub fn wait_is_prompt(h: &dyn Harness) -> Outcome {
             let c = other.commit("prompt/o", round, &[put("r", &round.to_le_bytes())]);
             match waiter.join() {
                 Ok((v, t)) => ((c, v), t),
-                Err(_) => ((c, Err(StateError::Unavailable("the waiter panicked".into()))), Duration::MAX),
+                Err(_) => (
+                    (c, Err(StateError::Unavailable("the waiter panicked".into()))),
+                    Duration::MAX,
+                ),
             }
         });
         match woke {
@@ -398,7 +430,11 @@ pub fn wakes(h: &dyn Harness) -> Outcome {
             ("wakes/c/é".to_string(), 1_000_100),
         ],
     )?;
-    expect("nothing due earlier", mine(other.due(1_000_049, 1000).map_err(e)?), Vec::new())?;
+    expect(
+        "nothing due earlier",
+        mine(other.due(1_000_049, 1000).map_err(e)?),
+        Vec::new(),
+    )?;
     other.unschedule("wakes/a", 1_000_100).map_err(e)?;
     other.unschedule("wakes/a", 999).map_err(e)?;
     expect(

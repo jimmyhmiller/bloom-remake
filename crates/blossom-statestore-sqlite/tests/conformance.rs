@@ -44,7 +44,8 @@ fn a_file_of_another_format_is_refused() {
     let h = fresh();
     h.open().unwrap();
     let conn = rusqlite::Connection::open(&h.0).unwrap();
-    conn.execute("update meta set value = 99 where key = 'format'", []).unwrap();
+    conn.execute("update meta set value = 99 where key = 'format'", [])
+        .unwrap();
     drop(conn);
     match SqliteStore::open(&h.0) {
         Err(StateError::Config(m)) => assert!(m.contains("format 99"), "{m}"),
@@ -54,7 +55,10 @@ fn a_file_of_another_format_is_refused() {
 
 #[test]
 fn urls() {
-    assert!(matches!(SqliteStore::from_url("postgres://x"), Err(StateError::Config(_))));
+    assert!(matches!(
+        SqliteStore::from_url("postgres://x"),
+        Err(StateError::Config(_))
+    ));
     assert!(matches!(SqliteStore::from_url("sqlite:"), Err(StateError::Config(_))));
     let h = fresh();
     h.open().unwrap();

@@ -162,7 +162,9 @@ pub struct PostgresStore {
 fn check_schema(name: &str) -> Result<(), StateError> {
     let ok = !name.is_empty()
         && name.len() <= 48
-        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         && !name.as_bytes().first().is_some_and(u8::is_ascii_digit);
     if ok {
         Ok(())
@@ -254,8 +256,11 @@ impl PostgresStore {
     fn create_schema(&self, c: &mut Client) -> Result<(), StateError> {
         let s = &self.schema;
         let mut tx = c.transaction().map_err(unavailable)?;
-        tx.execute("select pg_advisory_xact_lock(hashtext($1))", &[&format!("blossom schema {s}")])
-            .map_err(unavailable)?;
+        tx.execute(
+            "select pg_advisory_xact_lock(hashtext($1))",
+            &[&format!("blossom schema {s}")],
+        )
+        .map_err(unavailable)?;
         tx.batch_execute(&format!(
             "create schema if not exists \"{s}\";
              create table if not exists \"{s}\".meta (key text primary key, value bigint not null);
@@ -389,7 +394,9 @@ fn listener(connect: &Connect, channel: &str, listen: &Listen) {
             loop {
                 match it.next() {
                     Ok(Some(n)) => {
-                        let Some((v, object)) = n.payload().split_once(' ') else { continue };
+                        let Some((v, object)) = n.payload().split_once(' ') else {
+                            continue;
+                        };
                         let Ok(v) = v.parse::<u64>() else { continue };
                         if let Ok(mut heard) = listen.heard.lock()
                             && let Some(entry) = heard.interest.get_mut(object)
@@ -496,7 +503,11 @@ impl StateStore for PostgresStore {
     fn schedule(&self, object: &str, at: u64) -> Result<(), StateError> {
         check_name("object name", object)?;
         let at = int("wake time", at)?;
-        self.with_client(|c| c.execute(&self.sql.schedule, &[&object, &at]).map(drop).map_err(unavailable))
+        self.with_client(|c| {
+            c.execute(&self.sql.schedule, &[&object, &at])
+                .map(drop)
+                .map_err(unavailable)
+        })
     }
 
     fn due(&self, now: u64, limit: usize) -> Result<Vec<(String, u64)>, StateError> {
@@ -517,12 +528,20 @@ impl StateStore for PostgresStore {
             // No hint can be at a time the table cannot hold.
             return Ok(());
         };
-        self.with_client(|c| c.execute(&self.sql.unschedule, &[&object, &at]).map(drop).map_err(unavailable))
+        self.with_client(|c| {
+            c.execute(&self.sql.unschedule, &[&object, &at])
+                .map(drop)
+                .map_err(unavailable)
+        })
     }
 
     fn put_side(&self, key: &str, value: &[u8]) -> Result<(), StateError> {
         check_name("side key", key)?;
-        self.with_client(|c| c.execute(&self.sql.put_side, &[&key, &value]).map(drop).map_err(unavailable))
+        self.with_client(|c| {
+            c.execute(&self.sql.put_side, &[&key, &value])
+                .map(drop)
+                .map_err(unavailable)
+        })
     }
 
     fn get_side(&self, key: &str) -> Result<Option<Vec<u8>>, StateError> {

@@ -41,7 +41,11 @@ fn fresh() -> S3 {
     let url = var("BLOSSOM_TEST_S3").map(|base| {
         let (path, query) = base.split_once('?').unwrap_or((&base, ""));
         let n = N.fetch_add(1, Ordering::Relaxed);
-        format!("{}/t-{}-{n}-{tag}?{query}", path.trim_end_matches('/'), std::process::id())
+        format!(
+            "{}/t-{}-{n}-{tag}?{query}",
+            path.trim_end_matches('/'),
+            std::process::id()
+        )
     });
     S3 { url }
 }
@@ -72,8 +76,12 @@ fn big(seed: u8) -> Vec<u8> {
 fn the_collector_deletes_only_blobs_no_manifest_names_past_the_grace_period() {
     let h = fresh();
     let mut s = h.store().unwrap();
-    s.commit("gc/o", 0, &[Write::Put("a".into(), big(3)), Write::Put("b".into(), big(5))])
-        .unwrap();
+    s.commit(
+        "gc/o",
+        0,
+        &[Write::Put("a".into(), big(3)), Write::Put("b".into(), big(5))],
+    )
+    .unwrap();
     // A commit that loses leaves its blob too: `other` builds on version 1, which `s` moves past first.
     let other = h.store().unwrap();
     assert_eq!(other.load("gc/o").unwrap().version, 1);

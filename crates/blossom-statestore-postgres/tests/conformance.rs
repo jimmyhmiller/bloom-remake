@@ -63,18 +63,16 @@ impl Drop for Pg {
 
 mod plain {
     use super::*;
-    blossom_statestore::statestore_conformance!(
-        ignore = "needs Postgres: scripts/test-services.sh",
-        || fresh("BLOSSOM_TEST_POSTGRES")
-    );
+    blossom_statestore::statestore_conformance!(ignore = "needs Postgres: scripts/test-services.sh", || fresh(
+        "BLOSSOM_TEST_POSTGRES"
+    ));
 }
 
 mod tls {
     use super::*;
-    blossom_statestore::statestore_conformance!(
-        ignore = "needs Postgres: scripts/test-services.sh",
-        || fresh("BLOSSOM_TEST_POSTGRES_TLS")
-    );
+    blossom_statestore::statestore_conformance!(ignore = "needs Postgres: scripts/test-services.sh", || fresh(
+        "BLOSSOM_TEST_POSTGRES_TLS"
+    ));
 }
 
 #[test]
@@ -85,8 +83,11 @@ fn a_schema_of_another_format_is_refused() {
     let url = h.url.clone().unwrap();
     let plain = url.split('?').next().unwrap().to_string();
     let mut c = postgres::Client::connect(&format!("{plain}?sslmode=disable"), postgres::NoTls).unwrap();
-    c.execute(&format!("update \"{}\".meta set value = 99 where key = 'format'", h.schema), &[])
-        .unwrap();
+    c.execute(
+        &format!("update \"{}\".meta set value = 99 where key = 'format'", h.schema),
+        &[],
+    )
+    .unwrap();
     match h.open() {
         Err(StateError::Config(m)) => assert!(m.contains("format 99"), "{m}"),
         other => panic!("opened a store of another format: {:?}", other.err()),
@@ -111,7 +112,10 @@ fn tls_is_required_when_asked_and_checked_against_the_roots() {
 
 #[test]
 fn urls_and_schemas() {
-    assert!(matches!(PostgresStore::from_url("sqlite:x"), Err(StateError::Config(_))));
+    assert!(matches!(
+        PostgresStore::from_url("sqlite:x"),
+        Err(StateError::Config(_))
+    ));
     for bad in ["Upper", "1abc", "a-b", "a\"b", ""] {
         let r = PostgresStore::from_url(&format!("postgres://u@127.0.0.1:1/db?schema={bad}"));
         assert!(matches!(r, Err(StateError::Config(_))), "schema `{bad}` was taken");
@@ -138,7 +142,11 @@ fn a_waiter_hears_a_commit_by_its_notification() {
             });
             std::thread::sleep(Duration::from_millis(150));
             let c = committer
-                .commit("notify/o", round, &[Write::Put("r".into(), round.to_le_bytes().to_vec())])
+                .commit(
+                    "notify/o",
+                    round,
+                    &[Write::Put("r".into(), round.to_le_bytes().to_vec())],
+                )
                 .unwrap();
             assert_eq!(c, Commit::Done { version: round + 1 });
             w.join().unwrap()
