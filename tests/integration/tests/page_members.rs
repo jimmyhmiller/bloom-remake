@@ -29,6 +29,12 @@ fn free_port() -> u16 {
 /// The example `program` (examples/web/PROGRAM.bls) deployed on one server node `s`, serving its page on `port`.
 #[cfg(test)]
 fn serve(name: &str, program: &str, port: u16) -> Server {
+    serve_with(name, program, port, |_| String::new())
+}
+
+/// As [`serve`], with `extra` (given the deployment's directory) appended to its deployment spec.
+#[cfg(test)]
+fn serve_with(name: &str, program: &str, port: u16, extra: impl Fn(&Path) -> String) -> Server {
     let dir = std::env::temp_dir().join(format!("blossom-pages-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -46,7 +52,7 @@ fn serve(name: &str, program: &str, port: u16) -> Server {
          principal = \"spiffe://test/{program}/Server/s\"\n[security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"data\"\n",
         source.display(),
         free_port(),
-    );
+    ) + &extra(&dir);
     let spec = DeploymentSpec::parse(&text, &dir).unwrap();
     let nodes: Vec<NodeSpec> = spec
         .nodes
@@ -387,4 +393,26 @@ fn two_pages_share_one_todo_list_through_the_server() {
     drop(a);
     drop(b);
     server.stop().unwrap();
+}
+
+/// A deployment's `[web] style` is the page's stylesheet: `app.json` names it and the node serves it, as it is on disk
+/// when asked for. A style that is not a file is refused when the spec is read.
+#[test]
+fn the_deployment_names_the_pages_stylesheet() {
+    let port = free_port();
+    let server = serve_with("style", "polls", port, |dir| {
+        std::fs::write(dir.join("look.css"), "body { color: red; }").unwrap();
+        "[web]\nstyle = \"look.css\"\n".to_owned()
+    });
+    let app: serde_json::Value = serde_json::from_str(&get(port, "/blossom/app.json")).unwrap();
+    assert_eq!(app["style"], "/blossom/style.css");
+    assert_eq!(get(port, "/blossom/style.css"), "body { color: red; }");
+    server.stop().unwrap();
+    let dir = std::env::temp_dir().join(format!("blossom-pages-nostyle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = "format = 1\n[deployment]\nid = \"x\"\nprogram = \"polls\"\nversion = 1\nsource = \"polls.bls\"\n\
+                [[node]]\nname = \"s\"\nrole = \"Server\"\naddr = \"127.0.0.1:1\"\nprincipal = \"spiffe://t/s\"\n\
+                [security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"data\"\n[web]\nstyle = \"missing.css\"\n";
+    let err = DeploymentSpec::parse(text, &dir).unwrap_err().to_string();
+    assert!(err.contains("web.style"), "{err}");
 }

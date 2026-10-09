@@ -1090,11 +1090,12 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// Phase 1 for a body: declares its variables in the current frame. Returns the indexes of the `x in e`
-    /// literals that are generators.
+    /// literals that are generators. An `outer` atom declares its variables last: one bound by a generator is a
+    /// column it joins on, not one it makes optional.
     fn declare_body(&mut self, cx: &mut RuleCx, body: &ast::Body) -> BTreeSet<usize> {
         for lit in &body.lits {
             match lit {
-                Lit::Plain(a) | Lit::Outer(a) | Lit::Inserted(a) | Lit::Deleted(a) | Lit::Per(a) => {
+                Lit::Plain(a) | Lit::Inserted(a) | Lit::Deleted(a) | Lit::Per(a) => {
                     self.declare_atom_args(cx, a);
                 }
                 Lit::Let { pat, .. } => self.declare_pattern(cx, pat),
@@ -1132,6 +1133,11 @@ impl<'t> Resolver<'t, '_> {
                     self.declare_pattern(cx, lhs);
                     generators.insert(i);
                 }
+            }
+        }
+        for lit in &body.lits {
+            if let Lit::Outer(a) = lit {
+                self.declare_atom_args(cx, a);
             }
         }
         generators

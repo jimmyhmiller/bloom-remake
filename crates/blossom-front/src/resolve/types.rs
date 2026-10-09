@@ -804,6 +804,70 @@ impl<'t> Resolver<'t, '_> {
                 };
                 (v, ta)
             }
+            ExprKind::Tuple(xs) if !xs.is_empty() => {
+                let want = match &expected_def {
+                    Some(TypeDef::Tuple(ts)) if ts.len() == xs.len() => Some(ts.clone()),
+                    _ => None,
+                };
+                let mut values = Vec::with_capacity(xs.len());
+                let mut types = Vec::with_capacity(xs.len());
+                for (i, x) in xs.iter().enumerate() {
+                    let (v, t) = self.const_value(s, x, want.as_ref().map(|w| w[i]))?;
+                    values.push(v);
+                    types.push(t);
+                }
+                (Value::Tuple(values.into()), self.intern_type(TypeDef::Tuple(types), e.span))
+            }
+            ExprKind::Vec(xs) | ExprKind::Set(xs) => {
+                let mut elem = match &expected_def {
+                    Some(TypeDef::Vec(t) | TypeDef::Set(t)) => Some(*t),
+                    _ => None,
+                };
+                let mut values = Vec::with_capacity(xs.len());
+                for x in xs {
+                    // The first element types the rest (or the declared element type, when there is one).
+                    let (v, t) = self.const_value(s, x, elem)?;
+                    elem.get_or_insert(t);
+                    values.push(v);
+                }
+                let Some(elem) = elem else {
+                    self.error(code!("BLS0300"), e.span, "an empty constant collection needs a declared type");
+                    return None;
+                };
+                if matches!(e.kind, ExprKind::Vec(_)) {
+                    (Value::Vec(values.into()), self.intern_type(TypeDef::Vec(elem), e.span))
+                } else {
+                    (
+                        Value::Set(std::sync::Arc::new(values.into_iter().collect())),
+                        self.intern_type(TypeDef::Set(elem), e.span),
+                    )
+                }
+            }
+            ExprKind::Map(entries) => {
+                let (mut kt, mut vt) = match &expected_def {
+                    Some(TypeDef::Map(k, v)) => (Some(*k), Some(*v)),
+                    _ => (None, None),
+                };
+                let mut map = std::collections::BTreeMap::new();
+                for (k, v) in entries {
+                    let (kv, k_ty) = self.const_value(s, k, kt)?;
+                    let (vv, v_ty) = self.const_value(s, v, vt)?;
+                    kt.get_or_insert(k_ty);
+                    vt.get_or_insert(v_ty);
+                    if map.insert(kv, vv).is_some() {
+                        self.error(code!("BLS0300"), k.span, "a constant map gives this key twice");
+                        return None;
+                    }
+                }
+                let (Some(kt), Some(vt)) = (kt, vt) else {
+                    self.error(code!("BLS0300"), e.span, "an empty constant collection needs a declared type");
+                    return None;
+                };
+                (
+                    Value::Map(std::sync::Arc::new(map)),
+                    self.intern_type(TypeDef::Map(kt, vt), e.span),
+                )
+            }
             _ => {
                 self.unsupported("LANG-010", "this constant expression", e.span);
                 return None;

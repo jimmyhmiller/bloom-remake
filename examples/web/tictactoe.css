@@ -1,0 +1,77 @@
+/* Tic-tac-toe (examples/web/tictactoe.bls): its deployment names this file (`[web] style`). */
+@import url("/apps.css");
+
+.lobby .seeking {
+  margin: 0 0 0.6rem;
+  color: var(--app-muted);
+}
+.lobby h2 {
+  margin-top: 1.4rem;
+}
+.games {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 0;
+}
+.games li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid var(--app-line);
+}
+.games .vs {
+  flex: 1;
+}
+.games .moves {
+  color: var(--app-muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+.games:empty::after {
+  content: "None right now.";
+  color: var(--app-muted);
+}
+.board .headline {
+  font-size: 1.15rem;
+  margin: 0 0 0.9rem;
+}
+.board .headline.go {
+  color: var(--app-accent);
+  font-weight: 600;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  width: min(100%, 330px);
+  aspect-ratio: 1;
+}
+.app .square {
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  border-radius: 8px;
+  cursor: default;
+}
+.app .square.open {
+  cursor: pointer;
+  background: var(--app-accent-soft);
+}
+.app .square.X {
+  color: var(--app-accent);
+}
+.app .square.O {
+  color: var(--app-warn);
+}
+.app .square.win {
+  background: var(--app-accent-soft);
+  border-color: var(--app-accent);
+}
+.board .actions {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+  align-items: center;
+}

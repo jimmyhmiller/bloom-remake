@@ -1,0 +1,135 @@
+/* The look the shared example apps have in common (examples/web/{polls,board,tictactoe,pixels}.bls): each app's own
+ * stylesheet (`[web] style` in its deployment) imports this one and adds what is its own. */
+:root {
+  --app-bg: #f5f3ef;
+  --app-card: #fffefb;
+  --app-fg: #23211e;
+  --app-muted: #75706a;
+  --app-line: #e3ded6;
+  --app-accent: #3c6e8f;
+  --app-accent-soft: #e2edf3;
+  --app-good: #3d7a4f;
+  --app-warn: #a0602a;
+  --app-radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --app-bg: #1a1a1c;
+    --app-card: #232326;
+    --app-fg: #ebe8e3;
+    --app-muted: #a29d96;
+    --app-line: #38373b;
+    --app-accent: #8cc0de;
+    --app-accent-soft: #2a3a45;
+    --app-good: #8fcf9f;
+    --app-warn: #e2a56b;
+  }
+}
+body {
+  margin: 0;
+  background: var(--app-bg);
+  color: var(--app-fg);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.app {
+  box-sizing: border-box;
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 3.25rem 16px 4rem;
+}
+.app h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.app h2 {
+  margin: 0 0 0.25rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.app .top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.app .lead,
+.app .who {
+  color: var(--app-muted);
+  margin: 0.35rem 0 1rem;
+}
+.app .status {
+  font-size: 0.85rem;
+  color: var(--app-good);
+}
+.app .status.offline {
+  color: var(--app-warn);
+}
+.app .card {
+  background: var(--app-card);
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius);
+  padding: 1rem 1.1rem;
+  margin: 0 0 0.9rem;
+}
+.app input,
+.app select,
+.app textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  font: inherit;
+  color: inherit;
+  background: var(--app-bg);
+  border: 1px solid var(--app-line);
+  border-radius: 7px;
+}
+.app input.big {
+  font-size: 1.15rem;
+  padding: 0.75rem 0.9rem;
+}
+.app input:focus,
+.app button:focus-visible {
+  outline: 2px solid var(--app-accent);
+  outline-offset: 1px;
+}
+.app button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  background: var(--app-card);
+  border: 1px solid var(--app-line);
+  border-radius: 7px;
+  padding: 0.45rem 0.9rem;
+}
+.app button:hover {
+  border-color: var(--app-accent);
+}
+.app button.primary {
+  background: var(--app-accent);
+  border-color: var(--app-accent);
+  color: var(--app-card);
+  font-weight: 600;
+}
+.app button.quiet {
+  background: none;
+  border-color: transparent;
+  color: var(--app-muted);
+  padding-left: 0;
+}
+.app .here {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 1rem;
+  padding: 0;
+}
+.app .person {
+  font-size: 0.82rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  background: var(--app-accent-soft);
+  color: var(--app-accent);
+}

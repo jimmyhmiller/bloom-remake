@@ -36,3 +36,7 @@ input keydown(id: String, key: String, value: String);
 input blur(id: String, value: String);
 /// A checkbox changes.
 input change(id: String, checked: bool);
+/// An element with `draggable: "true"` is dropped on another element with an `id` (or inside one): the dragged
+/// element's id and the target's. While it is dragged, the element has `data-dragging`, and the target under it
+/// `data-dragover`, for a stylesheet to show.
+input drop(id: String, target: String);

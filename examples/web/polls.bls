@@ -1,0 +1,308 @@
+//! Live polls (docs/design/CLIENTS.md): anyone asks a question with a few choices, everyone votes, and every tab sees
+//! the counts move as the votes come in. One program says the server and the page; the channels are the whole API.
+//!
+//! A poll is known by the tab that asked it and that tab's number for it. A vote is a tab's choice in a poll, numbered
+//! by the tab's changes: the tables keep the newest one (`resolve choose_most(s)`), so a vote changed twice in one
+//! tick, or heard twice, or heard late, settles on the last. The server takes a vote only while its poll is open and
+//! only for one of its choices, and a poll is closed only by the tab that asked it.
+
+program polls version 1;
+
+role Server;
+role Browser: client;
+
+/// The tab's name, sent whenever its link comes up.
+channel hello(name: String): Browser -> Server;
+/// A new poll, the asking tab's `n`-th.
+channel ask(n: u64, question: String, choices: Vec<String>): Browser -> Server;
+/// The tab's vote in poll `(w, n)`: choice `i`, its `s`-th change.
+channel vote(w: Node<Browser>, n: u64, i: u64, s: u64): Browser -> Server;
+/// The asking tab closes its `n`-th poll.
+channel close(n: u64): Browser -> Server;
+
+channel poll(
+    w: Node<Browser>,
+    n: u64,
+    at: Instant,
+    question: String,
+    choices: Vec<String>,
+    open: bool
+): Server -> Browser;
+channel voted(w: Node<Browser>, n: u64, voter: Node<Browser>, i: u64, s: u64): Server -> Browser;
+/// Someone's name, and whether they are here, as of the server's `at`.
+channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Server -> Browser;
+
+at Server {
+    durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
+    durable table polls(w: Node<Browser>, n: u64, at: Instant, question: String, choices: Vec<String>, open: bool) key(
+        w,
+        n
+    ) resolve choose_least(open);
+    durable table votes(w: Node<Browser>, n: u64, voter: Node<Browser>, i: u64, s: u64) key(
+        w,
+        n,
+        voter
+    ) resolve choose_most(s);
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
+        delete online(b);
+    }
+    named: on hello(name) from b where name.trim() != "" {
+        next names(b, name.trim());
+    }
+    asked: on ask(n, q, cs) from b, not polls(b, n, _, _, _, _) where q.trim() != "" && cs.len() >= 2u64 {
+        next polls(b, n, now(), q.trim(), cs, true);
+    }
+    closed: on close(n) from b, polls(b, n, at, q, cs, true) {
+        next polls(b, n, at, q, cs, false);
+    }
+    /// Only while the poll is open, and only for one of its choices.
+    take: on vote(w, n, i, s) from b, polls(w, n, _, _, cs, true) where i < cs.len() {
+        next votes(w, n, b, i, s);
+    }
+
+    view presence(b, name, here) {
+        names(b, name), online(b), let here = true;
+        names(b, name), not online(b), let here = false;
+    }
+
+    /// Every change goes to every tab online; a tab whose link did not resume gets everything.
+    tell_poll: on inserted polls(w, n, at, q, cs, o), online(b) {
+        send poll(w, n, at, q, cs, o) to b;
+    }
+    tell_vote: on inserted votes(w, n, v, i, s), online(b) {
+        send voted(w, n, v, i, s) to b;
+    }
+    tell_person: on inserted presence(p, name, here), online(b) {
+        send person(p, name, here, now()) to b;
+    }
+    greet: on Browser.connected(b, false) {
+        for polls(w, n, at, q, cs, o) {
+            send poll(w, n, at, q, cs, o) to b;
+        }
+        for votes(w, n, v, i, s) {
+            send voted(w, n, v, i, s) to b;
+        }
+        for presence(p, name, here) {
+            send person(p, name, here, now()) to b;
+        }
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    /// This tab's name; until it has one, the page asks for it.
+    durable table me(name: String) key();
+    /// The number of this tab's next poll, and of its next change.
+    durable table next_n(n: u64) key();
+    durable table next_s(s: u64) key();
+    /// What the tab knows, kept across reloads; each table keeps the newest of what it hears.
+    durable table poll_list(
+        w: Node<Browser>,
+        n: u64,
+        at: Instant,
+        question: String,
+        choices: Vec<String>,
+        open: bool
+    ) key(w, n) resolve choose_least(open);
+    durable table vote_list(w: Node<Browser>, n: u64, voter: Node<Browser>, i: u64, s: u64) key(
+        w,
+        n,
+        voter
+    ) resolve choose_most(s);
+    durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
+    /// What is typed in each field, by the field's id.
+    table drafts(field: String, s: String) key(field);
+    table up(s: Node<Server>);
+
+    view next_poll(n = max!(x default 0u64)) = next_n(x);
+    view next_change(s = max!(x default 0u64)) = next_s(x);
+
+    // ------------------------------------------------------------ the server
+
+    hear_poll: on poll(w, n, at, q, cs, o) {
+        next poll_list(w, n, at, q, cs, o);
+    }
+    hear_vote: on voted(w, n, v, i, s) {
+        next vote_list(w, n, v, i, s);
+    }
+    hear_person: on person(b, name, here, at) {
+        next people(b, name, here, at);
+    }
+    link: on Server.connected(s, _), me(name) {
+        emit up(s);
+        send hello(name) to s;
+    }
+    link_unnamed: on Server.connected(s, _), not me(_) {
+        emit up(s);
+    }
+    lost: on Server.disconnected(s) {
+        delete up(s);
+    }
+
+    // ------------------------------------------------------------ events
+
+    typing: on typed(id, value) {
+        upsert drafts(id, value);
+    }
+    sign_in: on keydown("name", "Enter", value), srv in Server where value.trim() != "" {
+        upsert me(value.trim());
+        send hello(value.trim()) to srv;
+    }
+    /// A poll is asked here at once, and sent (it waits in the link while the server is unreachable).
+    ask_it: on click("ask"), question_text(q), drafted(cs), next_poll(n), srv in Server
+            where q.trim() != "" && cs.len() >= 2u64 {
+        next poll_list(self, n, now(), q.trim(), cs, true);
+        send ask(n, q.trim(), cs) to srv;
+        upsert next_n(n + 1u64);
+        for drafts(f, s) where f != "name" {
+            delete drafts(f, s);
+        }
+    }
+    vote_it: on click(id), choice_button(id, w, n, i), poll_list(w, n, _, _, _, true), next_change(s), srv in Server {
+        next vote_list(w, n, self, i, s);
+        send vote(w, n, i, s) to srv;
+        upsert next_s(s + 1u64);
+    }
+    close_it: on click(id), close_button(id, n), poll_list(self, n, at, q, cs, true), srv in Server {
+        next poll_list(self, n, at, q, cs, false);
+        send close(n) to srv;
+    }
+
+    // ------------------------------------------------------------ what the page shows
+
+    /// The choice fields: one more than the last one filled in (at least two, at most eight).
+    view filled(i, t) = drafts(f, t), let Some(i) = f.replace("opt-", "").parse_u64()
+            where f.starts_with("opt-") && t.trim() != "";
+    view slots(k = max!(i + 2u64 default 2u64)) = filled(i, _);
+    view slot(i) = slots(k), i in 0u64..min(k, 8u64);
+    view numbered(ps = collect!((i, t.trim()))) = filled(i, t);
+    view drafted(cs) = numbered(ps), let cs = seconds(ps);
+    view field(f) {
+        let f = "name";
+        let f = "question";
+        slot(i), let f = f"opt-{i}";
+    }
+    view typed_in(f, s) = field(f), outer drafts(f, d), let s = d.unwrap_or("");
+    view question_text(q) = typed_in("question", q);
+
+    view choice(w, n, i, text) = poll_list(w, n, _, _, cs, _), (i, text) in cs.enumerate();
+    view count(w, n, i, k = count!(v)) = per choice(w, n, i, _), vote_list(w, n, v, i, _);
+    view total(w, n, k = count!(v)) = per poll_list(w, n, _, _, _, _), vote_list(w, n, v, _, _);
+    view poll_key(w, n, key) = poll_list(w, n, _, _, _, _), let key = f"{n}-{w}";
+    view choice_button(id, w, n, i) = choice(w, n, i, _), poll_key(w, n, key), let id = f"vote-{key}-{i}";
+    view close_button(id, n) = poll_key(self, n, key), let id = f"close-{key}";
+    view mine(w, n, i, m) {
+        choice(w, n, i, _), vote_list(w, n, self, i, _), let m = true;
+        choice(w, n, i, _), not vote_list(w, n, self, i, _), let m = false;
+    }
+    view name_of(b, name) {
+        people(b, name, _, _) where b != self;
+        me(name), let b = self;
+    }
+    view asker(w, n, name) = poll_list(w, n, _, _, _, _), outer name_of(w, nm), let name = nm.unwrap_or("someone");
+    /// Who voted for a choice, by name.
+    view voters(w, n, i, names = collect!(name)) = per choice(w, n, i, _), vote_list(w, n, v, i, _), name_of(v, name);
+    view here(b, name) {
+        people(b, name, true, _), up(_), not b == self;
+    }
+    view status(s, c) {
+        up(_), let s = "live", let c = "status";
+        not up(_), let s = "offline: your votes wait until the server is back", let c = "status offline";
+    }
+
+    fn percent(k: u64, total: u64) -> u64 {
+        if total == 0u64 { 0u64 } else { k * 100u64 / total }
+    }
+
+    fn choice_class(mine: bool, open: bool) -> String {
+        if mine && open {
+            "choice mine"
+        } else if mine {
+            "choice mine closed"
+        } else if open {
+            "choice"
+        } else {
+            "choice closed"
+        }
+    }
+
+    /// The texts of numbered pieces, in their order.
+    fn seconds(v: Vec<(u64, String)>) -> Vec<String> {
+        v.map(|p| p.1)
+    }
+
+    fn byline(by: String, open: bool) -> String {
+        if open { f"asked by {by}" } else { f"asked by {by} · closed" }
+    }
+
+    fn joined(names: Vec<String>) -> String {
+        names.fold("", |acc, x| if acc == "" { x } else { acc ++ ", " ++ x })
+    }
+
+    fn votes_word(k: u64) -> String {
+        if k == 1u64 { "1 vote" } else { f"{k} votes" }
+    }
+
+    // ------------------------------------------------------------ the page
+
+    welcome: while not me(_), typed_in("name", d) {
+        emit html div[id: "polls"](class: "app polls") {
+            h1 { "Polls" }
+            p(class: "lead") { "Ask a question, and everyone votes live." }
+            input[id: "name"](class: "big", placeholder: "Your name, then Enter", value: d);
+        }
+        emit focus("name");
+    }
+
+    page: while me(my), status(st, sc), question_text(q) {
+        emit html div[id: "polls"](class: "app polls") {
+            header(class: "top") {
+                h1 { "Polls" }
+                span[id: "status"](class: sc) { st }
+            }
+            p[id: "who"](class: "who") { f"You are {my}." }
+            ul[id: "here"](class: "here") {
+                for here(b, name) { li[key: b.to_string()](class: "person") { name } }
+            }
+            section[id: "new"](class: "card new") {
+                input[id: "question"](placeholder: "Ask a question", value: q);
+                for slot(i), typed_in(f, s) where f == f"opt-{i}" {
+                    input[id: f, pos: 1i64 + i as i64](class: "opt", placeholder: f"Choice {i + 1u64}", value: s);
+                }
+                button[id: "ask", pos: 100](class: "primary") { "Ask" }
+            }
+            ol[id: "list"](class: "list") {
+                for poll_list(w, n, at, question, _, open), poll_key(w, n, key), asker(w, n, by), total(w, n, all) {
+                    li[id: f"poll-{key}", pos: 0i64 - at.as_millis() as i64](class: if open {
+                        "card poll"
+                    } else {
+                        "card poll closed"
+                    }) {
+                        h2 { question }
+                        p(class: "by") { byline(by, open) }
+                        ul(class: "choices") {
+                            for choice(w, n, i, text), count(w, n, i, k), mine(w, n, i, m), voters(w, n, i, vs) {
+                                li[key: i] {
+                                    button[id: f"vote-{key}-{i}"](class: choice_class(m, open)) {
+                                        span(class: "bar", style: f"width: {percent(k, all)}%");
+                                        span(class: "text") { text }
+                                        span(class: "count") { k }
+                                    }
+                                    p(class: "voters") { joined(vs) }
+                                }
+                            }
+                        }
+                        p(class: "total") { votes_word(all) }
+                        if w == self && open { button[id: f"close-{key}"](class: "quiet") { "Close the poll" } }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,369 @@
+//! Tic-tac-toe with a lobby (docs/design/CLIENTS.md): press Play and the server pairs you with the next player who
+//! does, or watch any game being played. One program holds both ends; the channels are the whole API.
+//!
+//! The server is the referee: it pairs the players who have waited longest, numbers the games, takes a move only from
+//! the player whose turn it is, on an empty square, in a game that is not over, and decides the outcome from the
+//! moves. The pages show what the server decided; a page's own state is only what it is looking at.
+
+program tictactoe version 1;
+
+role Server;
+role Browser: client;
+
+/// The eight lines of three squares (squares numbered 0 to 8, row by row).
+const LINES: Vec<(u64, u64, u64)> = [
+    (0u64, 1u64, 2u64),
+    (3u64, 4u64, 5u64),
+    (6u64, 7u64, 8u64),
+    (0u64, 3u64, 6u64),
+    (1u64, 4u64, 7u64),
+    (2u64, 5u64, 8u64),
+    (0u64, 4u64, 8u64),
+    (2u64, 4u64, 6u64)
+];
+
+/// The mark of a game's `k`-th move: X moves first.
+fn mark_of(k: u64) -> String {
+    if k % 2u64 == 0u64 { "X" } else { "O" }
+}
+
+/// The tab's name, sent whenever its link comes up.
+channel hello(name: String): Browser -> Server;
+/// The tab wants a game (again, after a reconnect), or no longer does.
+channel seek(): Browser -> Server;
+channel unseek(): Browser -> Server;
+/// A move on square `cell` of game `g`, and giving a game up.
+channel play(g: u64, cell: u64): Browser -> Server;
+channel resign(g: u64): Browser -> Server;
+
+channel game(g: u64, x: Node<Browser>, o: Node<Browser>, at: Instant): Server -> Browser;
+channel moved(g: u64, k: u64, cell: u64): Server -> Browser;
+/// How a game ended: "X" or "O" won, or "draw".
+channel ended(g: u64, outcome: String): Server -> Browser;
+channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Server -> Browser;
+
+at Server {
+    durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
+    /// The players waiting for a game, since when.
+    durable table waiting(b: Node<Browser>, since: Instant) key(b);
+    durable table games(g: u64, x: Node<Browser>, o: Node<Browser>, at: Instant) key(g);
+    /// Game `g`'s `k`-th move.
+    durable table moves(g: u64, k: u64, cell: u64) key(g, k);
+    durable table resigned(g: u64, b: Node<Browser>) key(g);
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
+        delete online(b);
+    }
+    /// A player who leaves stops waiting (their page asks again when it is back).
+    gone: on Browser.disconnected(b), not Browser.connected(b, _), waiting(b, since) {
+        delete waiting(b, since);
+    }
+    named: on hello(name) from b where name.trim() != "" {
+        next names(b, name.trim());
+    }
+
+    // ------------------------------------------------------------ the referee
+
+    view line(a, b, c) = (a, b, c) in LINES;
+    view mark(g, cell, m) = moves(g, k, cell), let m = mark_of(k);
+    view three(g, m) = line(a, b, c), mark(g, a, m), mark(g, b, m), mark(g, c, m);
+    view made(g, k = count!(m)) = per games(g, _, _, _), moves(g, m, _);
+    view outcome(g, m) {
+        three(g, m);
+        resigned(g, r), games(g, x, _, _), let m = "O" where r == x;
+        resigned(g, r), games(g, _, o, _), let m = "X" where r == o;
+        made(g, 9u64), not three(g, _), let m = "draw";
+    }
+    view playing(b) {
+        games(g, b, _, _), not outcome(g, _);
+        games(g, _, b, _), not outcome(g, _);
+    }
+
+    wait: on seek() from b, not playing(b), not waiting(b, _) {
+        next waiting(b, now());
+    }
+    stop_waiting: on unseek() from b, waiting(b, since) {
+        delete waiting(b, since);
+    }
+    /// The longest waiting are paired first, two by two; the one who waited longer plays X.
+    view ranked(since, b, r = index!()) = waiting(b, since);
+    view pair(x, o, p) = ranked(_, x, r), ranked(_, o, r2), let p = r / 2u64 where r % 2u64 == 0u64 && r2 == r + 1u64;
+    view next_game(g = max!(h + 1u64 default 0u64)) = games(h, _, _, _);
+    start: while pair(x, o, p), next_game(g0), waiting(x, sx), waiting(o, so) {
+        next games(g0 + p, x, o, now());
+        delete waiting(x, sx);
+        delete waiting(o, so);
+    }
+
+    /// Only the player whose turn it is, on an empty square of a game that is not over.
+    take: on play(g, cell) from b, games(g, x, o, _), made(g, k), not outcome(g, _), not mark(g, cell, _)
+            where cell < 9u64 && b == (if k % 2u64 == 0u64 { x } else { o }) {
+        next moves(g, k, cell);
+    }
+    give_up: on resign(g) from b, games(g, x, o, _), not outcome(g, _) where b == x || b == o {
+        next resigned(g, b);
+    }
+
+    // ------------------------------------------------------------ telling the pages
+
+    view presence(b, name, here) {
+        names(b, name), online(b), let here = true;
+        names(b, name), not online(b), let here = false;
+    }
+    tell_game: on inserted games(g, x, o, at), online(b) {
+        send game(g, x, o, at) to b;
+    }
+    tell_move: on inserted moves(g, k, cell), online(b) {
+        send moved(g, k, cell) to b;
+    }
+    tell_end: on inserted outcome(g, m), online(b) {
+        send ended(g, m) to b;
+    }
+    tell_person: on inserted presence(p, name, here), online(b) {
+        send person(p, name, here, now()) to b;
+    }
+    greet: on Browser.connected(b, false) {
+        for games(g, x, o, at) {
+            send game(g, x, o, at) to b;
+        }
+        for moves(g, k, cell) {
+            send moved(g, k, cell) to b;
+        }
+        for outcome(g, m) {
+            send ended(g, m) to b;
+        }
+        for presence(p, name, here) {
+            send person(p, name, here, now()) to b;
+        }
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    durable table me(name: String) key();
+    /// Since when this tab wants a game, until one starts for it.
+    durable table seeking(since: Instant) key();
+    /// The games this tab has left the board of.
+    durable table dismissed(g: u64);
+    /// What the server said, kept across reloads.
+    durable table game_list(g: u64, x: Node<Browser>, o: Node<Browser>, at: Instant) key(g);
+    durable table move_list(g: u64, k: u64, cell: u64) key(g, k);
+    durable table outcomes(g: u64, outcome: String) key(g);
+    durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
+    /// The game this tab is watching.
+    table watching(g: u64) key();
+    table drafts(field: String, s: String) key(field);
+    table up(s: Node<Server>);
+
+    hear_game: on game(g, x, o, at) {
+        next game_list(g, x, o, at);
+    }
+    hear_move: on moved(g, k, cell) {
+        next move_list(g, k, cell);
+    }
+    hear_end: on ended(g, m) {
+        next outcomes(g, m);
+    }
+    hear_person: on person(b, name, here, at) {
+        next people(b, name, here, at);
+    }
+    /// A new game of this tab's answers its asking (a tab asks only while it plays no game).
+    matched: on game(g, x, o, _), not game_list(g, _, _, _), seeking(since) where x == self || o == self {
+        delete seeking(since);
+    }
+    link: on Server.connected(s, _) {
+        emit up(s);
+    }
+    named: on Server.connected(s, _), me(name) {
+        send hello(name) to s;
+    }
+    /// The server forgets a waiting player whose link drops; the page asks again.
+    reseek: on Server.connected(s, _), seeking(_) {
+        send seek() to s;
+    }
+    lost: on Server.disconnected(s) {
+        delete up(s);
+    }
+
+    // ------------------------------------------------------------ events
+
+    typing: on typed(id, value) {
+        upsert drafts(id, value);
+    }
+    sign_in: on keydown("name", "Enter", value), srv in Server where value.trim() != "" {
+        upsert me(value.trim());
+        send hello(value.trim()) to srv;
+    }
+    play_now: on click(id), srv in Server, not seeking(_) where id == "play" || id == "again" {
+        upsert seeking(now());
+        send seek() to srv;
+        for watching(g) {
+            delete watching(g);
+        }
+    }
+    cancel: on click("cancel"), seeking(since), srv in Server {
+        delete seeking(since);
+        send unseek() to srv;
+    }
+    pick: on click(id), square(id, g, cell), my_turn(g), srv in Server {
+        send play(g, cell) to srv;
+    }
+    give_up: on click("resign"), board(g), mine(g, _), not outcomes(g, _), srv in Server {
+        send resign(g) to srv;
+    }
+    watch: on click(id), watch_button(id, g) {
+        upsert watching(g);
+    }
+    back: on click("lobby"), board(g) {
+        next dismissed(g);
+        delete watching(g);
+    }
+
+    // ------------------------------------------------------------ what the page shows
+
+    view name_of(b, name) {
+        people(b, name, _, _) where b != self;
+        me(name), let b = self;
+    }
+    view called(b, name) = game_list(_, x, o, _), b in [x, o], outer name_of(b, n), let name = n.unwrap_or("someone");
+    /// This tab's games, and its mark in each.
+    view mine(g, m) {
+        game_list(g, x, _, _), let m = "X" where x == self;
+        game_list(g, _, o, _), let m = "O" where o == self;
+    }
+    view latest_mine(g = max!(h)) = mine(h, _);
+    /// The board on the page: the game being watched, else this tab's latest game unless it left it.
+    view board(g) {
+        watching(g);
+        not watching(_), latest_mine(g), not dismissed(g), not seeking(_);
+    }
+    view moves_in(g, k = count!(m)) = per game_list(g, _, _, _), move_list(g, m, _);
+    view square_mark(g, cell, m) = move_list(g, k, cell), let m = mark_of(k);
+    view winning(g, cell) = board(g), (a, b, c) in LINES, square_mark(g, a, m), square_mark(g, b, m),
+            square_mark(g, c, m), cell in [a, b, c];
+    /// The board's squares: each one's mark ("" when empty) and whether it is on the winning line.
+    view squares(g, cell, m, w) {
+        board(g), cell in 0u64..9u64, outer square_mark(g, cell, sm), winning(g, cell), let m = sm.unwrap_or(""),
+                let w = true;
+        board(g), cell in 0u64..9u64, outer square_mark(g, cell, sm), not winning(g, cell), let m = sm.unwrap_or(""),
+                let w = false;
+    }
+    view square(id, g, cell) = squares(g, cell, _, _), let id = f"sq-{g}-{cell}";
+    /// Whether it is this tab's move in game `g`.
+    view my_turn(g) = board(g), not outcomes(g, _), moves_in(g, k), mine(g, m) where m == mark_of(k);
+    view turn_of(g, t) {
+        my_turn(g), let t = true;
+        board(g), not my_turn(g), let t = false;
+    }
+    /// This tab's mark in the board's game ("" when watching), and its outcome ("" while it goes oname).
+    view seat(g, m, end) = board(g), outer mine(g, mm), outer outcomes(g, e), let m = mm.unwrap_or(""),
+            let end = e.unwrap_or("");
+    view headline(g, s) = board(g), game_list(g, x, o, _), called(x, xname), called(o, oname), moves_in(g, k),
+            outer outcomes(g, end), outer mine(g, m), let s = status_line(xname, oname, mark_of(k), end, m);
+    view live_games(g, xname, oname, k) = game_list(g, x, o, _), not outcomes(g, _), called(x, xname), called(o, oname),
+            moves_in(g, k);
+    view watch_button(id, g) = live_games(g, _, _, _), let id = f"watch-{g}";
+    view here(b, name) = people(b, name, true, _), up(_) where b != self;
+    view status(s, c) {
+        up(_), let s = "live", let c = "status";
+        not up(_), let s = "offline", let c = "status offline";
+    }
+
+    /// The line above the board.
+    fn status_line(x: String, o: String, turn: String, end: Option<String>, mine: Option<String>) -> String {
+        if end == Some("draw") {
+            "A draw."
+        } else if end.is_some() && end == mine {
+            "You win!"
+        } else if end.is_some() && mine.is_some() {
+            "You lose."
+        } else if end == Some("X") {
+            f"{x} wins."
+        } else if end == Some("O") {
+            f"{o} wins."
+        } else if mine == Some(turn) {
+            f"Your move ({turn})."
+        } else if mine.is_some() {
+            f"Waiting for {if turn == "X" { x } else { o }}…"
+        } else {
+            f"{if turn == "X" { x } else { o }} to move ({turn})."
+        }
+    }
+
+    fn square_class(m: String, win: bool, open: bool) -> String {
+        if win {
+            f"square {m} win"
+        } else if m != "" {
+            f"square {m}"
+        } else if open {
+            "square open"
+        } else {
+            "square"
+        }
+    }
+
+    // ------------------------------------------------------------ the page
+
+    welcome: while not me(_) {
+        emit html div[id: "ttt"](class: "app ttt") {
+            h1 { "Tic-tac-toe" }
+            p(class: "lead") { "Play someone on the server, or watch a game." }
+            input[id: "name"](class: "big", placeholder: "Your name, then Enter");
+        }
+        emit focus("name");
+    }
+
+    page: while me(my), status(st, sc) {
+        emit html div[id: "ttt"](class: "app ttt") {
+            header(class: "top") {
+                h1 { "Tic-tac-toe" }
+                span[id: "status"](class: sc) { st }
+            }
+            p[id: "who"](class: "who") { f"You are {my}." }
+            ul[id: "here"](class: "here") {
+                for here(b, name) { li[key: b.to_string()](class: "person") { name } }
+            }
+            if not board(_) {
+                section[id: "lobby"](class: "card lobby") {
+                    if seeking(_) {
+                        p[id: "seeking"](class: "seeking") { "Looking for an opponent…" }
+                        button[id: "cancel"] { "Cancel" }
+                    }
+                    if not seeking(_) { button[id: "play"](class: "primary") { "Play" } }
+                    h2 { "Games being played" }
+                    ul[id: "games"](class: "games") {
+                        for live_games(g, xname, oname, k) {
+                            li[id: f"game-{g}", pos: 0i64 - g as i64] {
+                                span(class: "vs") { f"{xname} (X) vs {oname} (O)" }
+                                span(class: "moves") { f"{k} moves" }
+                                button[id: f"watch-{g}"](class: "quiet") { "Watch" }
+                            }
+                        }
+                    }
+                }
+            }
+            if board(g), headline(g, line), turn_of(g, t), seat(g, m, end) {
+                section[id: "board"](class: "card board") {
+                    p[id: "headline"](class: if t { "headline go" } else { "headline" }) { line }
+                    div[id: "grid"](class: "grid") {
+                        for squares(g, cell, sm, w) {
+                            button[id: f"sq-{g}-{cell}", pos: cell as i64](class: square_class(sm, w, t && sm == "")) {
+                                sm
+                            }
+                        }
+                    }
+                    div(class: "actions") {
+                        if m != "" && end == "" { button[id: "resign"](class: "quiet") { "Resign" } }
+                        if m != "" && end != "" { button[id: "again"](class: "primary") { "Play again" } }
+                        button[id: "lobby"](class: "quiet") { "Back to the lobby" }
+                    }
+                }
+            }
+        }
+    }
+}

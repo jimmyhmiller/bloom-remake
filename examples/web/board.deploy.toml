@@ -1,0 +1,34 @@
+# A one-node deployment of board.bls whose page is served by the node (docs/design/CLIENTS.md §4). From the repository
+# root: `scripts/run-app.sh board`, then open http://localhost:8080/ in two tabs. By hand, after scripts/build-web.sh:
+#
+#   BLOSSOM_SEED=$(openssl rand -hex 16) blossom run --deploy examples/web/board.deploy.toml --node s --insecure-dev \
+#       --init-fresh --web 127.0.0.1:8080
+#
+# Later runs drop --init-fresh to keep the store (and keep the same seed).
+# With `--admin 127.0.0.1:9900`, ask the node's database while it runs:
+#
+#   blossom query --deploy examples/web/board.deploy.toml --node s --admin 127.0.0.1:9900 \
+#       'doing(t) = cards(_, _, _, t, 1u64, _, true)'
+format = 1
+
+[deployment]
+id = "board-demo"
+program = "board"
+version = 1
+source = "board.bls"
+
+[[node]]
+name = "s"
+role = "Server"
+addr = "127.0.0.1:7472"
+principal = "spiffe://demo/board/Server/s"
+
+[security]
+mode = "insecure-dev"
+
+[storage]
+data_dir = ".data/board"
+
+[web]
+link = "http"
+style = "board.css"

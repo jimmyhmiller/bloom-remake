@@ -229,8 +229,56 @@ const LISTENERS = {
   change: ["change", (e, id) => ({ kind: "change", id, checked: Boolean(e.target.checked) })],
 };
 
+/** HTML drag and drop, reported as `drop(id, target)` while the program reads `drop`: the dragged element (one the
+ * program made `draggable`) and the element with an id it was dropped on. The dragged element has `data-dragging`
+ * and the target under it `data-dragover` meanwhile, for the app's stylesheet. */
+function listenDrops() {
+  let dragged = null;
+  let over = null;
+  const hover = (el) => {
+    if (over === el) return;
+    over?.removeAttribute("data-dragover");
+    over = el;
+    over?.setAttribute("data-dragover", "");
+  };
+  const end = () => {
+    hover(null);
+    dragged?.removeAttribute("data-dragging");
+    dragged = null;
+  };
+  const live = () => app && listening.has("drop") && !inspector.on;
+  mount.addEventListener("dragstart", (e) => {
+    const source = e.target.closest?.("[data-bid]");
+    if (!live() || !source) return;
+    dragged = source;
+    source.setAttribute("data-dragging", "");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", source.dataset.bid);
+  });
+  mount.addEventListener("dragover", (e) => {
+    const target = e.target.closest?.("[data-bid]");
+    if (!live() || !dragged || !target) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    hover(target === dragged ? null : target);
+  });
+  mount.addEventListener("dragleave", (e) => {
+    if (e.target === over && !over.contains(e.relatedTarget)) hover(null);
+  });
+  mount.addEventListener("drop", (e) => {
+    const target = e.target.closest?.("[data-bid]");
+    const source = dragged;
+    end();
+    if (!live() || !source || !target) return;
+    e.preventDefault();
+    if (target !== source) send({ kind: "drop", id: source.dataset.bid, target: target.dataset.bid });
+  });
+  mount.addEventListener("dragend", end);
+}
+
 /** Every DOM event the host knows, reported while the running program reads its input. */
 function listen() {
+  listenDrops();
   addEventListener("hashchange", () => {
     if (app && listening.has("route")) send({ kind: "route", hash: location.hash });
   });
@@ -993,7 +1041,9 @@ async function main() {
       show(null);
     });
     await runMember(appText);
-    if (STYLES[appName]) css.href = STYLES[appName];
+    const style = JSON.parse(appText).style;
+    if (style) css.href = style;
+    else if (STYLES[appName]) css.href = STYLES[appName];
     requestAnimationFrame(frame);
     document.body.dataset.blossom = "ready";
     return;

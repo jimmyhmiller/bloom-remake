@@ -97,6 +97,8 @@ pub(crate) struct WebCtx {
     pub app: Arc<str>,
     /// The page's files.
     pub root: Option<PathBuf>,
+    /// The deployment's stylesheet (`[web] style`), read when asked for, so an edit shows on the next load.
+    pub style: Option<PathBuf>,
     pub next_conn: Arc<AtomicU64>,
     /// The program's client roles, by name.
     pub client_roles: Arc<BTreeMap<String, ClientRole>>,
@@ -175,6 +177,11 @@ fn serve_get(req: &web::Request, w: &mut TcpStream, ctx: &WebCtx, keep: bool) ->
     }
     match req.path.as_str() {
         "/blossom/app.json" => r(200, "OK", "application/json", ctx.app.as_bytes()).write(w, keep),
+        web::STYLE_PATH if ctx.style.is_some() => {
+            let file = ctx.style.as_ref().expect("checked by the guard");
+            let body = std::fs::read(file).map_err(RuntimeError::Io)?;
+            r(200, "OK", "text/css; charset=utf-8", &body).write(w, keep)
+        }
         path if path.starts_with("/blossom/client/") => {
             match path
                 .strip_prefix("/blossom/client/")

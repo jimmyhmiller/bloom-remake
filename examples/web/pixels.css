@@ -1,0 +1,64 @@
+/* The shared canvas (examples/web/pixels.bls): its deployment names this file (`[web] style`). */
+@import url("/apps.css");
+
+.app.pixels {
+  max-width: 60rem;
+}
+.layout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  align-items: flex-start;
+}
+.canvas {
+  flex: 1 1 420px;
+  max-width: 600px;
+  aspect-ratio: 1;
+  border: 1px solid var(--app-line);
+  border-radius: 4px;
+  background: #fff;
+  touch-action: manipulation;
+}
+.canvas rect {
+  cursor: crosshair;
+  stroke: rgb(0 0 0 / 0.06);
+  stroke-width: 0.03;
+}
+.canvas rect:hover {
+  stroke: var(--app-accent);
+  stroke-width: 0.12;
+}
+.side {
+  flex: 0 1 15rem;
+}
+.wait {
+  margin: 0 0 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--app-muted);
+}
+.palette {
+  display: grid;
+  grid-template-columns: repeat(5, 2.2rem);
+  gap: 0.4rem;
+  margin-bottom: 1.2rem;
+}
+.app .swatch {
+  width: 2.2rem;
+  height: 2.2rem;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--app-line);
+}
+.app .swatch.on {
+  outline: 3px solid var(--app-accent);
+  outline-offset: 1px;
+}
+.leaders {
+  padding-left: 1.2rem;
+  margin: 0;
+}
+.leaders li span.count {
+  float: right;
+  color: var(--app-muted);
+  font-variant-numeric: tabular-nums;
+}
