@@ -522,6 +522,8 @@ pub struct HAgg {
     pub args: Vec<HExpr>,
     /// `default e` (with a `per` driver or no grouping columns).
     pub default: Option<HExpr>,
+    /// `by k̄`: the keys that order `collect!`'s values and number `index!`'s tuples (before the canonical order).
+    pub by: Vec<HExpr>,
     pub span: Span,
 }
 

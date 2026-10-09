@@ -1,0 +1,28 @@
+//! Pointer events by what they land in (docs/design/BROWSER.md): include it after `ui.bls`.
+//!
+//! An event names the innermost element under the pointer. In a tree literal every element has an id (a derived one
+//! when it is not given), so a click on the text of a button names the text's `span`, not the button. These views hold
+//! the element an event names and every element it is inside, walked up the page's own `elem` rows: `on
+//! clicked(id), vote_button(id, …)` fires for a click anywhere in the button, as a DOM listener on it would.
+//!
+//! The page as the event found it is the tick's: a rule that reads these views and `emit`s into a table the page
+//! shows is a same-tick cycle (BLS0502); write `next` or `upsert`, which take effect at the next tick.
+
+/// A click's element and the elements it is inside.
+view clicked(a) {
+    click(t), let a = t;
+    clicked(x), elem(x, a, _, _) where a != "";
+}
+view dblclicked(a) {
+    dblclick(t), let a = t;
+    dblclicked(x), elem(x, a, _, _) where a != "";
+}
+view pressed(a) {
+    press(t), let a = t;
+    pressed(x), elem(x, a, _, _) where a != "";
+}
+/// A dropped element, with the element it was dropped on and every element that one is inside.
+view dropped(item, a) {
+    drop(item, t), let a = t;
+    dropped(item, x), elem(x, a, _, _) where a != "";
+}

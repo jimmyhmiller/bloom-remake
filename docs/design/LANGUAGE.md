@@ -1918,7 +1918,7 @@ Both are head-only (a view column or a statement head argument), because they nu
 tuples**, not body rows.
 
 - `index!([by keys] [per g])`: the dense 0-based rank of each head tuple within its group, in (keys, canonical)
-  order, recomputed every tick. Over a persistent input it re-ranks every tick; ANA-011 lints it (BLS0601).
+  order, recomputed every tick. The keys read only the view's columns, so each head tuple has one (BLS0511). Over a persistent input it re-ranks every tick; ANA-011 lints it (BLS0601).
 - `seq!([by keys] [per g] [durable] [release])`: each distinct head tuple gets the next number the first tick it
   appears (within that tick, in (keys, canonical) order); numbers are never reused. `release` drops a tuple's
   number when the tuple leaves (the number is still never reused). The state must be `durable` if the numbers reach
@@ -3212,7 +3212,7 @@ never truncated or defaulted).
 | BLS0507 | E | a relation atom after `where` |
 | BLS0508 | E | a body atom at another location without `#[localize]` (ANA-004) |
 | BLS0509 | E | a spec-only oracle or trace relation in a program rule (ANA-010) |
-| BLS0511 | E | a `default` with grouping columns but no `per` driver, a driver that does not determine the group, or, with a driver, an aggregate with no identity (`min!`, `max!`, `index!`) and no `default` |
+| BLS0511 | E | a `default` with grouping columns but no `per` driver, a driver that does not determine the group, with a driver, an aggregate with no identity (`min!`, `max!`, `index!`) and no `default`, or an `index!` key (`by`) that reads more than the view's columns |
 
 **Choice and determinism (BLS06xx)**
 
@@ -3264,7 +3264,9 @@ never truncated or defaulted).
 **Lints (BLS1xxx)**, warnings by default: BLS1001 naming convention; BLS1002 unused variable, relation or
 interface (ANA-008); BLS1003 possible same-tick key conflict, with a two-message example (ANA-007); BLS1004 wildcard
 under an aggregate; BLS1005 localized cross-node body; BLS1006 logical timer in a deployed build; BLS1007 soft-state
-TTL shorter than a body's (ANA-006); BLS1008 `if` that binds variables or `for` that binds none.
+TTL shorter than a body's (ANA-006); BLS1008 `if` that binds variables or `for` that binds none; BLS1011 a `while`
+handler that writes an output needs a row of an ungrouped aggregate view with no `default`, which has none while its
+input is empty.
 
 **Runtime (BLSRxxx)**: BLSR001 key violation (SEM-050), naming both derivations; BLSR002 conflicting upserts
 (SEM-051), naming both statements; BLSR003 an invariant with `abort`; BLSR004 arithmetic overflow, division by zero,

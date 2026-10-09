@@ -1508,6 +1508,9 @@ impl Checker<'_> {
             arg_terms.push(self.expr(hir, scope, e));
         }
         let default = agg.default.as_mut().map(|d| self.expr(hir, scope, d));
+        for k in &mut agg.by {
+            self.expr(hir, scope, k);
+        }
         if self.apply {
             return;
         }

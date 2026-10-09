@@ -1917,3 +1917,63 @@ fn clients_talk_through_servers_and_links_cross_a_client_boundary() {
         "{kind:?}"
     );
 }
+
+#[test]
+fn an_index_key_reads_only_the_views_columns_bls0511() {
+    let src = with_head(
+        "table t(a: u64, b: u64);\n\
+         view ok(a, r = index!(by a)) = t(a, _);\n",
+    );
+    assert_eq!(codes(src), Vec::<String>::new());
+    let src = with_head(
+        "table t(a: u64, b: u64);\n\
+         view bad(a, r = index!(by b)) = t(a, b);\n",
+    );
+    assert_eq!(codes(src), ["BLS0511"]);
+}
+
+#[test]
+fn an_if_and_its_else_each_give_an_element_its_content() {
+    let tree = "output elem(id: String, parent: String, pos: i64, tag: String);\n\
+                output attr(id: String, name: String, value: String);\n\
+                output text(id: String, s: String);\n\
+                tree html { node elem(id, parent, pos, tag); props attr(id, name, value); content text(id, s); }\n";
+    let ok = Box::leak(
+        format!(
+            "{HEAD}{tree}page: on go(k, _) {{ emit html p[id: \"p\"] {{ if k > 1 {{ \"many\" }} else {{ \"one\" }} }} }}\n"
+        )
+        .into_boxed_str(),
+    );
+    assert_eq!(codes(ok), Vec::<String>::new());
+    // Content beside an `if` that gives some too: both may hold.
+    let two = Box::leak(
+        format!("{HEAD}{tree}page: on go(k, _) {{ emit html p[id: \"p\"] {{ \"x\" if k > 1 {{ \"many\" }} }} }}\n")
+            .into_boxed_str(),
+    );
+    assert_eq!(codes(two), ["BLS0303"]);
+}
+
+#[test]
+fn a_page_over_an_aggregate_without_default_is_bls1011() {
+    let base = "output shown(n: u64);\ntable items(i: u64);\ntable latest(n: u64) key();\n";
+    let page = |view: &str, rule: &str| -> &'static str {
+        Box::leak(format!("program t version 1;\n{base}{view}\n{rule}\n").into_boxed_str())
+    };
+    // A page (an output) over a count with no default: no row, and no page, while `items` is empty.
+    assert_eq!(
+        codes(page("view total(k = count!(i)) = items(i);", "draw: while total(k) { emit shown(k); }")),
+        ["BLS1011"]
+    );
+    assert_eq!(
+        codes(page(
+            "view total(k = count!(i default 0u64)) = items(i);",
+            "draw: while total(k) { emit shown(k); }"
+        )),
+        Vec::<String>::new()
+    );
+    // Waiting for a first row before acting on state is the usual idiom: not warned.
+    assert_eq!(
+        codes(page("view top(k = max!(i)) = items(i);", "keep: while top(k) { upsert latest(k); }")),
+        Vec::<String>::new()
+    );
+}

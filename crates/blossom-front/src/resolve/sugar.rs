@@ -691,11 +691,15 @@ impl<'t> Resolver<'t, '_> {
                     ));
                 }
                 Child::If { cond, then, els, span } => {
-                    let then = self.tree_children(cx, v, info, then, place, ordinal, content_seen)?;
+                    // An `if` and its `else` never hold together: each may give the element its content.
+                    let before = *content_seen;
+                    let mut then_seen = before;
+                    let then = self.tree_children(cx, v, info, then, place, ordinal, &mut then_seen)?;
+                    let mut else_seen = before;
                     let els = match els.as_deref() {
                         None => None,
                         Some(ChildElse::Children(cs)) => Some(Box::new(crate::ast::Else::Block(Block {
-                            stmts: self.tree_children(cx, v, info, cs, place, ordinal, content_seen)?,
+                            stmts: self.tree_children(cx, v, info, cs, place, ordinal, &mut else_seen)?,
                             span: *span,
                         }))),
                         Some(ChildElse::If(c)) => {
@@ -706,7 +710,7 @@ impl<'t> Resolver<'t, '_> {
                                 std::slice::from_ref(&**c),
                                 place,
                                 ordinal,
-                                content_seen,
+                                &mut else_seen,
                             )?;
                             match inner.pop() {
                                 Some(s @ Stmt::If { .. }) if inner.is_empty() => {
@@ -716,6 +720,7 @@ impl<'t> Resolver<'t, '_> {
                             }
                         }
                     };
+                    *content_seen = then_seen || else_seen;
                     out.push(Stmt::If {
                         attrs: Vec::new(),
                         cond: cond.clone(),

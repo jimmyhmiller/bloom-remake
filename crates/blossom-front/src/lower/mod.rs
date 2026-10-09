@@ -14,6 +14,7 @@ mod expr;
 pub(crate) use expr::try_const;
 pub(crate) mod lattice;
 mod rules;
+pub(crate) use rules::mentioned_expr;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

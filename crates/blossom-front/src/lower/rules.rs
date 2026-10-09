@@ -192,7 +192,7 @@ fn mentioned_pat(p: &HPat, out: &mut BTreeSet<HVarId>) {
     }
 }
 
-fn mentioned_expr(e: &HExpr, out: &mut BTreeSet<HVarId>) {
+pub(crate) fn mentioned_expr(e: &HExpr, out: &mut BTreeSet<HVarId>) {
     match &e.kind {
         HExprKind::Var(v) => {
             out.insert(*v);
@@ -1231,13 +1231,20 @@ impl<'h> Lowerer<'h> {
             AggKind::Sum => AggFunc::Sum,
             AggKind::Min => AggFunc::Min,
             AggKind::Max => AggFunc::Max,
-            AggKind::Collect => AggFunc::CollectVec,
+            AggKind::Collect if g.by.is_empty() => AggFunc::CollectVec,
+            // `collect!(e by k̄)` holds (k̄, e, valuation) and keeps `e`: the tuples' canonical order is by the keys.
+            AggKind::Collect => AggFunc::CollectVecAt {
+                at: u32::try_from(g.by.len()).map_err(|_| internal_error!("too many `by` keys"))?,
+            },
             AggKind::Index => return Err(internal_error!("`index!` reached a plain aggregate")),
         };
         let args = if g.args.is_empty() {
             self.var_terms(d, over)?
         } else {
             let mut out = Vec::new();
+            for k in &g.by {
+                out.push(self.term(d, k)?);
+            }
             for e in &g.args {
                 out.push(self.term(d, e)?);
             }
@@ -1654,14 +1661,16 @@ impl<'h> Lowerer<'h> {
     }
 
     /// A view with an `index!()` column (LANGUAGE §10.5): each distinct head tuple of the tick gets its dense 0-based
-    /// rank in canonical order. The reference lowering is quadratic; an engine sorts instead.
+    /// rank in (keys, canonical) order, the keys being `index!(by k̄)`'s (none: canonical order). The keys read only
+    /// the view's columns (the resolver checks), so each head tuple has one. The reference lowering is quadratic; an
+    /// engine sorts instead.
     ///
     /// ```ir
-    /// v$h(Ḡ) :- v$u(…).                                  // the head tuples, without the index
-    /// v$lt(Ḡ, Ḡ2) :- v$h(Ḡ), v$h(Ḡ2), (Ḡ2) < (Ḡ).        // canonical order
-    /// v(Ḡ, count<Ḡ2>) :- v$lt(Ḡ, Ḡ2).
-    /// v$ak(Ḡ) :- v$lt(Ḡ, _).
-    /// v(Ḡ, 0) :- v$h(Ḡ), notin v$ak(Ḡ).
+    /// v$h(K̄, Ḡ) :- v$u(…), K̄ := k̄.                        // the head tuples and their keys, without the index
+    /// v$lt(K̄, Ḡ, K̄2, Ḡ2) :- v$h(K̄, Ḡ), v$h(K̄2, Ḡ2), (K̄2, Ḡ2) < (K̄, Ḡ).
+    /// v(Ḡ, count<(K̄2, Ḡ2)>) :- v$lt(K̄, Ḡ, K̄2, Ḡ2).
+    /// v$ak(Ḡ) :- v$lt(_, Ḡ, _, _).
+    /// v(Ḡ, 0) :- v$h(_, Ḡ), notin v$ak(Ḡ).
     /// ```
     #[allow(clippy::too_many_arguments)]
     fn index_view(
@@ -1677,11 +1686,11 @@ impl<'h> Lowerer<'h> {
     ) -> Result<(), InternalError> {
         let base = names.base.clone();
         let mut groups: Vec<HVarId> = Vec::new();
-        let mut index_at = None;
+        let mut index = None;
         for (i, c) in cols.iter().enumerate() {
             match c {
                 HViewAggCol::Group(uv) => groups.push(*uv),
-                HViewAggCol::Agg(a) if a.func == AggKind::Index && index_at.is_none() => index_at = Some(i),
+                HViewAggCol::Agg(a) if a.func == AggKind::Index && index.is_none() => index = Some((i, a)),
                 HViewAggCol::Agg(a) => {
                     return Err(internal_error!(
                         "a view with `index!` and another aggregate column ({:?}) reached lowering",
@@ -1690,17 +1699,26 @@ impl<'h> Lowerer<'h> {
                 }
             }
         }
-        let index_at = index_at.ok_or_else(|| internal_error!("an index view without its index column"))?;
+        let (index_at, agg) = index.ok_or_else(|| internal_error!("an index view without its index column"))?;
         let gtys: Vec<TypeId> = groups
             .iter()
             .map(|g| self.var_ty(union, *g))
             .collect::<Result<_, _>>()?;
-        let gcols = |pre: &str| -> Vec<ir::Column> {
-            gtys.iter()
+        let ktys: Vec<TypeId> = agg.by.iter().map(super::expr::ty_of).collect::<Result<_, _>>()?;
+        let nk = ktys.len();
+        // A ranked tuple: the keys, then the head tuple.
+        let ttys: Vec<TypeId> = ktys.iter().chain(&gtys).copied().collect();
+        let tcols = |pre: &str| -> Vec<ir::Column> {
+            ttys.iter()
                 .enumerate()
                 .map(|(i, t)| column(Symbol::intern(&format!("{pre}{i}")), *t, false))
                 .collect()
         };
+        let gcols: Vec<ir::Column> = gtys
+            .iter()
+            .enumerate()
+            .map(|(i, t)| column(Symbol::intern(&format!("g{i}")), *t, false))
+            .collect();
         let construct = self
             .b
             .begin_construct(
@@ -1714,10 +1732,11 @@ impl<'h> Lowerer<'h> {
                 surface(&names.module, None, v.span),
             )
             .map_err(ir)?;
-        let h = self.generated(suffixed(&r.name, "$h"), gcols("g"), None, r.role, false, v.span)?;
+        let h = self.generated(suffixed(&r.name, "$h"), tcols("t"), None, r.role, false, v.span)?;
         self.b
             .set_construct_kind(
                 construct,
+                // The `by` keys are `v$h`'s leading columns, so its canonical order is the keys' order.
                 ConstructKind::Index(ir::IndexSpec {
                     input: h,
                     output: rel,
@@ -1727,16 +1746,20 @@ impl<'h> Lowerer<'h> {
                 }),
             )
             .map_err(ir)?;
-        let mut lt_cols = gcols("g");
-        lt_cols.extend(gcols("h"));
+        let mut lt_cols = tcols("t");
+        lt_cols.extend(tcols("u"));
         let lt = self.generated(suffixed(&r.name, "$lt"), lt_cols, None, r.role, false, v.span)?;
-        let ak = self.generated(suffixed(&r.name, "$ak"), gcols("g"), None, r.role, false, v.span)?;
+        let ak = self.generated(suffixed(&r.name, "$ak"), gcols, None, r.role, false, v.span)?;
         let role = r.role;
-        // v$h(Ḡ) :- v$u(union).
+        // v$h(K̄, Ḡ) :- v$u(union), K̄ := k̄.
         let mut d = Draft::new(union);
         let uargs = self.var_terms(&mut d, union_vars)?;
         d.lits.push(Literal::Pos(ir_atom(u, uargs, v.span)));
-        let gargs = self.var_terms(&mut d, &groups)?;
+        let mut hargs = Vec::new();
+        for k in &agg.by {
+            hargs.push(self.term(&mut d, k)?);
+        }
+        hargs.extend(self.var_terms(&mut d, &groups)?);
         let l = self.label(format!("{base}$h"));
         d.build(
             &mut self.b,
@@ -1745,7 +1768,7 @@ impl<'h> Lowerer<'h> {
             v.span,
             Head {
                 rel: h,
-                args: gargs.into_iter().map(HeadArg::Term).collect(),
+                args: hargs.into_iter().map(HeadArg::Term).collect(),
                 mode: HeadMode::Insert,
             },
             role,
@@ -1756,14 +1779,14 @@ impl<'h> Lowerer<'h> {
             out
         };
         let unit = self.b.intern_const(Value::Unit).map_err(ir)?;
-        let gtuple = super::expr::tuple_type(&mut self.b, gtys.clone())?;
-        // v$lt(Ḡ, Ḡ2) :- v$h(Ḡ), v$h(Ḡ2), (Ḡ2) < (Ḡ).
+        let ttuple = super::expr::tuple_type(&mut self.b, ttys.clone())?;
+        // v$lt(T̄, T̄2) :- v$h(T̄), v$h(T̄2), (T̄2) < (T̄), each T̄ the keys and the head tuple.
         let mut d = Draft::new(union);
-        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
-        let b2: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let a: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let b2: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
         d.lits.push(Literal::Pos(ir_atom(h, a.clone(), v.span)));
         d.lits.push(Literal::Pos(ir_atom(h, b2.clone(), v.span)));
-        let tup = |xs: &[Term]| super::expr::tuple_expr(unit, gtuple, xs.iter().cloned().map(Expr::Term).collect());
+        let tup = |xs: &[Term]| super::expr::tuple_expr(unit, ttuple, xs.iter().cloned().map(Expr::Term).collect());
         d.lits.push(Literal::Guard(Expr::Binary {
             op: ir::BinOp::CanonLt,
             lhs: Box::new(tup(&b2)),
@@ -1784,14 +1807,14 @@ impl<'h> Lowerer<'h> {
             },
             role,
         )?;
-        // v(Ḡ, count<Ḡ2>) :- v$lt(Ḡ, Ḡ2).
+        // v(Ḡ, count<T̄2>) :- v$lt(K̄, Ḡ, T̄2).
         let mut d = Draft::new(union);
-        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
-        let b2: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let a: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let b2: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
         let mut lt_args = a.clone();
         lt_args.extend(b2.clone());
         d.lits.push(Literal::Pos(ir_atom(lt, lt_args, v.span)));
-        let mut head: Vec<HeadArg> = a.iter().cloned().map(HeadArg::Term).collect();
+        let mut head: Vec<HeadArg> = a[nk..].iter().cloned().map(HeadArg::Term).collect();
         head.insert(
             index_at.min(head.len()),
             HeadArg::Agg(AggCall {
@@ -1813,11 +1836,12 @@ impl<'h> Lowerer<'h> {
             },
             role,
         )?;
-        // v$ak(Ḡ) :- v$lt(Ḡ, _).
+        // v$ak(Ḡ) :- v$lt(_, Ḡ, _).
         let mut d = Draft::new(union);
-        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
-        let mut lt_args = a.clone();
-        lt_args.extend(gtys.iter().map(|_| Term::Wild));
+        let a: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let mut lt_args: Vec<Term> = (0..nk).map(|_| Term::Wild).collect();
+        lt_args.extend(a[nk..].iter().cloned());
+        lt_args.extend(ttys.iter().map(|_| Term::Wild));
         d.lits.push(Literal::Pos(ir_atom(lt, lt_args, v.span)));
         let l = self.label(format!("{base}$ak"));
         d.build(
@@ -1827,16 +1851,18 @@ impl<'h> Lowerer<'h> {
             v.span,
             Head {
                 rel: ak,
-                args: a.into_iter().map(HeadArg::Term).collect(),
+                args: a[nk..].iter().cloned().map(HeadArg::Term).collect(),
                 mode: HeadMode::Insert,
             },
             role,
         )?;
-        // v(Ḡ, 0) :- v$h(Ḡ), notin v$ak(Ḡ).
+        // v(Ḡ, 0) :- v$h(_, Ḡ), notin v$ak(Ḡ).
         let mut d = Draft::new(union);
-        let a: Vec<Term> = gtys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
-        d.lits.push(Literal::Pos(ir_atom(h, a.clone(), v.span)));
-        d.lits.push(Literal::Neg(ir_atom(ak, a.clone(), v.span)));
+        let a: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
+        let mut h_args: Vec<Term> = (0..nk).map(|_| Term::Wild).collect();
+        h_args.extend(a[nk..].iter().cloned());
+        d.lits.push(Literal::Pos(ir_atom(h, h_args, v.span)));
+        d.lits.push(Literal::Neg(ir_atom(ak, a[nk..].to_vec(), v.span)));
         let zero = self
             .b
             .intern_const(Value::Int(blossom_value::value::IntValue::U64(0)))
@@ -1849,7 +1875,7 @@ impl<'h> Lowerer<'h> {
             v.span,
             Head {
                 rel,
-                args: head_args(a, Term::Const(zero)),
+                args: head_args(a[nk..].to_vec(), Term::Const(zero)),
                 mode: HeadMode::Insert,
             },
             role,

@@ -95,6 +95,7 @@ at Server {
 
 at Browser {
     include "ui.bls";
+    include "events.bls";
 
     /// This tab's name; until it has one, the page asks for it.
     durable table me(name: String) key();
@@ -164,12 +165,12 @@ at Browser {
             delete drafts(f, s);
         }
     }
-    vote_it: on click(id), choice_button(id, w, n, i), poll_list(w, n, _, _, _, true), next_change(s), srv in Server {
+    vote_it: on clicked(id), choice_button(id, w, n, i), poll_list(w, n, _, _, _, true), next_change(s), srv in Server {
         next vote_list(w, n, self, i, s);
         send vote(w, n, i, s) to srv;
         upsert next_s(s + 1u64);
     }
-    close_it: on click(id), close_button(id, n), poll_list(self, n, at, q, cs, true), srv in Server {
+    close_it: on clicked(id), close_button(id, n), poll_list(self, n, at, q, cs, true), srv in Server {
         next poll_list(self, n, at, q, cs, false);
         send close(n) to srv;
     }
@@ -181,8 +182,7 @@ at Browser {
             where f.starts_with("opt-") && t.trim() != "";
     view slots(k = max!(i + 2u64 default 2u64)) = filled(i, _);
     view slot(i) = slots(k), i in 0u64..min(k, 8u64);
-    view numbered(ps = collect!((i, t.trim()))) = filled(i, t);
-    view drafted(cs) = numbered(ps), let cs = seconds(ps);
+    view drafted(cs = collect!(t.trim() by i)) = filled(i, t);
     view field(f) {
         let f = "name";
         let f = "question";
@@ -232,15 +232,6 @@ at Browser {
         }
     }
 
-    /// The texts of numbered pieces, in their order.
-    fn seconds(v: Vec<(u64, String)>) -> Vec<String> {
-        v.map(|p| p.1)
-    }
-
-    fn byline(by: String, open: bool) -> String {
-        if open { f"asked by {by}" } else { f"asked by {by} · closed" }
-    }
-
     fn joined(names: Vec<String>) -> String {
         names.fold("", |acc, x| if acc == "" { x } else { acc ++ ", " ++ x })
     }
@@ -285,7 +276,9 @@ at Browser {
                         "card poll closed"
                     }) {
                         h2 { question }
-                        p(class: "by") { byline(by, open) }
+                        p(class: "by") {
+                            if open { f"asked by {by}" } else { f"asked by {by} · closed" }
+                        }
                         ul(class: "choices") {
                             for choice(w, n, i, text), count(w, n, i, k), mine(w, n, i, m), voters(w, n, i, vs) {
                                 li[key: i] {
