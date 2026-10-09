@@ -10,8 +10,12 @@
 //! Each member runs its ticks durably before its messages leave (the object's driver), so Invariant R holds per
 //! member. The host's own store holds only its restart count, which its peers' incarnation check needs.
 //!
-//! Not yet (KEYED.md §4): pages connected to members (sub-slice 3), streams and external sessions at members, and
-//! recording traces of members.
+//! With `--web`, the host serves the program's pages too: a page names the member it links to (`/?member=KEY`, its
+//! `HELLO`), the host admits it (client members' ids are the host's, from one registry for all its members) and hands
+//! the link to that member, whose program sees the page as `Browser.connected` and the page sees the member as
+//! `Game.connected`. A page naming a member another host runs is refused, with that host's name.
+//!
+//! Not yet (KEYED.md §4): streams and external sessions at members, and recording traces of members.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -35,6 +39,7 @@ use crate::RuntimeError;
 use crate::clock::{OsEntropy, wall_now};
 use crate::deploy::DeploymentSpec;
 use crate::keyed::{Routing, addressee, member_of};
+use crate::members::MemberEvent;
 use crate::net::{self, Catalog, Conn, Identity};
 use crate::object::{ObjectConfig, ObjectNode, Output};
 use crate::server::{ServerConfig, admit_peer, peer_writer, spawn};
@@ -64,9 +69,15 @@ fn bump(c: &AtomicU64, n: u64) {
     c.fetch_add(n, Ordering::Relaxed);
 }
 
+/// What reaches the hosting thread: a message for one of the host's members, or an event of a page's link.
+enum Inbound {
+    Message(Message),
+    Link(MemberEvent),
+}
+
 /// A message for one of the host's members: who sent it (`from`, an id in the host's member table for a member),
 /// through which node (`via`: the sender, or the host of a sending member), and the row (column 0 names the member).
-struct Inbound {
+struct Message {
     to: MemberRef,
     from: NodeId,
     via: NodeId,
@@ -83,8 +94,11 @@ pub struct Hosting {
     pub stats: Arc<HostStats>,
     pub node: NodeId,
     pub peer_addr: SocketAddr,
+    /// Where `--web` serves the pages and their links.
+    pub web_addr: Option<SocketAddr>,
     /// The host's restart count (its peers refuse an older incarnation's links).
     pub restarts: u64,
+    web_conns: Arc<crate::server::Conns>,
 }
 
 impl Hosting {
@@ -109,10 +123,6 @@ impl Hosting {
             return Err(RuntimeError::Config(format!("node {} hosts no keyed role", cfg.node)));
         }
         for (what, set) in [
-            (
-                "pages (`--web`) at a host of keyed members (KEYED.md §4, sub-slice 3)",
-                cfg.web.is_some(),
-            ),
             ("queries (`--admin`) at a host of keyed members", cfg.admin.is_some()),
             ("recording traces of keyed members", cfg.record.is_some()),
             (
@@ -154,6 +164,62 @@ impl Hosting {
             })?);
         }
         let (inbox, rx) = mpsc::sync_channel::<Inbound>(4096);
+        let web_conns = Arc::new(crate::server::Conns::default());
+        let web_addr = match &cfg.web {
+            None => None,
+            Some(w) => {
+                let l = TcpListener::bind(w.addr).map_err(|e| RuntimeError::Net(format!("bind {}: {e}", w.addr)))?;
+                let addr = l.local_addr().map_err(RuntimeError::Io)?;
+                let client_roles = crate::members::project_clients(&artifact)?;
+                let client_names: Vec<String> = client_roles.keys().cloned().collect();
+                let role_name = artifact
+                    .roles
+                    .get(me.0 as usize)
+                    .copied()
+                    .flatten()
+                    .and_then(|r| program.roles.get(r))
+                    .map(|r| r.name.to_string())
+                    .ok_or_else(|| internal_error!("a host without its role"))?;
+                let app = crate::web::app_json(&spec, &client_names, &cfg.node, spec.web_link)
+                    .and_then(|text| keyed_app(&text, &role_name))
+                    .map_err(RuntimeError::Config)?;
+                let registry = blossom_store::ClientRegistry::open(Arc::new(RealFs), &dir)?;
+                let post_inbox = inbox.clone();
+                let keyed = {
+                    let (routing, artifact, names) = (routing.clone(), artifact.clone(), names.clone());
+                    move |t: Option<&(String, String)>| keyed_target(&artifact, &routing, &names, me, t)
+                };
+                let ctx = crate::members::WebCtx {
+                    artifact: artifact.clone(),
+                    id: id.clone(),
+                    me,
+                    restarts,
+                    nonce,
+                    catalog: catalog.clone(),
+                    post: Arc::new(move |e| post_inbox.send(Inbound::Link(e)).is_ok()),
+                    registry: Arc::new(Mutex::new(registry)),
+                    app: Arc::from(app.as_str()),
+                    root: w.root.clone(),
+                    style: spec.web_style.clone(),
+                    next_conn: Arc::new(AtomicU64::new(0)),
+                    client_roles: Arc::new(client_roles),
+                    sessions: Arc::new(crate::http_link::Sessions::default()),
+                    keyed: Arc::new(keyed),
+                };
+                {
+                    let (sessions, stop) = (ctx.sessions.clone(), stop.clone());
+                    threads.push(spawn("web-sessions", move || {
+                        crate::http_link::reap_loop(sessions, stop)
+                    })?);
+                }
+                let (stop, conns) = (stop.clone(), web_conns.clone());
+                let web_stats = Arc::new(crate::server::Stats::default());
+                threads.push(spawn("web-listener", move || {
+                    crate::server::web_accept_loop(l, ctx, stop, conns, web_stats)
+                })?);
+                Some(addr)
+            }
+        };
         {
             let ctx = Readers {
                 artifact: artifact.clone(),
@@ -182,6 +248,7 @@ impl Hosting {
             members,
             routing,
             objects: BTreeMap::new(),
+            links: BTreeMap::new(),
             catalog,
             peers,
             local: VecDeque::new(),
@@ -205,7 +272,9 @@ impl Hosting {
             stats,
             node: me,
             peer_addr,
+            web_addr,
             restarts,
+            web_conns,
         })
     }
 
@@ -228,6 +297,7 @@ impl Hosting {
             None => Ok(()),
         };
         self.stop.store(true, Ordering::SeqCst);
+        self.web_conns.close_all();
         if let Ok(conns) = self.conns.lock() {
             for c in conns.iter() {
                 let _ = c.shutdown(std::net::Shutdown::Both);
@@ -287,6 +357,49 @@ fn next_incarnation(dir: &Path, mode: OpenMode) -> Result<u64, RuntimeError> {
         .and_then(|d| d.sync_all())
         .map_err(RuntimeError::Io)?;
     Ok(next)
+}
+
+/// The host's `app.json`: the node's, naming the keyed role whose members the host's pages link to.
+fn keyed_app(text: &str, role: &str) -> Result<String, String> {
+    let mut app: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if let serde_json::Value::Object(fields) = &mut app {
+        fields.insert("keyed".to_owned(), serde_json::Value::String(role.to_owned()));
+    }
+    serde_json::to_string(&app).map_err(|e| e.to_string())
+}
+
+/// The member a page's `HELLO` names, if this host runs it; the refusal otherwise (naming the host that does).
+fn keyed_target(
+    artifact: &BlsArtifact,
+    routing: &Routing,
+    names: &[Arc<str>],
+    me: NodeId,
+    target: Option<&(String, String)>,
+) -> Result<Option<MemberRef>, (blossom_wire::frame::RejectReason, String)> {
+    use blossom_wire::frame::RejectReason;
+    let Some((role, key)) = target else {
+        return Err((
+            RejectReason::NotAllowed,
+            "this node hosts keyed members: a page names the one it links to (`/?member=KEY`)".into(),
+        ));
+    };
+    let p = artifact.program.get();
+    let Some(id) = p.keyed_role_named(role) else {
+        return Err((RejectReason::NotAllowed, format!("`{role}` is not a keyed role")));
+    };
+    let m = p.member(id, key.as_str());
+    match routing.host_of(&m) {
+        Ok(host) if host == me => Ok(Some(m)),
+        Ok(host) => Err((
+            RejectReason::NotAllowed,
+            format!(
+                "{} runs on node {}",
+                member_name(&m),
+                names.get(host.0 as usize).map_or("?", |n| &**n)
+            ),
+        )),
+        Err(e) => Err((RejectReason::NotAllowed, e.to_string())),
+    }
 }
 
 /// What the peer readers share.
@@ -380,13 +493,13 @@ fn read_peer(stream: TcpStream, ctx: &Readers) -> Result<(), RuntimeError> {
                     continue;
                 }
             };
-            let msg = Inbound {
+            let msg = Inbound::Message(Message {
                 to,
                 from,
                 via: peer,
                 rel,
                 row,
-            };
+            });
             if ctx.inbox.send(msg).is_err() {
                 return Ok(());
             }
@@ -405,10 +518,12 @@ struct Host {
     members: Arc<Members>,
     routing: Arc<Routing>,
     objects: BTreeMap<MemberRef, ObjectNode>,
+    /// The member each page link (by connection) goes to.
+    links: BTreeMap<u64, MemberRef>,
     catalog: Arc<Catalog>,
     peers: BTreeMap<NodeId, SyncSender<Vec<u8>>>,
     /// Messages from one of this host's members to another, delivered before the next from a peer.
-    local: VecDeque<Inbound>,
+    local: VecDeque<Message>,
     externs: Arc<blossom_value::ExternRegistry>,
     stats: Arc<HostStats>,
 }
@@ -432,7 +547,8 @@ impl Host {
                 Duration::from_nanos(nanos).min(POLL)
             });
             match rx.recv_timeout(wait) {
-                Ok(m) => self.deliver(m)?,
+                Ok(Inbound::Message(m)) => self.deliver(m)?,
+                Ok(Inbound::Link(e)) => self.link(e)?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
@@ -548,7 +664,32 @@ impl Host {
             .ok_or_else(|| internal_error!("a member opened is not running").into())
     }
 
-    fn deliver(&mut self, msg: Inbound) -> Result<(), RuntimeError> {
+    /// An event of a page's link: to the member its `HELLO` named.
+    fn link(&mut self, e: MemberEvent) -> Result<(), RuntimeError> {
+        let conn = e.conn();
+        let m = match &e {
+            MemberEvent::Open { keyed: Some(m), .. } => {
+                self.links.insert(conn, m.clone());
+                m.clone()
+            }
+            MemberEvent::Open { keyed: None, .. } => {
+                return Err(internal_error!("a host admitted a page that names no member").into());
+            }
+            _ => match self.links.get(&conn) {
+                Some(m) => m.clone(),
+                // The member's link ended already.
+                None => return Ok(()),
+            },
+        };
+        if matches!(e, MemberEvent::Closed { .. }) {
+            self.links.remove(&conn);
+        }
+        let now = wall_now().map_err(RuntimeError::Config)?;
+        self.object(&m)?.link_event(e, now)?;
+        self.route(&m)
+    }
+
+    fn deliver(&mut self, msg: Message) -> Result<(), RuntimeError> {
         let principal = self
             .spec
             .nodes
@@ -600,18 +741,15 @@ impl Host {
             let Output::Send { to, rel, row, tick } = o else {
                 return Err(internal_error!("a keyed member wrote to a connection; members have none yet").into());
             };
+            // A member's messages to its pages go out on their links (the object's member links), not here.
             if to.is_client() {
-                return Err(blossom_base::unimplemented_error!(
-                    "LANG-153",
-                    "a keyed member's message to a page (KEYED.md §4, sub-slice 3)"
-                )
-                .into());
+                return Err(internal_error!("a keyed member's message to a page reached its host").into());
             }
             let dest = match self.members.get(to) {
                 Some(target) => {
                     let host = self.routing.host_of(&target)?;
                     if host == self.me {
-                        self.local.push_back(Inbound {
+                        self.local.push_back(Message {
                             to: target,
                             from: sender,
                             via: self.me,

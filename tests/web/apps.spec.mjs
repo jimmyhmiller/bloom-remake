@@ -23,9 +23,9 @@ async function member(context, d, name) {
   return p;
 }
 
-/** Runs `body` against a fresh node of `program`, removed afterwards. */
-async function withApp(program, body) {
-  const d = await deployment(program, "http");
+/** Runs `body` against a fresh node of `program` (playing `role`), removed afterwards. */
+async function withApp(program, body, role = "Server", link = "http") {
+  const d = await deployment(program, link, role);
   try {
     await d.start(true);
     await body(d);
@@ -124,6 +124,73 @@ test.describe("example apps on a node", () => {
       await bid(a, "lobby").click();
       await expect(bid(a, "play")).toBeVisible();
     });
+  });
+
+  test("rooms: a game per room, each a keyed member on the host, kept across the host's restart", async ({
+    context,
+  }) => {
+    await withApp(
+      "rooms",
+      async (d) => {
+        const at = async (room, name) => {
+          const p = await context.newPage();
+          await open(p, `${d.url}?member=${room}`);
+          await expect(bid(p, "title")).toHaveText(`Room ${room}`);
+          await bid(p, "name").fill(name);
+          await bid(p, "name").press("Enter");
+          await expect(bid(p, "who")).toContainText(`You are ${name}.`);
+          return p;
+        };
+        const a = await at("lunch", "Ada");
+        const b = await at("lunch", "Bob");
+        const c = await at("lunch", "Cy");
+        // Another room is another game, with nobody in it.
+        const e = await at("dinner", "Eve");
+        await expect(c.locator(".here .person")).toHaveText(["Ada", "Bob"]);
+        await expect(e.locator(".here .person")).toHaveCount(0);
+        await bid(a, "sit").click();
+        await expect(bid(b, "headline")).toHaveText("Ada plays X: sit down to play O.");
+        await bid(b, "sit").click();
+        await expect(bid(a, "headline")).toHaveText("Your move (X).");
+        await expect(bid(c, "headline")).toHaveText("Ada to move (X).");
+        await expect(bid(c, "sit")).toHaveCount(0);
+        await expect(bid(e, "headline")).toHaveText("Nobody is playing yet: sit down to play X.");
+        const sq = (p, i) => p.locator(".grid button").nth(i);
+        const grid = (p) => p.locator(".grid button");
+        // Out of turn: nothing happens.
+        await sq(b, 4).click();
+        await sq(a, 0).click();
+        await expect(grid(b)).toHaveText(["X", "", "", "", "", "", "", "", ""]);
+        await sq(b, 4).click();
+        await expect(bid(a, "headline")).toHaveText("Your move (X).");
+        await sq(a, 1).click();
+        await expect(bid(b, "headline")).toHaveText("Your move (O).");
+        await sq(b, 8).click();
+        await expect(bid(a, "headline")).toHaveText("Your move (X).");
+        await sq(a, 2).click();
+        await expect(bid(a, "headline")).toHaveText("You win!");
+        await expect(bid(b, "headline")).toHaveText("You lose.");
+        await expect(bid(c, "headline")).toHaveText("Ada wins.");
+        await expect(c.locator(".grid .win")).toHaveCount(3);
+        // The dinner room plays on its own.
+        await bid(e, "sit").click();
+        await expect(bid(e, "headline")).toHaveText("Eve plays X: sit down to play O.");
+        await expect(grid(e)).toHaveText(["", "", "", "", "", "", "", "", ""]);
+        // The host crashes and comes back: each room from its own store; the tabs reconnect to theirs.
+        await d.kill();
+        await expect(bid(a, "status")).toHaveText("offline");
+        await d.start(false);
+        await expect(bid(a, "status")).toHaveText("live", { timeout: 30_000 });
+        await expect(bid(e, "status")).toHaveText("live", { timeout: 30_000 });
+        const late = await at("lunch", "Gus");
+        await expect(bid(late, "headline")).toHaveText("Ada wins.");
+        await expect(grid(late)).toHaveText(["X", "X", "X", "", "O", "", "", "", "O"]);
+        const later = await at("dinner", "Hal");
+        await expect(bid(later, "headline")).toHaveText("Eve plays X: sit down to play O.");
+      },
+      "Room",
+      "websocket",
+    );
   });
 
   test("board: cards, moves, drag and drop, who edits, offline edits", async ({ context }) => {

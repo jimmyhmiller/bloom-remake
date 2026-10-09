@@ -9,7 +9,7 @@
 # restart keeps everything and the tabs keep their identities. Builds the CLI and the page if they are missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-app="${1:?usage: scripts/run-app.sh APP [PORT] [--fresh] (APP: polls, board, tictactoe, pixels, chat, todos_shared)}"
+app="${1:?usage: scripts/run-app.sh APP [PORT] [--fresh] (APP: polls, board, tictactoe, pixels, rooms, chat, todos_shared)}"
 port="${2:-8080}"
 fresh="${3:-}"
 deploy="examples/web/$app.deploy.toml"

@@ -883,15 +883,16 @@ impl<'t> Resolver<'t, '_> {
     }
 
     /// Whether a rule placed as `cx` may read a link event to a node of `peer`: one of its role and `peer` is a client
-    /// role and the other a process or cluster role (BLS0404 otherwise).
+    /// role and the other a process, cluster or keyed role (BLS0404 otherwise).
     fn link_readable(&mut self, cx: &RuleCx, peer: HRoleId, span: Span) -> bool {
         let here = cx.placement.map(|r| self.role_of(r).kind);
         let there = self.role_of(peer).kind;
-        let ok = matches!(
-            (here, there),
-            (Some(RoleKind::Client), RoleKind::Process | RoleKind::Cluster)
-                | (Some(RoleKind::Process | RoleKind::Cluster), RoleKind::Client)
-        );
+        let server = |k: RoleKind| matches!(k, RoleKind::Process | RoleKind::Cluster | RoleKind::Keyed);
+        let ok = match (here, there) {
+            (Some(RoleKind::Client), k) => server(k),
+            (Some(k), RoleKind::Client) => server(k),
+            _ => false,
+        };
         if !ok {
             let name = self.role_of(peer).name.clone();
             self.error(
@@ -899,7 +900,7 @@ impl<'t> Resolver<'t, '_> {
                 span,
                 format!(
                     "`{name}.connected` and `{name}.disconnected` are read across a client link: at a client role, \
-                     of a process or cluster role's node, or at a process or cluster role, of a client role's member"
+                     of a process, cluster or keyed role's node, or at such a role, of a client role's member"
                 ),
             );
         }

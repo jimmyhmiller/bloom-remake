@@ -350,7 +350,7 @@ impl DataQueue {
 
 /// The open connections, so that stopping can close them; each connection's thread removes its own on exit.
 #[derive(Default)]
-struct Conns {
+pub(crate) struct Conns {
     next: AtomicU64,
     open: Mutex<BTreeMap<u64, TcpStream>>,
 }
@@ -369,7 +369,7 @@ impl Conns {
         }
     }
 
-    fn close_all(&self) {
+    pub(crate) fn close_all(&self) {
         if let Ok(open) = self.open.lock() {
             for c in open.values() {
                 // Closing is best-effort: a connection may already be gone.
@@ -739,6 +739,7 @@ impl Server {
                 next_conn: Arc::new(AtomicU64::new(0)),
                 client_roles: Arc::new(client_roles),
                 sessions: Arc::new(crate::http_link::Sessions::default()),
+                keyed: Arc::new(crate::members::no_keyed),
             };
             {
                 let (sessions, stop) = (ctx.sessions.clone(), stop.clone());
@@ -1365,7 +1366,13 @@ impl Host for MemberHost<'_> {
 
 /// Accepts the web listener's connections, each served on a thread of its own ([`crate::members::web_conn`]), until
 /// the node stops.
-fn web_accept_loop(listener: TcpListener, ctx: WebCtx, stop: Arc<AtomicBool>, conns: Arc<Conns>, stats: Arc<Stats>) {
+pub(crate) fn web_accept_loop(
+    listener: TcpListener,
+    ctx: WebCtx,
+    stop: Arc<AtomicBool>,
+    conns: Arc<Conns>,
+    stats: Arc<Stats>,
+) {
     if listener.set_nonblocking(true).is_err() {
         return;
     }

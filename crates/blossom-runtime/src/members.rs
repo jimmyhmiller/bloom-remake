@@ -29,7 +29,7 @@ use blossom_ir::core::{EventSource, Program, RelClass};
 use blossom_oracle::Row;
 use blossom_store::{ClientRegistry, SECRET_LEN};
 use blossom_value::Value;
-use blossom_value::time::NodeId;
+use blossom_value::time::{MemberRef, NodeId};
 use blossom_wire::codec::{Codec, WireLimits};
 use blossom_wire::frame::{Batch, Frame, Peer, RejectReason};
 
@@ -43,15 +43,30 @@ const WRITE_QUEUE: usize = 4096;
 const REPLAY_FRAMES: usize = 8192;
 const REPLAY_BYTES: usize = 32 * 1024 * 1024;
 
+impl MemberEvent {
+    /// The connection the event is of.
+    pub(crate) fn conn(&self) -> u64 {
+        match self {
+            MemberEvent::Open { conn, .. }
+            | MemberEvent::Msg { conn, .. }
+            | MemberEvent::Skip { conn, .. }
+            | MemberEvent::Ack { conn, .. }
+            | MemberEvent::Closed { conn, .. } => *conn,
+        }
+    }
+}
+
 /// What a member's connection thread tells the engine.
 pub(crate) enum MemberEvent {
-    /// A member connected: its identity, what it took and what it was acknowledged, and its connection's writer.
+    /// A member connected: its identity, what it took and what it was acknowledged, and its connection's writer; and
+    /// the keyed member it links to, at a host (docs/design/KEYED.md).
     Open {
         member: NodeId,
         role: RoleId,
         token: Vec<u8>,
         received: u64,
         acked: u64,
+        keyed: Option<MemberRef>,
         conn: u64,
         /// The connection, as the engine writes to it and ends it.
         link: Box<dyn LinkConn>,
@@ -135,6 +150,24 @@ pub(crate) struct WebCtx {
     pub client_roles: Arc<BTreeMap<String, ClientRole>>,
     /// The links over plain requests.
     pub sessions: Arc<crate::http_link::Sessions>,
+    /// The keyed member a `HELLO` may name (docs/design/KEYED.md): resolved and checked by the node.
+    pub keyed: Arc<KeyedTarget>,
+}
+
+/// Resolves the keyed member a member's `HELLO` names (its role's name and its key): the member, none (a link to the
+/// node itself), or the refusal to send.
+pub(crate) type KeyedTarget =
+    dyn Fn(Option<&(String, String)>) -> Result<Option<MemberRef>, (RejectReason, String)> + Send + Sync;
+
+/// A node that runs no keyed members: links to it name none.
+pub(crate) fn no_keyed(target: Option<&(String, String)>) -> Result<Option<MemberRef>, (RejectReason, String)> {
+    match target {
+        None => Ok(None),
+        Some((role, key)) => Err((
+            RejectReason::NotAllowed,
+            format!("this node runs no keyed members: no `{role}` `{key}` here"),
+        )),
+    }
 }
 
 /// A connection carrying a member's link, as the engine writes to it: a connection thread's queue here, a socket of
@@ -264,13 +297,20 @@ pub(crate) struct Admitted {
     pub acked: u64,
     /// The member's channels this node takes, by the member's sid.
     pub inbound: BTreeMap<u32, RelId>,
+    /// The keyed member it links to, at a host.
+    pub keyed: Option<MemberRef>,
 }
 
 /// Checks a member's `HELLO` and finds (or mints) its identity; the refusal to send it otherwise.
 pub(crate) fn admit(ctx: &WebCtx, h: blossom_wire::frame::Hello) -> Result<Admitted, AdmitError> {
-    admit_with(&ctx.id, &ctx.catalog, &ctx.client_roles, h, &mut |role, token| {
-        identify(ctx, role, token)
-    })
+    admit_with(
+        &ctx.id,
+        &ctx.catalog,
+        &ctx.client_roles,
+        &*ctx.keyed,
+        h,
+        &mut |role, token| identify(ctx, role, token),
+    )
 }
 
 /// Identifies a member of a client role by its token (or none): its node id and its token.
@@ -282,6 +322,7 @@ pub(crate) fn admit_with(
     id: &Identity,
     catalog: &Catalog,
     client_roles: &BTreeMap<String, ClientRole>,
+    keyed: &KeyedTarget,
     h: blossom_wire::frame::Hello,
     identify: &mut Identify<'_>,
 ) -> Result<Admitted, AdmitError> {
@@ -294,6 +335,7 @@ pub(crate) fn admit_with(
         token,
         received,
         acked,
+        keyed: target,
     } = h.peer
     else {
         return Err(AdmitError::Refused(
@@ -313,6 +355,7 @@ pub(crate) fn admit_with(
             format!("the page runs another version of `{role}`'s part of the program: load it again"),
         ));
     }
+    let keyed = keyed(target.as_ref()).map_err(|(reason, detail)| AdmitError::Refused(reason, detail))?;
     let inbound = catalog.accept(&h.channels);
     let (member, token) = identify(&role, token).map_err(AdmitError::Failed)?;
     Ok(Admitted {
@@ -322,6 +365,7 @@ pub(crate) fn admit_with(
         received,
         acked,
         inbound,
+        keyed,
     })
 }
 
@@ -451,6 +495,7 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
         received,
         acked,
         inbound,
+        keyed,
     } = admitted;
     let opened = tx.send(hello.encode()).is_ok()
         && tx.send(ok.encode()).is_ok()
@@ -460,6 +505,7 @@ fn link(mut r: BufReader<TcpStream>, w: TcpStream, ctx: &WebCtx) -> Result<(), R
             token,
             received,
             acked,
+            keyed,
             conn,
             link: Box::new(ThreadConn {
                 writer: tx.clone(),
@@ -597,6 +643,10 @@ pub(crate) trait Host {
     /// Offers a link event, an input of the node's next tick.
     fn event(&mut self, rel: RelId, row: Row);
     fn me(&self) -> NodeId;
+    /// This node as the rows addressed to it name it: its id, or, for a keyed member, its member value.
+    fn me_value(&self) -> Value {
+        Value::Node(self.me())
+    }
     fn dropped_unroutable(&self, n: u64);
     fn dropped_closed(&self, n: u64);
     fn rejected_schema(&self, n: u64);
@@ -642,6 +692,7 @@ impl MemberLinks {
                 acked,
                 conn,
                 link,
+                ..
             } => self.open(member, role, token, (received, acked), Conn { id: conn, link }, host),
             MemberEvent::Skip { member, conn, seq } => {
                 host.rejected_schema(1);
@@ -663,7 +714,7 @@ impl MemberLinks {
                 rel,
                 rows,
             } => {
-                let me = host.me();
+                let me = host.me_value();
                 let Some(m) = self.members.get_mut(&member) else {
                     return Ok(());
                 };
@@ -677,7 +728,7 @@ impl MemberLinks {
                     m.in_floor = seq;
                     let mut last = None;
                     for row in rows {
-                        if !crate::net::addressed_to(&row, me) {
+                        if row.first() != Some(&me) {
                             host.dropped_unroutable(1);
                             continue;
                         }

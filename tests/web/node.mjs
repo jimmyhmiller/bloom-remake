@@ -23,8 +23,9 @@ export function freePort() {
 }
 
 /** A one-node deployment of examples/web/PROGRAM.bls (a copy of it, which `edit` rewrites), serving the page with
- * the program's stylesheet when it has one (examples/web/PROGRAM.css); `start`/`kill` run and stop the node. */
-export async function deployment(program, link) {
+ * the program's stylesheet when it has one (examples/web/PROGRAM.css); `start`/`kill` run and stop the node. Its node
+ * `s` plays `role` (a keyed role's node is a host of its members, docs/design/KEYED.md). */
+export async function deployment(program, link, role = "Server") {
   const dir = mkdtempSync(join(tmpdir(), `blossom-clients-${program}-`));
   for (const f of [`${program}.bls`, "ui.bls", "events.bls"]) copyFileSync(join(repo, "examples", "web", f), join(dir, f));
   const css = join(repo, "examples", "web", `${program}.css`);
@@ -44,9 +45,9 @@ export async function deployment(program, link) {
       `source = "${program}.bls"`,
       "[[node]]",
       'name = "s"',
-      'role = "Server"',
+      `role = "${role}"`,
       `addr = "127.0.0.1:${peer}"`,
-      `principal = "spiffe://test/${program}/Server/s"`,
+      `principal = "spiffe://test/${program}/${role}/s"`,
       "[security]",
       'mode = "insecure-dev"',
       "[storage]",

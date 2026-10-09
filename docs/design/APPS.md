@@ -13,6 +13,7 @@ between the two roles are the whole API: no routes, no message classes, no clien
 | `examples/web/tictactoe.bls` | A lobby pairs players; the server referees; anyone can watch a game; rematch, resign. | `scripts/run-app.sh tictactoe` |
 | `examples/web/board.bls` | A kanban board: add, rename (others see who is editing), drag within and between columns, delete. | `scripts/run-app.sh board` |
 | `examples/web/pixels.bls` | An r/place canvas: paint a square, wait out a cooldown the server enforces, a live leaderboard. | `scripts/run-app.sh pixels` |
+| `examples/web/rooms.bls` | Tic-tac-toe rooms: every room (`/?member=lunch`) is a keyed member with its own store, created by its first page (docs/design/KEYED.md). | `scripts/run-app.sh rooms` |
 
 `scripts/run-app.sh APP [PORT] [--fresh]` builds what is missing, keeps the store and seed under
 `examples/web/.data/`, and serves the page on http://localhost:8080/. Open it in two tabs, or two browsers.
@@ -203,8 +204,10 @@ Recorded because a person writing their first Blossom app would make them too:
 ## Tests
 
 - `tests/web/apps.spec.mjs` (Playwright, real nodes): per app, two or three tabs, the server's rules, a reload, and a
-  SIGKILL and restart of the node. `scripts/test-tiers.sh web` runs it with the other browser tests.
-- `tests/integration/tests/web_apps.rs`: every app compiles for a server and tabs; tic-tac-toe plays a game in the
-  simulator on the oracle and the engine, which agree every round; the `outer`/generator and constant fixture.
+  SIGKILL and restart of the node (rooms: two rooms on one host, both back from their own stores after the host's
+  restart). `scripts/test-tiers.sh web` runs it with the other browser tests.
+- `tests/integration/tests/web_apps.rs`: every app compiles for a server and tabs; tic-tac-toe, and a room of rooms,
+  play a game in the simulator on the oracle and the engine, which agree every round; the `outer`/generator and
+  constant fixture.
 - `crates/blossom-web/tests/host.rs`: `a_drop_names_the_dragged_element_and_the_target`.
 - `tests/integration/tests/page_members.rs`: `the_deployment_names_the_pages_stylesheet`.

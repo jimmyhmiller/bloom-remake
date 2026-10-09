@@ -1292,7 +1292,7 @@ ticks), §15.2.
 | `halt(kill: bool)` | output | `emit halt(false);` stops the node at the end of the tick; `true` also stops the process |
 | `localtick()` | scratch | `next localtick();` requests another tick (a staged change, SEM-009) |
 | `session_open(s: Session, p: Principal, at: Instant)`, `session_closed(s: Session, reason: String)` | event | external sessions, on roles that receive from an external role (§18.4) |
-| `Q.connected(n: Node<Q>, resumed: bool)`, `Q.disconnected(n: Node<Q>)` | event | a client link (docs/design/CLIENTS.md): at a client role of a process or cluster role `Q`'s node, at a process or cluster role of a client role `Q`'s member; `resumed` when the link took up where the last one left off (BLS0404 elsewhere; written only by the runtime, BLS0400) |
+| `Q.connected(n: Node<Q>, resumed: bool)`, `Q.disconnected(n: Node<Q>)` | event | a client link (docs/design/CLIENTS.md): at a client role of a process, cluster or keyed role `Q`'s node or member (KEYED.md: `n` is then the member), at a process, cluster or keyed role of a client role `Q`'s member; `resumed` when the link took up where the last one left off (BLS0404 elsewhere; written only by the runtime, BLS0400) |
 | `node_dir(node: Node, addr: String, principal: Principal, role: String)` | static | the node directory (LANG-240) |
 | `catalog.rule`, `catalog.depends`, `catalog.stratum`, `catalog.schema`, `catalog.interface` | static | the compiled program's catalog, after `use std::catalog;` (LANG-202) |
 

@@ -1,0 +1,277 @@
+//! Tic-tac-toe rooms (docs/design/KEYED.md): every room is a member of the keyed role `Room`, named by the page's
+//! URL (`/?member=lunch`), created when the first page opens it, and kept in a store of its own. The first two people
+//! to sit down play X and O; everyone else in the room watches. One program holds both ends; the channels are the
+//! whole API.
+//!
+//! The room is the referee: it seats the players and takes a move only from the player whose turn it is, on an empty
+//! square, in a game that is not over. The board and the rules that decide an outcome are written once, in a section
+//! placed at both ends (`at Room, Browser`): the room judges by them, and each page shows the outcome and the winning
+//! line by the same rules.
+
+program rooms version 1;
+
+role Room: keyed;
+role Browser: client;
+
+/// The eight lines of three squares (squares numbered 0 to 8, row by row).
+const LINES: Vec<(u64, u64, u64)> = [
+    (0u64, 1u64, 2u64),
+    (3u64, 4u64, 5u64),
+    (6u64, 7u64, 8u64),
+    (0u64, 3u64, 6u64),
+    (1u64, 4u64, 7u64),
+    (2u64, 5u64, 8u64),
+    (0u64, 4u64, 8u64),
+    (2u64, 4u64, 6u64)
+];
+
+/// The mark of the game's `k`-th move: X moves first.
+fn mark_of(k: u64) -> String {
+    if k % 2u64 == 0u64 { "X" } else { "O" }
+}
+
+/// The tab's name, sent whenever its link comes up.
+channel hello(name: String): Browser -> Room;
+/// The tab wants a seat at the board.
+channel sit(): Browser -> Room;
+/// A move on square `cell`.
+channel play(cell: u64): Browser -> Room;
+
+channel room(key: String): Room -> Browser;
+channel seated(m: String, b: Node<Browser>): Room -> Browser;
+channel moved(k: u64, cell: u64): Room -> Browser;
+channel person(b: Node<Browser>, name: String, here: bool, at: Instant): Room -> Browser;
+
+/// The game and its rules, at the room and at every page in it: each end keeps its own copy (the room's decides, a
+/// page's is what the room told it) and judges it by the same views.
+at Room, Browser {
+    /// Who plays "X" and "O".
+    durable table seats(m: String, b: Node<Browser>) key(m) resolve choose;
+    /// The game's `k`-th move.
+    durable table moves(k: u64, cell: u64) key(k);
+
+    view mark(cell, m) = moves(k, cell), let m = mark_of(k);
+    /// A line of three marks: who has it, and its squares.
+    view three(m, a, b, c) = (a, b, c) in LINES, mark(a, m), mark(b, m), mark(c, m);
+    /// The moves made so far (the moves are numbered from 0).
+    view made(n = max!(k + 1u64 default 0u64)) = moves(k, _);
+    /// "X" or "O" won, or "draw".
+    view outcome(m) {
+        three(m, _, _, _);
+        made(9u64), not three(_, _, _, _), let m = "draw";
+    }
+}
+
+at Room {
+    durable table names(b: Node<Browser>, name: String) key(b) resolve choose;
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
+        delete online(b);
+    }
+    named: on hello(name) from b where name.trim() != "" {
+        next names(b, name.trim());
+    }
+
+    // ------------------------------------------------------------ the referee
+
+    /// The first to sit plays X, the next someone else O.
+    sit_x: on sit() from b, not seats("X", _) {
+        next seats("X", b);
+    }
+    sit_o: on sit() from b, seats("X", x), not seats("O", _) where b != x {
+        next seats("O", b);
+    }
+    /// Only the player whose turn it is, on an empty square, while the game is not over.
+    take: on play(cell) from b, made(k), seats(m, b), not outcome(_), not mark(cell, _)
+            where cell < 9u64 && m == mark_of(k) {
+        next moves(k, cell);
+    }
+
+    // ------------------------------------------------------------ telling the pages
+
+    view presence(b, name, here) {
+        names(b, name), online(b), let here = true;
+        names(b, name), not online(b), let here = false;
+    }
+    tell_seat: on inserted seats(m, s), online(b) {
+        send seated(m, s) to b;
+    }
+    tell_move: on inserted moves(k, cell), online(b) {
+        send moved(k, cell) to b;
+    }
+    tell_person: on inserted presence(p, name, here), online(b) {
+        send person(p, name, here, now()) to b;
+    }
+    greet: on Browser.connected(b, false) {
+        send room(self.key()) to b;
+        for seats(m, s) {
+            send seated(m, s) to b;
+        }
+        for moves(k, cell) {
+            send moved(k, cell) to b;
+        }
+        for presence(p, name, here) {
+            send person(p, name, here, now()) to b;
+        }
+    }
+}
+
+at Browser {
+    include "ui.bls";
+
+    durable table me(name: String) key();
+    durable table called(key: String) key();
+    durable table people(b: Node<Browser>, name: String, here: bool, at: Instant) key(b) resolve choose_most(at);
+    table up(r: Node<Room>);
+
+    hear_room: on room(k) {
+        upsert called(k);
+    }
+    hear_seat: on seated(m, b) {
+        next seats(m, b);
+    }
+    hear_move: on moved(k, cell) {
+        next moves(k, cell);
+    }
+    hear_person: on person(b, name, here, at) {
+        next people(b, name, here, at);
+    }
+    link: on Room.connected(r, _) {
+        emit up(r);
+    }
+    named: on Room.connected(r, _), me(name) {
+        send hello(name) to r;
+    }
+    lost: on Room.disconnected(r) {
+        delete up(r);
+    }
+
+    // ------------------------------------------------------------ events
+
+    sign_in: on keydown("name", "Enter", value), up(r) where value.trim() != "" {
+        upsert me(value.trim());
+        send hello(value.trim()) to r;
+    }
+    take_seat: on click("sit"), up(r) {
+        send sit() to r;
+    }
+    pick: on click(id), square(id, cell), my_turn(), up(r) {
+        send play(cell) to r;
+    }
+
+    // ------------------------------------------------------------ what the page shows
+
+    view name_of(b, name) {
+        people(b, name, _, _) where b != self;
+        me(name), let b = self;
+    }
+    view player(m, name) = seats(m, b), outer name_of(b, n), let name = n.unwrap_or("someone");
+    /// This tab's mark, if it plays.
+    view mine(m) = seats(m, b) where b == self;
+    /// The winning line, by the shared rules.
+    view winning(cell) = three(_, a, b, c), cell in [a, b, c];
+    view squares(cell, m, w) {
+        cell in 0u64..9u64, outer mark(cell, sm), winning(cell), let m = sm.unwrap_or(""), let w = true;
+        cell in 0u64..9u64, outer mark(cell, sm), not winning(cell), let m = sm.unwrap_or(""), let w = false;
+    }
+    view square(id, cell) = squares(cell, _, _), let id = f"sq-{cell}";
+    /// Whether it is this tab's move.
+    view my_turn() = seats("O", _), not outcome(_), made(k), mine(m) where m == mark_of(k);
+    view turn(t) {
+        my_turn(), let t = true;
+        not my_turn(), let t = false;
+    }
+    view headline(s) = made(k), outer player("X", xn), outer player("O", oname), outer outcome(end), outer mine(m),
+            let s = status_line(xn, oname, mark_of(k), end, m);
+    view here(b, name) = people(b, name, true, _), up(_) where b != self;
+    view status(s, c) {
+        up(_), let s = "live", let c = "status";
+        not up(_), let s = "offline", let c = "status offline";
+    }
+    view title(t) {
+        called(k), let t = f"Room {k}";
+        not called(_), let t = "Tic-tac-toe";
+    }
+
+    /// The line above the board.
+    fn status_line(
+        x: Option<String>,
+        o: Option<String>,
+        turn: String,
+        end: Option<String>,
+        mine: Option<String>
+    ) -> String {
+        if x.is_none() {
+            "Nobody is playing yet: sit down to play X."
+        } else if o.is_none() {
+            f"{x.unwrap_or("")} plays X: sit down to play O."
+        } else if end == Some("draw") {
+            "A draw."
+        } else if end.is_some() && end == mine {
+            "You win!"
+        } else if end.is_some() && mine.is_some() {
+            "You lose."
+        } else if end == Some("X") {
+            f"{x.unwrap_or("")} wins."
+        } else if end == Some("O") {
+            f"{o.unwrap_or("")} wins."
+        } else if mine == Some(turn) {
+            f"Your move ({turn})."
+        } else if mine.is_some() {
+            f"Waiting for {if turn == "X" { x.unwrap_or("") } else { o.unwrap_or("") }}…"
+        } else {
+            f"{if turn == "X" { x.unwrap_or("") } else { o.unwrap_or("") }} to move ({turn})."
+        }
+    }
+
+    fn square_class(m: String, win: bool, open: bool) -> String {
+        if win {
+            f"square {m} win"
+        } else if m != "" {
+            f"square {m}"
+        } else if open {
+            "square open"
+        } else {
+            "square"
+        }
+    }
+
+    // ------------------------------------------------------------ the page
+
+    welcome: while not me(_), title(t) {
+        emit html div[id: "ttt"](class: "app ttt") {
+            h1[id: "title"] { t }
+            p(class: "lead") { "Play here, or watch. Every room is its own game." }
+            input[id: "name"](class: "big", placeholder: "Your name, then Enter");
+        }
+        emit focus("name");
+    }
+
+    page: while me(my), status(st, sc), title(t), headline(line), turn(go) {
+        emit html div[id: "ttt"](class: "app ttt") {
+            header(class: "top") {
+                h1[id: "title"] { t }
+                span[id: "status"](class: sc) { st }
+            }
+            p[id: "who"](class: "who") { f"You are {my}." }
+            ul[id: "here"](class: "here") {
+                for here(b, name) { li[key: b.to_string()](class: "person") { name } }
+            }
+            section[id: "board"](class: "card board") {
+                p[id: "headline"](class: if go { "headline go" } else { "headline" }) { line }
+                div[id: "grid"](class: "grid") {
+                    for squares(cell, sm, w) {
+                        button[id: f"sq-{cell}", pos: cell as i64](class: square_class(sm, w, go && sm == "")) { sm }
+                    }
+                }
+                div(class: "actions") {
+                    if not mine(_), not seats("O", _) { button[id: "sit"](class: "primary") { "Sit down" } }
+                }
+            }
+        }
+    }
+}

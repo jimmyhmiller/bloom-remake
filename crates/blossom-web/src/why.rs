@@ -173,6 +173,7 @@ impl<'a> Explainer<'a> {
         )
         .map_err(fail)?
         .with_roles(who.roles.clone())
+        .with_members(who.members.clone())
         .with_seed(seed)
         .map_err(fail)?
         .with_node_names(who.names.clone())

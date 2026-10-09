@@ -82,6 +82,8 @@ pub struct Who {
     pub names: Vec<Arc<str>>,
     /// The client role, for a client member (whose node is outside the deployment).
     pub client_role: Option<blossom_base::RoleId>,
+    /// The keyed member the page's server is, when it links to one (docs/design/KEYED.md): the server's id names it.
+    pub members: Arc<blossom_ir::members::Members>,
 }
 
 /// A diagnostic of a compile, for the editor: its rendering (as `blossom check` prints it) and where it points.
@@ -103,16 +105,40 @@ pub struct Diag {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Event {
-    Route { hash: String },
-    Click { id: String },
-    Dblclick { id: String },
-    Press { id: String },
-    Input { id: String, value: String },
-    Keydown { id: String, key: String, value: String },
-    Blur { id: String, value: String },
-    Change { id: String, checked: bool },
+    Route {
+        hash: String,
+    },
+    Click {
+        id: String,
+    },
+    Dblclick {
+        id: String,
+    },
+    Press {
+        id: String,
+    },
+    Input {
+        id: String,
+        value: String,
+    },
+    Keydown {
+        id: String,
+        key: String,
+        value: String,
+    },
+    Blur {
+        id: String,
+        value: String,
+    },
+    Change {
+        id: String,
+        checked: bool,
+    },
     /// An element dragged onto another (HTML drag and drop): the dragged element's id and the target's.
-    Drop { id: String, target: String },
+    Drop {
+        id: String,
+        target: String,
+    },
 }
 
 impl Event {
@@ -194,6 +220,8 @@ struct ClientPart {
     /// The link events of its link to the server: `connected`, `disconnected`.
     connected: Option<RelId>,
     disconnected: Option<RelId>,
+    /// The keyed member the page links to, when its server is a host of a keyed role (docs/design/KEYED.md).
+    keyed: Option<blossom_value::time::MemberRef>,
 }
 
 /// The deployment a client member's page runs in (`/blossom/app.json`, CLIENTS.md §4, §8): the server node that
@@ -203,6 +231,12 @@ pub struct ClientDeployment {
     pub node: String,
     pub deployment: String,
     pub directory: String,
+    /// The keyed role whose members the node hosts (docs/design/KEYED.md), and the member the page links to (its
+    /// URL's `?member=KEY`, which the host adds).
+    #[serde(default)]
+    pub keyed: Option<String>,
+    #[serde(default)]
+    pub member: Option<String>,
 }
 
 fn hex16(s: &str) -> Result<[u8; 16], String> {
@@ -329,6 +363,25 @@ pub fn load_client(bytes: &[u8], deployment: &ClientDeployment) -> Result<Compil
             .map(|(id, _)| id)
     };
     let (connected, disconnected) = (link(true), link(false));
+    // A host of a keyed role serves its members' pages: the page names the member it links to.
+    let keyed = match (server_role.filter(|r| p.is_keyed(*r)), &deployment.member) {
+        (Some(role), Some(key)) => Some(p.member(role, key.as_str())),
+        (Some(role), None) => {
+            let name = p.roles.get(role).map(|r| r.name.to_string()).unwrap_or_default();
+            return Err(HostError::Artifact(format!(
+                "node `{}` hosts members of the keyed role `{name}`: the page names the one it links to \
+                 (`?member=KEY`)",
+                deployment.node
+            )));
+        }
+        (None, Some(key)) => {
+            return Err(HostError::Artifact(format!(
+                "node `{}` runs no keyed members, so no member `{key}`",
+                deployment.node
+            )));
+        }
+        (None, None) => None,
+    };
     let identity = blossom_wire::link::Identity {
         deployment: hex16(&deployment.deployment).map_err(HostError::Artifact)?,
         program_id: p.meta.program_id,
@@ -343,6 +396,7 @@ pub fn load_client(bytes: &[u8], deployment: &ClientDeployment) -> Result<Compil
         part: client.part(),
         connected,
         disconnected,
+        keyed,
     };
     let mut compiled = interface(artifact, Vec::new())
         .map_err(|diags| HostError::Interface(diags.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
@@ -371,6 +425,7 @@ impl Compiled {
                 c.part,
                 c.server,
                 c.identity.clone(),
+                c.keyed.as_ref().map(|m| (m.role_name.to_string(), m.key.to_string())),
                 state,
             )
             .map(Some),
@@ -426,6 +481,7 @@ impl App {
             roles: compiled.artifact.roles.clone(),
             names: vec![Arc::from("app")],
             client_role: None,
+            members: Arc::default(),
         };
         App::with(compiled, seed, who, None)
     }
@@ -441,11 +497,19 @@ impl App {
             .member()
             .cloned()
             .ok_or_else(|| HostError::Link("the link has no member yet (no WELCOME)".into()))?;
+        // The page's server, when it is a keyed member, is that member wherever the page's program sees it.
+        let members = blossom_ir::members::Members::default();
+        if let Some(m) = &client.keyed {
+            members
+                .insert(client.server, m.clone())
+                .map_err(|e| HostError::Link(format!("the page's server: {e}")))?;
+        }
         let who = Who {
             node: member.id,
             roles: compiled.artifact.roles.clone(),
             names: compiled.artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
             client_role: Some(client.role),
+            members: Arc::new(members),
         };
         App::with(compiled, blossom_value::Seed(member.seed), who, Some(link))
     }
@@ -464,6 +528,7 @@ impl App {
                 node_names: who.names.clone(),
                 seed: Some(seed),
                 client_role: who.client_role,
+                members: who.members.clone(),
                 ..EngineConfig::default()
             },
         )
@@ -516,12 +581,12 @@ impl App {
                         ran: self.who.node,
                     });
                 }
-                let event = self
-                    .compiled
-                    .client
-                    .as_ref()
-                    .and_then(|c| c.connected)
-                    .map(|rel| (rel, Arc::from(vec![Value::Node(server), Value::Bool(resumed)])));
+                let event = self.compiled.client.as_ref().and_then(|c| c.connected).map(|rel| {
+                    (
+                        rel,
+                        Arc::from(vec![self.who.members.value(server), Value::Bool(resumed)]),
+                    )
+                });
                 self.settle(event.as_slice())
             }
             link::Heard::Deliveries(d) => {
@@ -547,7 +612,7 @@ impl App {
             .as_ref()
             .and_then(|c| c.disconnected)
             .filter(|_| was_up)
-            .map(|rel| (rel, Arc::from(vec![Value::Node(server)])));
+            .map(|rel| (rel, Arc::from(vec![self.who.members.value(server)])));
         match event {
             Some(e) => self.settle(&[e]),
             None => Ok(Vec::new()),
@@ -659,7 +724,7 @@ impl App {
         ) {
             boot.push((
                 rel,
-                Arc::from(vec![Value::Node(link.server()), Value::Bool(link.resumed())]),
+                Arc::from(vec![self.who.members.value(link.server()), Value::Bool(link.resumed())]),
             ));
         }
         let mut patches = self.settle(&boot)?;

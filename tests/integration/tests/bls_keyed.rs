@@ -303,3 +303,64 @@ fn a_host_is_not_run_as_a_node() {
     };
     assert!(err.contains("node h1 hosts the keyed role `Game`"), "{err}");
 }
+
+/// Tabs linked to a room that is a keyed member: in simulation a tab is linked to the deployment's keyed members as to
+/// its servers; the link events name the room by its member value, and the room answers the tabs.
+#[test]
+fn tabs_talk_to_a_keyed_room_on_the_oracle_and_the_engine() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/keyed/rooms.bls");
+    let nodes: Vec<NodeSpec> = [("lobby", "Room"), ("b1", "Browser"), ("b2", "Browser")]
+        .iter()
+        .map(|(n, r)| NodeSpec {
+            name: (*n).to_owned(),
+            role: Some((*r).to_owned()),
+        })
+        .collect();
+    let (result, _) = compile_file(path.to_str().unwrap(), &nodes);
+    let a = match result {
+        Ok((a, _)) => a,
+        Err(e) => panic!("rooms.bls: {e:?}"),
+    };
+    let sim = BlsSim::new(&a, blossom_value::Seed::from_u64(0)).unwrap();
+    let round = Duration::from_nanos(1_000_000);
+    let line = |node: &str, t: u64, text: &str| InputEvent {
+        node: a.node_id(node).unwrap(),
+        tick: Tick(t),
+        rel: a.rel_named("line").unwrap(),
+        row: Arc::from(vec![Value::str(text)]),
+    };
+    let inputs = vec![line("b1", 1, "hi"), line("b2", 2, "yo")];
+    let last = Tick(6);
+    let reference = sim.run(&inputs, last, round, &FaultSchedule::default(), false).unwrap();
+    let mine = sim
+        .run_on(&engine(&a), &inputs, last, round, &FaultSchedule::default(), false)
+        .unwrap();
+    for (t, (x, y)) in reference.rounds.iter().zip(&mine.rounds).enumerate() {
+        for (n, (p, q)) in x.iter().zip(y).enumerate() {
+            assert_eq!(
+                p.instance, q.instance,
+                "round {t}, node {n}: the oracle and the engine differ"
+            );
+        }
+    }
+    let p = a.program.get();
+    let room = Value::Member(p.member(p.keyed_role_named("Room").unwrap(), "lobby"));
+    let rows = |node: &str, rel: &str| -> Vec<Vec<Value>> {
+        let n = a.node_id(node).unwrap();
+        let mut out: Vec<Vec<Value>> = reference.rounds[last.0 as usize][n.0 as usize]
+            .instance
+            .rows(a.rel_named(rel).unwrap())
+            .map(|r| r.to_vec())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(rows("b1", "up"), vec![vec![room]]);
+    let (b1, b2) = (
+        Value::Node(a.node_id("b1").unwrap()),
+        Value::Node(a.node_id("b2").unwrap()),
+    );
+    let said = |w: &Value, t: &str| vec![Value::str("lobby"), w.clone(), Value::str(t)];
+    assert_eq!(rows("b2", "seen"), vec![said(&b1, "hi"), said(&b2, "yo")]);
+    assert_eq!(rows("lobby", "online"), vec![vec![b1], vec![b2]]);
+}

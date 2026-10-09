@@ -88,6 +88,7 @@ fn open(port: u16, spec: &DeploymentSpec, a: &BlsArtifact, token: Option<Vec<u8>
         token,
         received: 0,
         acked: 0,
+        keyed: None,
     };
     let catalog = Catalog::of(a.program.get()).unwrap();
     ws.send(&blossom_wire::link::hello(&identity(spec, a), peer, 0, 0, &catalog))

@@ -1,7 +1,7 @@
 //! The shared example apps (examples/web/{polls,tictactoe,board,pixels}.bls) and the language fixes they needed. Each
 //! app compiles for a server and tabs; tic-tac-toe plays a whole game in the simulator, two tabs and the server, on
-//! the oracle and the engine alike; and `fixtures/apps/outer_generator.bls` pins an `outer` atom over a generator's
-//! column and constant collections.
+//! the oracle and the engine alike, and so does a room of rooms.bls, a keyed member (docs/design/KEYED.md); and
+//! `fixtures/apps/outer_generator.bls` pins an `outer` atom over a generator's column and constant collections.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -39,7 +39,9 @@ fn compile(path: &Path, nodes: &[(&str, Option<&str>)]) -> BlsArtifact {
 
 #[cfg(test)]
 fn app(name: &str) -> BlsArtifact {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/web").join(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web")
+        .join(name);
     compile(
         &path,
         &[("s", Some("Server")), ("b1", Some("Browser")), ("b2", Some("Browser"))],
@@ -57,13 +59,17 @@ fn differential(a: &BlsArtifact, inputs: &[InputEvent], last: u64) -> SyncRun {
         roles: a.roles.clone(),
         node_names: a.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
         seed: Some(blossom_value::Seed::from_u64(0)),
+        members: Arc::new(a.members().unwrap()),
         ..blossom_engine::EngineConfig::default()
     };
     let engine = EngineEvaluator::new(a.program.clone(), cfg);
     let mine = sim.run_on(&engine, inputs, Tick(last), round, &faults, false).unwrap();
     for (t, (x, y)) in reference.rounds.iter().zip(&mine.rounds).enumerate() {
         for (n, (p, q)) in x.iter().zip(y).enumerate() {
-            assert_eq!(p.instance, q.instance, "round {t}, node {n}: the oracle and the engine differ");
+            assert_eq!(
+                p.instance, q.instance,
+                "round {t}, node {n}: the oracle and the engine differ"
+            );
         }
     }
     reference
@@ -92,7 +98,14 @@ fn event(a: &BlsArtifact, node: &str, t: u64, rel: &str, args: &[&str]) -> Input
 
 #[test]
 fn every_app_compiles_for_a_server_and_tabs() {
-    for name in ["polls.bls", "tictactoe.bls", "board.bls", "pixels.bls", "chat.bls", "todos_shared.bls"] {
+    for name in [
+        "polls.bls",
+        "tictactoe.bls",
+        "board.bls",
+        "pixels.bls",
+        "chat.bls",
+        "todos_shared.bls",
+    ] {
         let a = app(name);
         assert!(a.rel_named("Browser.connected").is_some(), "{name}");
     }
@@ -103,7 +116,11 @@ fn every_app_compiles_for_a_server_and_tabs() {
 #[test]
 fn tictactoe_plays_a_game_on_the_oracle_and_the_engine() {
     let a = app("tictactoe.bls");
-    let (s, b1, b2) = (a.node_id("s").unwrap(), a.node_id("b1").unwrap(), a.node_id("b2").unwrap());
+    let (s, b1, b2) = (
+        a.node_id("s").unwrap(),
+        a.node_id("b1").unwrap(),
+        a.node_id("b2").unwrap(),
+    );
     let click = |node: &str, t: u64, id: &str| event(&a, node, t, "click", &[id]);
     let inputs = vec![
         event(&a, "b1", 1, "keydown", &["name", "Enter", "Ada"]),
@@ -123,7 +140,10 @@ fn tictactoe_plays_a_game_on_the_oracle_and_the_engine() {
     let run = differential(&a, &inputs, 36);
     let u = |x: u64| Value::Int(blossom_value::value::IntValue::U64(x));
     assert_eq!(
-        rows(&a, &run, 9, s, "Server.games").iter().map(|r| (r[0].clone(), r[1].clone(), r[2].clone())).collect::<Vec<_>>(),
+        rows(&a, &run, 9, s, "Server.games")
+            .iter()
+            .map(|r| (r[0].clone(), r[1].clone(), r[2].clone()))
+            .collect::<Vec<_>>(),
         vec![(u(0), Value::Node(b1), Value::Node(b2))]
     );
     // b2's out-of-turn click made no move.
@@ -139,10 +159,16 @@ fn tictactoe_plays_a_game_on_the_oracle_and_the_engine() {
             vec![u(0), u(4), u(2)],
         ]
     );
-    assert_eq!(rows(&a, &run, 36, s, "Server.outcome"), vec![vec![u(0), Value::str("X")]]);
+    assert_eq!(
+        rows(&a, &run, 36, s, "Server.outcome"),
+        vec![vec![u(0), Value::str("X")]]
+    );
     // Each tab judges its own copy of the game by the same rules: the same outcome, and the winning line.
     for tab in [b1, b2] {
-        assert_eq!(rows(&a, &run, 36, tab, "Browser.outcome"), vec![vec![u(0), Value::str("X")]]);
+        assert_eq!(
+            rows(&a, &run, 36, tab, "Browser.outcome"),
+            vec![vec![u(0), Value::str("X")]]
+        );
         assert_eq!(
             rows(&a, &run, 36, tab, "winning"),
             vec![vec![u(0), u(0)], vec![u(0), u(1)], vec![u(0), u(2)]]
@@ -151,6 +177,61 @@ fn tictactoe_plays_a_game_on_the_oracle_and_the_engine() {
     let headline = |tab| rows(&a, &run, 36, tab, "headline");
     assert_eq!(headline(b1), vec![vec![u(0), Value::str("You win!")]]);
     assert_eq!(headline(b2), vec![vec![u(0), Value::str("You lose.")]]);
+}
+
+/// A room of rooms.bls is a keyed member (`lunch`, the simulation's node of `Room`): two tabs sit and play until X has
+/// the top row, on the oracle and the engine alike; the tabs see the room by its member value.
+#[test]
+fn a_room_plays_a_game_on_the_oracle_and_the_engine() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/web/rooms.bls");
+    let a = compile(
+        &path,
+        &[
+            ("lunch", Some("Room")),
+            ("b1", Some("Browser")),
+            ("b2", Some("Browser")),
+        ],
+    );
+    let (lunch, b1, b2) = (
+        a.node_id("lunch").unwrap(),
+        a.node_id("b1").unwrap(),
+        a.node_id("b2").unwrap(),
+    );
+    let click = |node: &str, t: u64, id: &str| event(&a, node, t, "click", &[id]);
+    let inputs = vec![
+        event(&a, "b1", 1, "keydown", &["name", "Enter", "Ada"]),
+        event(&a, "b2", 1, "keydown", &["name", "Enter", "Bob"]),
+        click("b1", 2, "sit"),
+        click("b2", 6, "sit"),
+        click("b1", 10, "sq-0"),
+        click("b2", 14, "sq-4"),
+        click("b1", 18, "sq-1"),
+        click("b2", 22, "sq-8"),
+        click("b1", 26, "sq-2"),
+    ];
+    let run = differential(&a, &inputs, 32);
+    let u = |x: u64| Value::Int(blossom_value::value::IntValue::U64(x));
+    let p = a.program.get();
+    let room = Value::Member(p.member(p.keyed_role_named("Room").unwrap(), "lunch"));
+    assert_eq!(rows(&a, &run, 32, b1, "up"), vec![vec![room]]);
+    assert_eq!(rows(&a, &run, 32, b1, "called"), vec![vec![Value::str("lunch")]]);
+    assert_eq!(
+        rows(&a, &run, 32, lunch, "Room.seats"),
+        vec![
+            vec![Value::str("O"), Value::Node(b2)],
+            vec![Value::str("X"), Value::Node(b1)]
+        ]
+    );
+    assert_eq!(rows(&a, &run, 32, lunch, "Room.outcome"), vec![vec![Value::str("X")]]);
+    for tab in [b1, b2] {
+        assert_eq!(rows(&a, &run, 32, tab, "Browser.outcome"), vec![vec![Value::str("X")]]);
+        assert_eq!(
+            rows(&a, &run, 32, tab, "winning"),
+            vec![vec![u(0)], vec![u(1)], vec![u(2)]]
+        );
+    }
+    assert_eq!(rows(&a, &run, 32, b1, "headline"), vec![vec![Value::str("You win!")]]);
+    assert_eq!(rows(&a, &run, 32, b2, "headline"), vec![vec![Value::str("You lose.")]]);
 }
 
 #[test]
@@ -176,8 +257,14 @@ fn outer_over_a_generated_column_and_constant_collections() {
         .map(|(i, c)| vec![u(i), u(c)])
         .collect();
     assert_eq!(rows(&a, &run, 0, n1, "square"), squares);
-    assert_eq!(rows(&a, &run, 0, n1, "const_name"), vec![named(1, "one"), named(4, "four")]);
-    assert_eq!(rows(&a, &run, 0, n1, "odd_square"), vec![vec![u(1)], vec![u(3)], vec![u(5)]]);
+    assert_eq!(
+        rows(&a, &run, 0, n1, "const_name"),
+        vec![named(1, "one"), named(4, "four")]
+    );
+    assert_eq!(
+        rows(&a, &run, 0, n1, "odd_square"),
+        vec![vec![u(1)], vec![u(3)], vec![u(5)]]
+    );
 }
 
 #[test]
@@ -194,11 +281,19 @@ fn collect_and_index_order_by_their_keys() {
     };
     let run = differential(
         &a,
-        &[add(1, "zed", 5, 1), add(1, "amy", 9, 2), add(2, "kim", 5, 3), add(2, "bob", 9, 4)],
+        &[
+            add(1, "zed", 5, 1),
+            add(1, "amy", 9, 2),
+            add(2, "kim", 5, 3),
+            add(2, "bob", 9, 4),
+        ],
         4,
     );
     let names = |xs: &[&str]| Value::Vec(xs.iter().map(|s| Value::str(s)).collect::<Vec<_>>().into());
-    assert_eq!(rows(&a, &run, 4, n1, "arrival"), vec![vec![names(&["zed", "amy", "kim", "bob"])]]);
+    assert_eq!(
+        rows(&a, &run, 4, n1, "arrival"),
+        vec![vec![names(&["zed", "amy", "kim", "bob"])]]
+    );
     assert_eq!(
         rows(&a, &run, 4, n1, "by_score"),
         vec![vec![u(5), names(&["zed", "kim"])], vec![u(9), names(&["amy", "bob"])]]
@@ -206,12 +301,22 @@ fn collect_and_index_order_by_their_keys() {
     let rank = |n: &str, s: u64, r: u64| vec![Value::str(n), u(s), u(r)];
     assert_eq!(
         rows(&a, &run, 4, n1, "ranked"),
-        vec![rank("amy", 9, 2), rank("bob", 9, 3), rank("kim", 5, 0), rank("zed", 5, 1)]
+        vec![
+            rank("amy", 9, 2),
+            rank("bob", 9, 3),
+            rank("kim", 5, 0),
+            rank("zed", 5, 1)
+        ]
     );
     // Even arrivals first (at % 2 == 0), then odd; each by arrival.
     assert_eq!(
         rows(&a, &run, 4, n1, "ranked2"),
-        vec![rank("amy", 2, 0), rank("bob", 4, 1), rank("kim", 3, 3), rank("zed", 1, 2)]
+        vec![
+            rank("amy", 2, 0),
+            rank("bob", 4, 1),
+            rank("kim", 3, 3),
+            rank("zed", 1, 2)
+        ]
     );
 }
 
@@ -234,7 +339,11 @@ fn a_section_of_two_roles_gives_each_end_its_own_copy() {
         row: Arc::from(vec![u(0), u(cell)]),
     };
     // X at 0, 1, 2 with O between: the tab plays both sides here, the server keeps order.
-    let inputs: Vec<InputEvent> = [0, 3, 1, 4, 2, 5].iter().enumerate().map(|(i, c)| tap(1 + 4 * i as u64, *c)).collect();
+    let inputs: Vec<InputEvent> = [0, 3, 1, 4, 2, 5]
+        .iter()
+        .enumerate()
+        .map(|(i, c)| tap(1 + 4 * i as u64, *c))
+        .collect();
     let run = differential(&a, &inputs, 30);
     let three = vec![vec![u(0), Value::str("X")]];
     assert_eq!(rows(&a, &run, 30, s, "Server.three"), three);

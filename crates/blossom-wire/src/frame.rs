@@ -5,6 +5,8 @@
 //!                  restarts:u64 boot_nonce:u64 n:varint (sid:varint name:str schema_hash:[16]){n}
 //!          peer := 0 node:u32 | 1 principal:str                 (a node of the deployment, or a client session)
 //!                | 2 role:str token:bytes received:u64 acked:u64  (a client member, CLIENTS.md §3; empty token: new)
+//!                | 3 role:str token:bytes received:u64 acked:u64 keyed_role:str key:str
+//!                                                     (a client member linking to a keyed member, KEYED.md)
 //! HELLO_OK 0x02 := accepted_version:u32 n:varint (sid:varint){n}
 //! REJECT   0x03 := reason:u8 detail:str
 //! GOAWAY   0x04 := reason:u8
@@ -45,13 +47,15 @@ pub enum Peer {
     Client { principal: String },
     /// A member of a client role (docs/design/CLIENTS.md §3): its role, the digest of the part of the program it runs
     /// (§8: a server refuses a page built from another program), its token (`None` the first time), the sequence
-    /// number of the last message it took from the server, and of the last of its own the server acknowledged.
+    /// number of the last message it took from the server, and of the last of its own the server acknowledged; and
+    /// the keyed member it links to, if its server is one (docs/design/KEYED.md): the role's name and the key.
     Member {
         role: String,
         part: [u8; 16],
         token: Option<Vec<u8>>,
         received: u64,
         acked: u64,
+        keyed: Option<(String, String)>,
     },
 }
 
@@ -245,13 +249,18 @@ impl Frame {
                         token,
                         received,
                         acked,
+                        keyed,
                     } => {
-                        body.push(2);
+                        body.push(if keyed.is_some() { 3 } else { 2 });
                         put_str(&mut body, role);
                         body.extend_from_slice(part);
                         put_bytes(&mut body, token.as_deref().unwrap_or(&[]));
                         body.extend_from_slice(&received.to_le_bytes());
                         body.extend_from_slice(&acked.to_le_bytes());
+                        if let Some((r, k)) = keyed {
+                            put_str(&mut body, r);
+                            put_str(&mut body, k);
+                        }
                     }
                 }
                 body.extend_from_slice(&h.directory);
@@ -343,16 +352,24 @@ impl Frame {
                     1 => Peer::Client {
                         principal: get_str(input)?,
                     },
-                    2 => {
+                    kind @ (2 | 3) => {
                         let role = get_str(input)?;
                         let part = arr16(input, "program part")?;
                         let token = get_bytes(input)?;
+                        let received = u64::from_le_bytes(le(input, "received")?);
+                        let acked = u64::from_le_bytes(le(input, "acked")?);
+                        let keyed = if kind == 3 {
+                            Some((get_str(input)?, get_str(input)?))
+                        } else {
+                            None
+                        };
                         Peer::Member {
                             role,
                             part,
                             token: (!token.is_empty()).then_some(token),
-                            received: u64::from_le_bytes(le(input, "received")?),
-                            acked: u64::from_le_bytes(le(input, "acked")?),
+                            received,
+                            acked,
+                            keyed,
                         }
                     }
                     other => return Err(WireError::Malformed(format!("peer kind {other}"))),
