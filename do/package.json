@@ -1,0 +1,9 @@
+{
+  "name": "blossom-durable-object",
+  "private": true,
+  "description": "A Blossom app's server as a Cloudflare Durable Object, run locally with workerd (docs/design/DURABLE-OBJECTS.md). Build with scripts/build-do.sh.",
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "4.137.0"
+  }
+}

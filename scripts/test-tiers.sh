@@ -22,6 +22,10 @@ web() {
   # The client-member specs (tests/web/clients.spec.mjs) run real nodes: `blossom run --web`.
   cargo build -q -p blossom-cli
   export BLOSSOM_BIN="${CARGO_TARGET_DIR:-$PWD/target}/debug/blossom"
+  # The Durable Object spec (tests/web/object.spec.mjs) runs polls on workerd, locally (docs/design/DURABLE-OBJECTS.md).
+  scripts/build-do.sh polls
+  (cd do && npm ci --no-audit --no-fund)
+  export BLOSSOM_DO=1
   (cd tests/web && npm ci --no-audit --no-fund && npx playwright test)
 }
 
