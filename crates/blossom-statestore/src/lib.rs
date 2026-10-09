@@ -92,6 +92,11 @@ pub trait StateStore: Send + Sync {
     fn put_side(&self, key: &str, value: &[u8]) -> Result<(), StateError>;
     fn get_side(&self, key: &str) -> Result<Option<Vec<u8>>, StateError>;
     fn delete_side(&self, key: &str) -> Result<(), StateError>;
+    /// Housekeeping a host runs now and then (its sweeper): for a store that leaves garbage behind (the S3 store's
+    /// unreferenced blobs), collecting it. `now` is milliseconds since the epoch. Most stores have none.
+    fn maintain(&self, _now: u64) -> Result<(), StateError> {
+        Ok(())
+    }
 }
 
 /// The longest object name, entry key or side key, in bytes.
