@@ -73,7 +73,7 @@ impl Store {
         }
     }
 
-    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<'a, Box<dyn Executor>> {
+    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<Box<dyn Executor>> {
         let fs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
             fs,
@@ -102,14 +102,14 @@ impl Store {
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
         ManualDriver::new(
             node,
-            self.artifact.program.get(),
+            &self.artifact.program,
             &self.schema,
             self.names.clone(),
             opened,
         )
     }
 
-    fn stored(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<Vec<u8>> {
+    fn stored(&self, d: &ManualDriver<Box<dyn Executor>>) -> Vec<Vec<u8>> {
         let rel = self.artifact.rel_named("stored").unwrap();
         let mut out: Vec<Vec<u8>> = d
             .released_image()
@@ -138,7 +138,7 @@ fn recovered(k: &Store, fs: &SimFs) -> Vec<Vec<u8>> {
 }
 
 #[cfg(test)]
-fn start(d: &mut ManualDriver<'_, Box<dyn Executor>>, conn: ConnId, at: i64) {
+fn start(d: &mut ManualDriver<Box<dyn Executor>>, conn: ConnId, at: i64) {
     d.run_until_quiescent(Instant(at)).unwrap();
     d.node
         .observe_stream(Observed::Opened {
@@ -273,7 +273,7 @@ fn a_store_from_before_the_database_moves_onto_one() {
     // The first boot moves it onto a database.
     let d = k.boot(&legacy);
     assert_eq!(k.stored(&d), expected);
-    let holds_marker = |d: &ManualDriver<'_, Box<dyn Executor>>| {
+    let holds_marker = |d: &ManualDriver<Box<dyn Executor>>| {
         d.released_image()
             .unwrap()
             .rows
@@ -345,10 +345,10 @@ fn an_acl_over_a_durable_table_reads_the_database() {
             opened.boot.clone(),
         )
         .unwrap();
-        ManualDriver::new(node, artifact.program.get(), &schema, names.clone(), opened)
+        ManualDriver::new(node, &artifact.program, &schema, names.clone(), opened)
     };
     let facts = oracle.static_facts();
-    let admits = |d: &ManualDriver<'_, Box<dyn Executor>>, p: &str| {
+    let admits = |d: &ManualDriver<Box<dyn Executor>>, p: &str| {
         d.admits(&acl, facts, enter, Source::Session { principal: p }).unwrap()
     };
     let mut d = boot(&fs);

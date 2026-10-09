@@ -260,9 +260,9 @@ struct Client {
     retry: Option<NodeId>,
 }
 
-struct SimNode<'p> {
+struct SimNode {
     fs: SimFs,
-    driver: Option<ManualDriver<'p, Box<dyn Executor>>>,
+    driver: Option<ManualDriver<Box<dyn Executor>>>,
     restarts: u64,
     /// How far this incarnation's clock is ahead of virtual time: a restart boots after every instant the previous
     /// incarnation may have exposed, which can be ahead of the virtual clock (the real clock anchors the same way).
@@ -304,7 +304,7 @@ pub struct Cluster<'p> {
     acl: AclTable,
     names: Arc<[Arc<str>]>,
     statics: Vec<(RelId, Row)>,
-    nodes: Vec<SimNode<'p>>,
+    nodes: Vec<SimNode>,
     clients: Vec<Client>,
     net: BTreeMap<(i64, u64), Envelope>,
     seq: u64,
@@ -506,7 +506,7 @@ impl<'p> Cluster<'p> {
         };
         let node = Node::boot(cfg, &artifact.program, exec, opened.boot.clone())
             .map_err(|e| SimError::Internal(internal_error!("node {} cannot boot: {e}", n.0)))?;
-        slot.driver = Some(ManualDriver::new(node, artifact.program.get(), schema, names, opened));
+        slot.driver = Some(ManualDriver::new(node, &artifact.program, schema, names, opened));
         Ok(())
     }
 

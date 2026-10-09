@@ -181,7 +181,7 @@ fn a_guarded_timer_on_a_node_fires_the_same_and_a_dormant_node_sleeps() {
             opened.boot.clone(),
         )
         .unwrap();
-        let mut d = ManualDriver::new(node, artifact.program.get(), &schema, names.clone(), opened);
+        let mut d = ManualDriver::new(node, &artifact.program, &schema, names.clone(), opened);
         d.run_until_quiescent(Instant(0)).unwrap();
         // Before any start, and while stopped, no timer is due: the node sleeps.
         assert_eq!(

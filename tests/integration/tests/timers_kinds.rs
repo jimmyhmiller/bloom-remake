@@ -158,7 +158,7 @@ fn every_kind_of_timer_fires_the_same_on_a_node_and_a_spent_timer_sleeps() {
             opened.boot.clone(),
         )
         .unwrap();
-        let mut d = ManualDriver::new(node, artifact.program.get(), &schema, names.clone(), opened);
+        let mut d = ManualDriver::new(node, &artifact.program, &schema, names.clone(), opened);
         // At boot the logical timer keeps the node ticking until it is spent: its 3rd and 6th ticks, all at 0.
         d.run_until_quiescent(Instant(0)).unwrap();
         assert_eq!(

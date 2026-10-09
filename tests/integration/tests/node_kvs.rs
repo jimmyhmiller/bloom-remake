@@ -92,13 +92,13 @@ impl Kvs {
     }
 
     /// Opens (recovers) the store on `fs` and boots the node.
-    fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<'a, Box<dyn Executor>> {
+    fn boot<'a>(&'a self, fs: &SimFs, wall: i64) -> ManualDriver<Box<dyn Executor>> {
         // A clone of a `SimFs` is another handle on the same filesystem.
         self.boot_on(Arc::new(fs.clone()), wall)
     }
 
     /// Opens (recovers) the store on any filesystem and boots the node.
-    fn boot_on<'a>(&'a self, fs: Arc<dyn Vfs>, wall: i64) -> ManualDriver<'a, Box<dyn Executor>> {
+    fn boot_on<'a>(&'a self, fs: Arc<dyn Vfs>, wall: i64) -> ManualDriver<Box<dyn Executor>> {
         let opened = recovery::open(
             fs,
             &StoreSpec {
@@ -120,7 +120,7 @@ impl Kvs {
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
         ManualDriver::new(
             node,
-            self.artifact.program.get(),
+            &self.artifact.program,
             &self.schema,
             self.names.clone(),
             opened,
@@ -152,7 +152,7 @@ impl Kvs {
         }
     }
 
-    fn store(&self, d: &ManualDriver<'_, Box<dyn Executor>>) -> Vec<(String, Vec<u8>)> {
+    fn store(&self, d: &ManualDriver<Box<dyn Executor>>) -> Vec<(String, Vec<u8>)> {
         let rel = self.rel("store");
         d.released_image()
             .unwrap()
@@ -446,7 +446,7 @@ fn crash_points(k: &Kvs) {
     assert!(cuts.len() > 30, "only {} cuts", cuts.len());
     // The value of each key must be the last put acknowledged by the cut, or any later put to it (a put may be
     // durable before its reply is released).
-    let check = |d: &ManualDriver<'_, Box<dyn Executor>>, c: usize, what: &str| {
+    let check = |d: &ManualDriver<Box<dyn Executor>>, c: usize, what: &str| {
         let store: std::collections::BTreeMap<String, Vec<u8>> = k.store(d).into_iter().collect();
         for key in (0..4).map(|i| format!("k{i}")) {
             let last_acked = acked.iter().rfind(|(k2, _, at)| *k2 == key && *at <= c + 1);

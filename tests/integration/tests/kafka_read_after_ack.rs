@@ -132,7 +132,7 @@ impl Broker {
         }
     }
 
-    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<'a, Box<dyn Executor>> {
+    fn boot<'a>(&'a self, fs: &SimFs) -> ManualDriver<Box<dyn Executor>> {
         let vfs: Arc<dyn Vfs> = Arc::new(fs.clone());
         let opened = recovery::open(
             vfs,
@@ -164,7 +164,7 @@ impl Broker {
         let node = Node::boot(cfg, &self.artifact.program, exec, opened.boot.clone()).unwrap();
         ManualDriver::new(
             node,
-            self.artifact.program.get(),
+            &self.artifact.program,
             &self.schema,
             self.names.clone(),
             opened,
@@ -175,7 +175,7 @@ impl Broker {
 /// The broker's stream writes in released ticks, by connection.
 #[cfg(test)]
 fn writes(
-    d: &ManualDriver<'_, Box<dyn Executor>>,
+    d: &ManualDriver<Box<dyn Executor>>,
     ticks: Vec<blossom_node::node::ReleasedTick>,
 ) -> Vec<(ConnId, Vec<u8>)> {
     let blobs = d.node.blobs();
@@ -200,7 +200,7 @@ fn body(frame: &[u8]) -> Bytes {
 
 /// Runs the broker until quiescent at advancing instants, until a write to `conn` is released; returns it.
 #[cfg(test)]
-fn answer(d: &mut ManualDriver<'_, Box<dyn Executor>>, now: &mut i64, conn: ConnId) -> Vec<u8> {
+fn answer(d: &mut ManualDriver<Box<dyn Executor>>, now: &mut i64, conn: ConnId) -> Vec<u8> {
     for _ in 0..500 {
         *now += 10_000_000;
         let ticks = d.run_until_quiescent(Instant(*now)).unwrap();
