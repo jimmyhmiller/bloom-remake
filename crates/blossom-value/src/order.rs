@@ -9,7 +9,7 @@
 //! - tuples and structs field by field; enums by variant number, then payload (an unknown variant after a known
 //!   one with the same number, then by wire number and bytes); `None < Some(x)`;
 //! - `Vec` lexicographically; `Set` and `Map` as their sorted sequences;
-//! - `Node` by node id, then keyed members by role and key; `Duration` and `Instant` numerically; `Mod` by width, then numerically;
+//! - `Node` by node id, then keyed members by role name and key; `Duration` and `Instant` numerically; `Mod` by width, then numerically;
 //! - `Blob` by content address; lattice and group values by their canonical form (for deduplication and ties
 //!   only: this is not the lattice order);
 //! - values of different types (a type error upstream) by a fixed rank of their kind.
@@ -381,21 +381,20 @@ mod tests {
             Value::bytes(&[0, 0]),
             Value::bytes(&[1]),
         ]);
-        // Keyed members after every node id (a client member's too), by role, then key.
-        let member = |r: u32, k: &str| {
-            Value::Member(crate::time::MemberRef {
-                role: blossom_base::RoleId::from_raw(r),
-                key: k.into(),
-            })
+        // Keyed members after every node id (a client member's too), by role name, then key; the role's id in a
+        // program does not count.
+        let member = |r: u32, name: &str, k: &str| {
+            Value::Member(crate::time::MemberRef::new(blossom_base::RoleId::from_raw(r), name, k))
         };
         assert_strictly_increasing(&[
             Value::Node(NodeId(0)),
             Value::Node(NodeId(3)),
             Value::Node(NodeId(u32::MAX)),
-            member(0, "b"),
-            member(0, "game-1"),
-            member(1, "a"),
+            member(1, "Game", "b"),
+            member(1, "Game", "game-1"),
+            member(0, "Room", "a"),
         ]);
+        assert_eq!(member(0, "Game", "a"), member(7, "Game", "a"));
         assert_strictly_increasing(&[Value::Duration(Duration(-1)), Value::Duration(Duration(2))]);
         assert_strictly_increasing(&[Value::Instant(Instant(-1)), Value::Instant(Instant(2))]);
         assert_strictly_increasing(&[

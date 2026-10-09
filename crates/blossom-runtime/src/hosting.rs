@@ -442,7 +442,7 @@ impl Host {
 
     /// The directory of member `m`'s store, and the file naming the member in it.
     fn member_dir(&self, m: &MemberRef) -> PathBuf {
-        let name = member_name(self.artifact.program.get(), m);
+        let name = member_name(m);
         let digest = blake3::hash(name.as_bytes());
         let hex: String = digest.as_bytes().iter().take(16).map(|b| format!("{b:02x}")).collect();
         self.dir.join("members").join(hex)
@@ -484,10 +484,7 @@ impl Host {
             .find(|r| r.name.to_string() == role)
             .map(|r| r.id)
             .ok_or_else(|| RuntimeError::Config(format!("{}: `{role}` is not a keyed role", path.display())))?;
-        Ok(MemberRef {
-            role,
-            key: Arc::from(key),
-        })
+        Ok(p.member(role, key))
     }
 
     /// Member `m`'s object, opened (its store created on its first message) if it is not running.
@@ -508,7 +505,7 @@ impl Host {
                     return Err(RuntimeError::Config(format!(
                         "{} holds another member than {}",
                         dir.display(),
-                        member_name(p, m)
+                        member_name(m)
                     )));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

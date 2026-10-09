@@ -65,6 +65,25 @@ impl Program {
     pub fn keyed_roles(&self) -> impl Iterator<Item = &crate::core::RoleDecl> {
         self.roles.iter().filter(|r| r.kind == crate::core::RoleKind::Keyed)
     }
+
+    /// The keyed role named `name`.
+    pub fn keyed_role_named(&self, name: &str) -> Option<RoleId> {
+        self.keyed_roles().find(|r| r.name.to_string() == name).map(|r| r.id)
+    }
+
+    /// Each role's name, by id (a keyed member carries its role's name).
+    pub fn role_names(&self) -> Vec<Arc<str>> {
+        self.roles.iter().map(|r| Arc::from(r.name.to_string())).collect()
+    }
+
+    /// The member of role `role` named `key`.
+    pub fn member(&self, role: RoleId, key: impl Into<Arc<str>>) -> blossom_value::time::MemberRef {
+        let name = self
+            .roles
+            .get(role)
+            .map_or_else(|| format!("role#{}", role.raw()), |r| r.name.to_string());
+        blossom_value::time::MemberRef::new(role, name, key)
+    }
 }
 impl IrBuilder {
     /// Starts a program for a particular frontend.

@@ -401,7 +401,7 @@ impl Engine {
                 }
                 // A keyed member's seed derives from its member name (`Game:"game-17"`), wherever it runs.
                 if let Some(m) = cfg.members.get(node) {
-                    let name = blossom_ir::members::member_name(p, &m);
+                    let name = blossom_ir::members::member_name(&m);
                     own_seed = Some(
                         blossom_value::Seeds::derive(root, &name)
                             .map_err(|e| internal_error!("deriving the seed of member {name}: {e}"))?
@@ -558,6 +558,7 @@ impl Engine {
                 own_seed,
                 roles: cfg.roles,
                 members: cfg.members,
+                role_names: p.role_names(),
                 kinds,
                 externs: cfg.externs,
                 node_names: cfg.node_names,
@@ -1428,9 +1429,11 @@ impl Engine {
                         });
                     }
                     Some(Value::Member(m)) => {
-                        let to = self.shared.members.id(m).ok_or_else(|| {
-                            EvalError::NoMember(blossom_ir::members::member_name(self.program.get(), m))
-                        })?;
+                        let to = self
+                            .shared
+                            .members
+                            .id(m)
+                            .ok_or_else(|| EvalError::NoMember(blossom_ir::members::member_name(m)))?;
                         out.outbox.insert(Send {
                             rel,
                             to,

@@ -72,9 +72,11 @@ Its cost is breadth, not depth: each layer gains one case.
 
 ## 3. Under C, layer by layer
 
-- **Values** (built; blossom-value): `Value::Member(MemberRef { role: RoleId, key: Arc<str> })`, typed `Node<R>` with `R`
-  keyed. Canonical order: after dense and client node ids, by `(role, key)`. Fingerprints and `to_string`
-  (`Game:"game-17"`) follow.
+- **Values** (built; blossom-value): `Value::Member(MemberRef { role, role_name, key })`, typed `Node<R>` with `R`
+  keyed. A member's identity is its role's **name** and its key: it compares, orders (after every node id, by role
+  name, then key), hashes and fingerprints by those, never by the role's id, which is the program's own (a page's
+  projection numbers roles otherwise, and so may a new version; `hash64` must agree on every node and in every
+  version). `to_string` writes `Game:"game-17"`.
 - **Front end** (built, but link events): the `keyed` role kind (HIR, IR `RoleKind::Keyed`), `R.named(e)`, `self.key()`
   at a keyed role (BLS0404 elsewhere), the static-membership errors (BLS0404); link events between a keyed role and a
   client role come with sub-slice 3.
@@ -85,11 +87,11 @@ Its cost is breadth, not depth: each layer gains one case.
   its seed σn derives from its member name (`Game:"game-17"`), the same on every host. The ids never reach a value.
   `R.named(k)` and `self.key()` are the IR builtins `Named { role }` and `MemberKey`.
 - **Codecs** (built): the wire and durable codecs write `Node<R>` of a keyed `R` as the key alone (the role is the
-  type's), and an untyped `Node` of a program with keyed roles tagged (0 and the node, or 1, the role's id and the
+  type's), and an untyped `Node` of a program with keyed roles tagged (0 and the node, or 1, the role's name and the
   key); a program without keyed roles encodes every node as before. The order-preserving key codec gives members
-  sub-tag 2 after the nodes, then the role's id and the escaped key. Role ids are in those bytes, so a column that
-  may hold a member puts the keyed roles' names and ids in its relation's schema hash: renumbering them is a schema
-  change, refused on open, never a misread. The word store interns `Node` columns (a member is no fixed-width word).
+  sub-tag 2 after the nodes, then the escaped role name and the escaped key, so its bytes order as members do. A
+  column that may hold a member says so in its relation's schema hash (`Node<keyed Game>`, `Node|keyed`), by name.
+  The word store interns `Node` columns (a member is no fixed-width word).
 - **Simulator and LDFI** (built): a node of a keyed role is the member its name keys (`--nodes lobby=Lobby,game-17=Game`
   is `Game.named("game-17")`); members are dense nodes there, as client members are, and a send to a key the
   deployment does not name is the hard error above, so a schedule never silently loses a node. LDFI decides programs

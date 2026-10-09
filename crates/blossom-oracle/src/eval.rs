@@ -480,7 +480,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
                 Some(Value::Member(m)) => oracle
                     .members()
                     .id(m)
-                    .ok_or_else(|| OracleError::NoMember(blossom_ir::members::member_name(program, m)))?,
+                    .ok_or_else(|| OracleError::NoMember(blossom_ir::members::member_name(m)))?,
                 // A reply to a client session leaves the deployment (LANGUAGE §18.4); a session is a destination
                 // like a node, so a lattice reply channel merges per session and key too (§14.2).
                 Some(Value::Session(s)) => {

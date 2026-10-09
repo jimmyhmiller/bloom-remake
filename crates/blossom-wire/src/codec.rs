@@ -326,15 +326,16 @@ impl<'p> Codec<'p> {
                 (NodeForm::Plain, Value::Node(n)) => self.put_node(*n, out)?,
                 // The role is the type's: the key alone.
                 (NodeForm::Member(role), Value::Member(m)) if m.role == role => put_bytes(out, m.key.as_bytes()),
-                // A tag (0 a node, 1 a keyed member), then the node, or the role's id and the key.
+                // A tag (0 a node, 1 a keyed member), then the node, or the role's name and the key.
                 (NodeForm::Mixed, Value::Node(n)) => {
                     let mut inner = vec![0];
                     self.put_node(*n, &mut inner)?;
                     put_bytes(out, &inner);
                 }
+                // By its role's name: a page's projection numbers roles otherwise.
                 (NodeForm::Mixed, Value::Member(m)) if self.program.is_keyed(m.role) => {
                     let mut inner = vec![1];
-                    put_varint(&mut inner, u64::from(m.role.raw()));
+                    put_bytes(&mut inner, m.role_name.as_bytes());
                     inner.extend_from_slice(m.key.as_bytes());
                     put_bytes(out, &inner);
                 }
@@ -553,10 +554,10 @@ impl<'p> Codec<'p> {
             }
             TypeDef::Node(r) => match self.node_form(*r) {
                 NodeForm::Plain => Value::Node(self.get_node(input)?),
-                NodeForm::Member(role) => Value::Member(MemberRef {
-                    role,
-                    key: Arc::from(utf8(get_bytes(input, "a member's key")?)?),
-                }),
+                NodeForm::Member(role) => Value::Member(
+                    self.program
+                        .member(role, Arc::<str>::from(utf8(get_bytes(input, "a member's key")?)?)),
+                ),
                 NodeForm::Mixed => {
                     let mut inner = get_bytes(input, "a node")?;
                     let (&tag, rest) = inner.split_first().ok_or(WireError::Truncated("a node's tag"))?;
@@ -570,16 +571,12 @@ impl<'p> Codec<'p> {
                             Value::Node(n)
                         }
                         1 => {
-                            let raw = u32::try_from(get_varint(&mut inner)?)
-                                .map_err(|_| WireError::Malformed("a role id".into()))?;
-                            let role = RoleId::from_raw(raw);
-                            if !self.program.is_keyed(role) {
-                                return Err(WireError::Malformed(format!("role {raw} is not keyed")));
-                            }
-                            Value::Member(MemberRef {
-                                role,
-                                key: Arc::from(utf8(inner)?),
-                            })
+                            let name = utf8(get_bytes(&mut inner, "a member's role")?)?;
+                            let role = self
+                                .program
+                                .keyed_role_named(name)
+                                .ok_or_else(|| WireError::Malformed(format!("`{name}` is not a keyed role")))?;
+                            Value::Member(MemberRef::new(role, name, utf8(inner)?))
                         }
                         t => return Err(WireError::Malformed(format!("a node tagged {t}"))),
                     }

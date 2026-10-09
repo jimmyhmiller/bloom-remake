@@ -299,7 +299,7 @@ pub(crate) fn eval(scope: &Scope<'_>, env: &[Option<Value>], e: &Expr) -> ExprRe
                 return Err(ExprError::Oracle(internal_error!("`named` takes one key").into()));
             };
             match eval(scope, env, k)? {
-                Value::Str(key) => Ok(Value::Member(blossom_value::time::MemberRef { role: *role, key })),
+                Value::Str(key) => Ok(Value::Member(scope.program.member(*role, key))),
                 other => Err(ExprError::Oracle(internal_error!("`named` of {other:?}").into())),
             }
         }

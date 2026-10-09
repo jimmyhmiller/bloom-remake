@@ -79,14 +79,59 @@ impl NodeId {
     }
 }
 
-/// A keyed member (docs/design/KEYED.md): the member of the keyed role `role` named by `key`. Its identity is the key
-/// itself, so two keys never share one; members order by role, then key, after every [`NodeId`].
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+/// A keyed member (docs/design/KEYED.md): the member of the keyed role named `role_name` named by `key`. Its identity
+/// is its role's name and its key, so two keys never share one, and it is the same in every program that names the
+/// role (a page's projection numbers roles otherwise, and versions may): members compare, order (by role name, then
+/// key, after every [`NodeId`]), hash and fingerprint by name and key. `role` is the role's id in the program at hand.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemberRef {
-    /// The keyed role.
+    /// The keyed role, in this program.
     pub role: blossom_base::RoleId,
+    /// The keyed role's name.
+    pub role_name: std::sync::Arc<str>,
     /// The member's key.
     pub key: std::sync::Arc<str>,
+}
+
+impl MemberRef {
+    pub fn new(
+        role: blossom_base::RoleId,
+        role_name: impl Into<std::sync::Arc<str>>,
+        key: impl Into<std::sync::Arc<str>>,
+    ) -> MemberRef {
+        MemberRef {
+            role,
+            role_name: role_name.into(),
+            key: key.into(),
+        }
+    }
+}
+
+impl PartialEq for MemberRef {
+    fn eq(&self, other: &MemberRef) -> bool {
+        self.role_name == other.role_name && self.key == other.key
+    }
+}
+
+impl Eq for MemberRef {}
+
+impl PartialOrd for MemberRef {
+    fn partial_cmp(&self, other: &MemberRef) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MemberRef {
+    fn cmp(&self, other: &MemberRef) -> std::cmp::Ordering {
+        (&self.role_name, &self.key).cmp(&(&other.role_name, &other.key))
+    }
+}
+
+impl std::hash::Hash for MemberRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.role_name.hash(state);
+        self.key.hash(state);
+    }
 }
 
 /// Nanoseconds since the deployment epoch.

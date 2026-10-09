@@ -175,6 +175,8 @@ pub(crate) struct Shared {
     pub roles: Vec<Option<RoleId>>,
     /// The keyed members the host gave node ids.
     pub members: Arc<blossom_ir::members::Members>,
+    /// Each role's name, by id (a keyed member's value carries it).
+    pub role_names: Vec<Arc<str>>,
     /// The built-in lattice of each declared lattice, by lattice id.
     pub kinds: Vec<Option<Kind>>,
     /// The host functions of the program's `extern fn`s, bound when the engine was built.
@@ -678,7 +680,15 @@ fn builtin(cx: &Ctx<'_>, env: &mut Frame<'_>, f: &BuiltinFn, args: &[Expr]) -> E
         }
         BuiltinFn::Size { role } => Ok(Value::Int(IntValue::U64(cx.shared.role_size(*role)))),
         BuiltinFn::Named { role } => match arg(0)? {
-            Value::Str(key) => Ok(Value::Member(blossom_value::time::MemberRef { role: *role, key })),
+            Value::Str(key) => {
+                let name = cx
+                    .shared
+                    .role_names
+                    .get(role.index())
+                    .cloned()
+                    .ok_or_else(|| bug(format!("`named` of an unknown role {role:?}")))?;
+                Ok(Value::Member(blossom_value::time::MemberRef::new(*role, name, key)))
+            }
             other => Err(bug(format!("`named` of {other:?}"))),
         },
         BuiltinFn::MemberKey => match arg(0)? {

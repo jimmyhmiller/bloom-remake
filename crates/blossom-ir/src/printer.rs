@@ -586,13 +586,7 @@ impl<'a> Texts<'a> {
             }
             Value::Node(n) => (self.node)(*n),
             // A keyed member by its role and key: `Game:"game-17"`.
-            Value::Member(m) => {
-                let role = self
-                    .program
-                    .and_then(|p| p.roles.get(m.role))
-                    .map_or_else(|| format!("role#{}", m.role.raw()), |r| r.name.to_string());
-                format!("{role}:{:?}", m.key)
-            }
+            Value::Member(m) => crate::members::member_name(m),
             Value::Str(s) => format!("{s:?}"),
             Value::Bool(b) => b.to_string(),
             Value::Unit => "()".to_owned(),
