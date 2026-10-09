@@ -418,9 +418,15 @@ impl Executors {
         seed: blossom_value::Seed,
         externs: std::sync::Arc<blossom_value::ExternRegistry>,
     ) -> Result<Executors, EvalError> {
+        // A node of a keyed role is the member its name keys (docs/design/KEYED.md).
+        let members = std::sync::Arc::new(
+            blossom_ir::members::of_deployment(program.get(), &names, &roles)
+                .map_err(|e| blossom_base::internal_error!("the deployment's members: {e}"))?,
+        );
         let oracle = std::sync::Arc::new(
             Oracle::with_externs(program.clone(), blossom_oracle::Limits::default(), externs.clone())?
                 .with_roles(roles.clone())
+                .with_members(members.clone())
                 .with_seed(seed)?
                 .with_node_names(names.clone())?,
         );
@@ -429,6 +435,7 @@ impl Executors {
             node_names: names,
             seed: Some(seed),
             externs,
+            members,
             ..blossom_engine::EngineConfig::default()
         };
         Ok(Executors {

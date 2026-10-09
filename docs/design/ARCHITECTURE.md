@@ -1622,7 +1622,7 @@ lattices over those) and `Lane::U64` otherwise. Lanes are a `RowShape` parameter
 | `u8`…`u64`, `Mod<N≤64>` | zero-extended |
 | `i8`…`i64`, `Duration`, `Instant` | sign-extended, then XOR the lane's top bit |
 | `f64` | IEEE totalOrder key: `if sign { !bits } else { bits ^ 1<<63 }` (LANGUAGE §5.1) |
-| `Node` | dense `NodeId`, assigned in canonical directory order (§5.9) |
+| `Node` | interned: a dense `NodeId` (assigned in canonical directory order, §5.9) or a keyed member, a role and a key (KEYED.md) |
 | `Option<T>` where T's encoding has a niche (bool, ≤ 32-bit ints, tags) | `0` = None, `enc(v)+1` = Some |
 
 **Per-column representation of everything else** (ARCH-22). The planner chooses `ColEnc` per column:

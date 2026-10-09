@@ -419,8 +419,10 @@ pub fn app_json(
         "clients": clients,
     });
     let mut app = app;
-    if spec.web_style.is_some() {
-        app["style"] = Value::String(STYLE_PATH.to_owned());
+    if spec.web_style.is_some()
+        && let Value::Object(fields) = &mut app
+    {
+        fields.insert("style".to_owned(), Value::String(STYLE_PATH.to_owned()));
     }
     serde_json::to_string(&app).map_err(|e| e.to_string())
 }

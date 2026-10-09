@@ -17,6 +17,7 @@ pub use error::IrError;
 pub use program::{ProgramDigest, ValidatedProgram};
 pub use validate::PART_TYPE;
 
+pub mod members;
 pub mod obs;
 pub mod plan;
 pub mod polarity;

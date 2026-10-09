@@ -264,6 +264,9 @@ pub enum RoleKind {
     External,
     /// Members admitted at run time (docs/design/CLIENTS.md): they hold rules but no node of the deployment.
     Client,
+    /// Members named by a key and created on demand (docs/design/KEYED.md): `Node<R>` values are
+    /// `Value::Member`s.
+    Keyed,
 }
 
 /// RelDecl data in the Dedalus core IR.
@@ -483,8 +486,11 @@ pub enum AggFunc {
         at: u32,
     },
     CollectSet,
-    CollectMap,                        // canonical order (LANG-118); duplicate map key = BLSR005
-    Percentile { num: u32, den: u32 }, // nearest rank, canonical tiebreak
+    CollectMap, // canonical order (LANG-118); duplicate map key = BLSR005
+    Percentile {
+        num: u32,
+        den: u32,
+    }, // nearest rank, canonical tiebreak
     OlaSum,
     OlaCount,
     OlaAvg,     // LANG-113; implicitly #[nondet("progressive")]
@@ -699,6 +705,12 @@ pub enum BuiltinFn {
     Size {
         role: RoleId,
     },
+    /// `R.named(k)`: the member of keyed role `role` named by the string `k` (docs/design/KEYED.md).
+    Named {
+        role: RoleId,
+    },
+    /// A keyed member's key (`self.key()`).
+    MemberKey,
     Len,
     IntCast(blossom_value::types::IntTy), // `x as T` from an integer or an `f64`: out of range is BLSR004 (LANGUAGE §5.1)
     Lib(LibFn),                           // the built-in library (LANGUAGE Appendix B); the receiver, if any, first

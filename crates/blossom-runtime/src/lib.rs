@@ -23,6 +23,20 @@ pub mod web;
 
 use blossom_base::{InternalError, Unimplemented};
 
+/// A program with a keyed role runs only in simulation so far: `blossom run` hosts keyed members in
+/// docs/design/KEYED.md's second sub-slice.
+fn refuse_keyed(program: &blossom_ir::core::Program) -> Result<(), RuntimeError> {
+    match program.keyed_roles().next() {
+        Some(r) => Err(blossom_base::unimplemented_error!(
+            "LANG-153",
+            "running the keyed role `{}` outside simulation (docs/design/KEYED.md §4, sub-slice 2)",
+            r.name
+        )
+        .into()),
+        None => Ok(()),
+    }
+}
+
 /// Why the runtime failed.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {

@@ -462,6 +462,7 @@ impl Server {
         if names.len() != artifact.nodes.len() || names.iter().zip(&artifact.nodes).any(|(a, b)| **a != *b.as_str()) {
             return Err(internal_error!("the program was compiled for other nodes than the deployment's").into());
         }
+        crate::refuse_keyed(program)?;
         let (me, entry) = spec.node(&cfg.node)?;
         let role = artifact.roles.get(me.0 as usize).copied().flatten();
         let seed: Seed = spec.seed()?;

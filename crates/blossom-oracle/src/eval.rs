@@ -315,7 +315,7 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
     for d in input.delivered {
         db.insert(d.rel, d.row.clone()).map_err(load)?;
         let mut with_sender: Vec<Value> = d.row.to_vec();
-        with_sender.push(Value::Node(d.from));
+        with_sender.push(oracle.members().value(d.from));
         db.insert_in(d.rel, true, Arc::from(with_sender)).map_err(load)?;
     }
     for g in input.ingress {
@@ -477,6 +477,10 @@ pub(crate) fn tick(oracle: &Oracle, input: &TickInput<'_>) -> Result<TickOutput,
             }
             let to = match row.first() {
                 Some(Value::Node(n)) => *n,
+                Some(Value::Member(m)) => oracle
+                    .members()
+                    .id(m)
+                    .ok_or_else(|| OracleError::NoMember(blossom_ir::members::member_name(program, m)))?,
                 // A reply to a client session leaves the deployment (LANGUAGE §18.4); a session is a destination
                 // like a node, so a lattice reply channel merges per session and key too (§14.2).
                 Some(Value::Session(s)) => {
@@ -1144,7 +1148,7 @@ pub(crate) fn why_not(
     }
     for d in input.delivered {
         let mut with_sender: Vec<Value> = d.row.to_vec();
-        with_sender.push(Value::Node(d.from));
+        with_sender.push(oracle.members().value(d.from));
         db.insert_in(d.rel, true, Arc::from(with_sender)).map_err(load)?;
     }
     for g in input.ingress {

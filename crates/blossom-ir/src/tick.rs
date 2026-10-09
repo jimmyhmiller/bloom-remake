@@ -141,6 +141,10 @@ pub enum EvalError {
     /// A deploy-time parameter without a default that the deployment does not bind.
     #[error("the deployment does not bind the parameter `{0}`, which has no default")]
     Unbound(String),
+    /// A send to a keyed member the host cannot route to (docs/design/KEYED.md): in simulation, one the deployment
+    /// does not name.
+    #[error("a send to {0}, a member no node runs")]
+    NoMember(String),
     /// Host functions the program declares that the evaluator's registry does not provide with that signature
     /// (checked when the program is loaded, LANG-181).
     #[error("unbound host functions: {}", .0.join("; "))]

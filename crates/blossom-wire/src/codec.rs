@@ -22,9 +22,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use blossom_base::{LatticeTypeId, TypeId};
+use blossom_base::{LatticeTypeId, RoleId, TypeId};
 use blossom_ir::core::{Column, LatticeCtor, Program};
-use blossom_value::time::{Duration, Instant, NodeId};
+use blossom_value::time::{Duration, Instant, MemberRef, NodeId};
 use blossom_value::types::IntTy;
 use blossom_value::value::{ConnId, IntValue, LatValue, SessionId};
 use blossom_value::{TypeDef, Value};
@@ -74,6 +74,18 @@ pub enum NodeEncoding {
     Dense,
     /// The node's stable name, `names[id]` (durable state).
     ByName(Arc<[Arc<str>]>),
+}
+
+/// How a `Node` type's values are written (docs/design/KEYED.md). A program without keyed roles writes every node
+/// plainly, as it always has.
+#[derive(Clone, Copy)]
+enum NodeForm {
+    /// A node id ([`NodeEncoding`]).
+    Plain,
+    /// `Node<R>` of a keyed role: the member's key.
+    Member(RoleId),
+    /// `Node` in a program with keyed roles: either, tagged.
+    Mixed,
 }
 
 const WT_VARINT: u8 = 0;
@@ -190,6 +202,68 @@ impl<'p> Codec<'p> {
             .ok_or_else(|| WireError::Malformed(format!("unknown lattice {id:?}")))
     }
 
+    /// How values of `Node` or `Node<role>` are written (docs/design/KEYED.md).
+    fn node_form(&self, role: Option<RoleId>) -> NodeForm {
+        match role {
+            Some(r) if self.program.is_keyed(r) => NodeForm::Member(r),
+            Some(_) => NodeForm::Plain,
+            None if self.program.keyed_roles().next().is_some() => NodeForm::Mixed,
+            None => NodeForm::Plain,
+        }
+    }
+
+    /// A node id: dense, or by name (a client member as `#serial@server`).
+    fn put_node(&self, n: NodeId, out: &mut Vec<u8>) -> Result<(), WireError> {
+        match &self.nodes {
+            NodeEncoding::Dense => put_varint(out, u64::from(n.0)),
+            // A client member (docs/design/CLIENTS.md §2) is written `#serial@server`, its admitting node by name.
+            NodeEncoding::ByName(names) => match n.client_parts() {
+                Some((server, serial)) => {
+                    let name = names
+                        .get(server.0 as usize)
+                        .ok_or_else(|| WireError::Malformed(format!("node {} has no name", server.0)))?;
+                    put_bytes(out, format!("#{serial}@{name}").as_bytes());
+                }
+                None => {
+                    let name = names
+                        .get(n.0 as usize)
+                        .ok_or_else(|| WireError::Malformed(format!("node {} has no name", n.0)))?;
+                    put_bytes(out, name.as_bytes());
+                }
+            },
+        }
+        Ok(())
+    }
+
+    /// A node id as [`Codec::put_node`] wrote it.
+    fn get_node(&self, input: &mut &[u8]) -> Result<NodeId, WireError> {
+        Ok(match &self.nodes {
+            NodeEncoding::Dense => {
+                NodeId(u32::try_from(get_varint(input)?).map_err(|_| WireError::Malformed("node id".into()))?)
+            }
+            NodeEncoding::ByName(names) => {
+                let name = utf8(get_bytes(input, "a node name")?)?;
+                let index = |name: &str| -> Result<NodeId, WireError> {
+                    let i = names
+                        .iter()
+                        .position(|n| &**n == name)
+                        .ok_or_else(|| WireError::Malformed(format!("no node named `{name}` in the directory")))?;
+                    Ok(NodeId(u32::try_from(i).map_err(|_| WireError::Limit("node id"))?))
+                };
+                match name.strip_prefix('#').and_then(|rest| rest.split_once('@')) {
+                    Some((serial, server)) => {
+                        let serial: u32 = serial
+                            .parse()
+                            .map_err(|_| WireError::Malformed(format!("`{name}` is not a client member")))?;
+                        NodeId::client(index(server)?, serial)
+                            .ok_or_else(|| WireError::Malformed(format!("`{name}` is out of range")))?
+                    }
+                    None => index(name)?,
+                }
+            }
+        })
+    }
+
     /// The wire type of values of `ty`.
     fn wire_type(&self, ty: TypeId) -> Result<u8, WireError> {
         Ok(match self.def(ty)? {
@@ -200,9 +274,9 @@ impl<'p> Codec<'p> {
             TypeDef::Duration | TypeDef::Instant => WT_ZZ,
             TypeDef::F64 => WT_FIXED64,
             TypeDef::Str | TypeDef::Bytes | TypeDef::Principal | TypeDef::Blob => WT_BYTES,
-            TypeDef::Node(_) => match self.nodes {
-                NodeEncoding::Dense => WT_VARINT,
-                NodeEncoding::ByName(_) => WT_BYTES,
+            TypeDef::Node(r) => match (self.node_form(*r), &self.nodes) {
+                (NodeForm::Plain, NodeEncoding::Dense) => WT_VARINT,
+                (NodeForm::Plain, NodeEncoding::ByName(_)) | (NodeForm::Member(_) | NodeForm::Mixed, _) => WT_BYTES,
             },
             TypeDef::Tuple(_)
             | TypeDef::Struct(_)
@@ -248,23 +322,23 @@ impl<'p> Codec<'p> {
                 h.extend_from_slice(&b.len.to_le_bytes());
                 put_bytes(out, &h);
             }
-            (TypeDef::Node(_), Value::Node(n)) => match &self.nodes {
-                NodeEncoding::Dense => put_varint(out, u64::from(n.0)),
-                // A client member (docs/design/CLIENTS.md §2) is written `#serial@server`, its admitting node by name.
-                NodeEncoding::ByName(names) => match n.client_parts() {
-                    Some((server, serial)) => {
-                        let name = names
-                            .get(server.0 as usize)
-                            .ok_or_else(|| WireError::Malformed(format!("node {} has no name", server.0)))?;
-                        put_bytes(out, format!("#{serial}@{name}").as_bytes());
-                    }
-                    None => {
-                        let name = names
-                            .get(n.0 as usize)
-                            .ok_or_else(|| WireError::Malformed(format!("node {} has no name", n.0)))?;
-                        put_bytes(out, name.as_bytes());
-                    }
-                },
+            (TypeDef::Node(r), v) => match (self.node_form(*r), v) {
+                (NodeForm::Plain, Value::Node(n)) => self.put_node(*n, out)?,
+                // The role is the type's: the key alone.
+                (NodeForm::Member(role), Value::Member(m)) if m.role == role => put_bytes(out, m.key.as_bytes()),
+                // A tag (0 a node, 1 a keyed member), then the node, or the role's id and the key.
+                (NodeForm::Mixed, Value::Node(n)) => {
+                    let mut inner = vec![0];
+                    self.put_node(*n, &mut inner)?;
+                    put_bytes(out, &inner);
+                }
+                (NodeForm::Mixed, Value::Member(m)) if self.program.is_keyed(m.role) => {
+                    let mut inner = vec![1];
+                    put_varint(&mut inner, u64::from(m.role.raw()));
+                    inner.extend_from_slice(m.key.as_bytes());
+                    put_bytes(out, &inner);
+                }
+                _ => return Err(mismatch()),
             },
             (TypeDef::Tuple(ts), Value::Tuple(vs)) => {
                 let mut inner = Vec::new();
@@ -477,30 +551,37 @@ impl<'p> Codec<'p> {
                     _ => return Err(WireError::Malformed("a blob handle is 40 bytes".into())),
                 }
             }
-            TypeDef::Node(_) => match &self.nodes {
-                NodeEncoding::Dense => Value::Node(NodeId(
-                    u32::try_from(get_varint(input)?).map_err(|_| WireError::Malformed("node id".into()))?,
-                )),
-                NodeEncoding::ByName(names) => {
-                    let name = utf8(get_bytes(input, "a node name")?)?;
-                    let index = |name: &str| -> Result<NodeId, WireError> {
-                        let i = names
-                            .iter()
-                            .position(|n| &**n == name)
-                            .ok_or_else(|| WireError::Malformed(format!("no node named `{name}` in the directory")))?;
-                        Ok(NodeId(u32::try_from(i).map_err(|_| WireError::Limit("node id"))?))
-                    };
-                    match name.strip_prefix('#').and_then(|rest| rest.split_once('@')) {
-                        Some((serial, server)) => {
-                            let serial: u32 = serial
-                                .parse()
-                                .map_err(|_| WireError::Malformed(format!("`{name}` is not a client member")))?;
-                            Value::Node(
-                                NodeId::client(index(server)?, serial)
-                                    .ok_or_else(|| WireError::Malformed(format!("`{name}` is out of range")))?,
-                            )
+            TypeDef::Node(r) => match self.node_form(*r) {
+                NodeForm::Plain => Value::Node(self.get_node(input)?),
+                NodeForm::Member(role) => Value::Member(MemberRef {
+                    role,
+                    key: Arc::from(utf8(get_bytes(input, "a member's key")?)?),
+                }),
+                NodeForm::Mixed => {
+                    let mut inner = get_bytes(input, "a node")?;
+                    let (&tag, rest) = inner.split_first().ok_or(WireError::Truncated("a node's tag"))?;
+                    inner = rest;
+                    match tag {
+                        0 => {
+                            let n = self.get_node(&mut inner)?;
+                            if !inner.is_empty() {
+                                return Err(WireError::Malformed("bytes after a node".into()));
+                            }
+                            Value::Node(n)
                         }
-                        None => Value::Node(index(name)?),
+                        1 => {
+                            let raw = u32::try_from(get_varint(&mut inner)?)
+                                .map_err(|_| WireError::Malformed("a role id".into()))?;
+                            let role = RoleId::from_raw(raw);
+                            if !self.program.is_keyed(role) {
+                                return Err(WireError::Malformed(format!("role {raw} is not keyed")));
+                            }
+                            Value::Member(MemberRef {
+                                role,
+                                key: Arc::from(utf8(inner)?),
+                            })
+                        }
+                        t => return Err(WireError::Malformed(format!("a node tagged {t}"))),
                     }
                 }
             },

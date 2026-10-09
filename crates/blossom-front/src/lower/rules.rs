@@ -1712,6 +1712,12 @@ impl<'h> Lowerer<'h> {
             .collect::<Result<_, _>>()?;
         let ktys: Vec<TypeId> = agg.by.iter().map(super::expr::ty_of).collect::<Result<_, _>>()?;
         let nk = ktys.len();
+        // A ranked tuple's head tuple, after its keys.
+        let groups_of = |a: &[Term]| -> Result<Vec<Term>, InternalError> {
+            a.get(nk..)
+                .map(<[Term]>::to_vec)
+                .ok_or_else(|| internal_error!("a ranked tuple without its keys"))
+        };
         // A ranked tuple: the keys, then the head tuple.
         let ttys: Vec<TypeId> = ktys.iter().chain(&gtys).copied().collect();
         let tcols = |pre: &str| -> Vec<ir::Column> {
@@ -1820,7 +1826,7 @@ impl<'h> Lowerer<'h> {
         let mut lt_args = a.clone();
         lt_args.extend(b2.clone());
         d.lits.push(Literal::Pos(ir_atom(lt, lt_args, v.span)));
-        let mut head: Vec<HeadArg> = a[nk..].iter().cloned().map(HeadArg::Term).collect();
+        let mut head: Vec<HeadArg> = groups_of(&a)?.into_iter().map(HeadArg::Term).collect();
         head.insert(
             index_at.min(head.len()),
             HeadArg::Agg(AggCall {
@@ -1846,7 +1852,7 @@ impl<'h> Lowerer<'h> {
         let mut d = Draft::new(union);
         let a: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
         let mut lt_args: Vec<Term> = (0..nk).map(|_| Term::Wild).collect();
-        lt_args.extend(a[nk..].iter().cloned());
+        lt_args.extend(groups_of(&a)?);
         lt_args.extend(ttys.iter().map(|_| Term::Wild));
         d.lits.push(Literal::Pos(ir_atom(lt, lt_args, v.span)));
         let l = self.label(format!("{base}$ak"));
@@ -1857,7 +1863,7 @@ impl<'h> Lowerer<'h> {
             v.span,
             Head {
                 rel: ak,
-                args: a[nk..].iter().cloned().map(HeadArg::Term).collect(),
+                args: groups_of(&a)?.into_iter().map(HeadArg::Term).collect(),
                 mode: HeadMode::Insert,
             },
             role,
@@ -1866,9 +1872,9 @@ impl<'h> Lowerer<'h> {
         let mut d = Draft::new(union);
         let a: Vec<Term> = ttys.iter().map(|t| Term::Var(d.fresh(*t))).collect();
         let mut h_args: Vec<Term> = (0..nk).map(|_| Term::Wild).collect();
-        h_args.extend(a[nk..].iter().cloned());
+        h_args.extend(groups_of(&a)?);
         d.lits.push(Literal::Pos(ir_atom(h, h_args, v.span)));
-        d.lits.push(Literal::Neg(ir_atom(ak, a[nk..].to_vec(), v.span)));
+        d.lits.push(Literal::Neg(ir_atom(ak, groups_of(&a)?, v.span)));
         let zero = self
             .b
             .intern_const(Value::Int(blossom_value::value::IntValue::U64(0)))
@@ -1881,7 +1887,7 @@ impl<'h> Lowerer<'h> {
             v.span,
             Head {
                 rel,
-                args: head_args(a[nk..].to_vec(), Term::Const(zero)),
+                args: head_args(groups_of(&a)?, Term::Const(zero)),
                 mode: HeadMode::Insert,
             },
             role,

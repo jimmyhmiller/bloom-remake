@@ -430,7 +430,16 @@ fn oracle_backend(files: &[PathBuf], m: &toml::Table, engine: bool) -> Outcome {
     // The synchronous harness follows CR-20 (a crashed node is frozen); Molly's view is LDFI's.
     let run = if engine {
         let reference = sim.run_with_view(Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
-        let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed, externs.clone());
+        let cfg = match super::corpus_interp::engine_config(
+            artifact.protocol.get(),
+            &artifact.roles,
+            &artifact.nodes,
+            artifact.seed,
+            externs.clone(),
+        ) {
+            Ok(c) => c,
+            Err(e) => return Outcome::Fail(format!("the deployment's members: {e}")),
+        };
         let ev = blossom_node::EngineEvaluator::new(artifact.protocol.clone(), cfg);
         let mine = sim.run_on(&ev, Tick(last), &schedule, false, blossom_sim::CrashView::Frozen);
         if let Err(d) = super::corpus_interp::compare(&reference, &mine) {
@@ -604,7 +613,10 @@ fn ldfi_backend(files: &[PathBuf], m: &toml::Table, workers: usize, max_runs: u6
             )
         }
         blossom_ldfi::Method::Enumerated { schedules, .. } => {
-            format!("{got} by enumeration ({schedules} schedules) after {} runs", report.runs)
+            format!(
+                "{got} by enumeration ({schedules} schedules) after {} runs",
+                report.runs
+            )
         }
     };
     // A published run count is part of the expectation (the BENCH-136 cases pin Molly's counts, which need the P1
@@ -686,7 +698,13 @@ fn ldfi_engine_differential(
         schedules.push(f);
     }
     let externs = super::corpus_interp::std_externs()?;
-    let cfg = super::corpus_interp::engine_config(&artifact.roles, &artifact.nodes, artifact.seed, externs);
+    let cfg = super::corpus_interp::engine_config(
+        artifact.protocol.get(),
+        &artifact.roles,
+        &artifact.nodes,
+        artifact.seed,
+        externs,
+    )?;
     let view = sim.crash_view();
     for (i, f) in schedules.iter().enumerate() {
         // A fresh engine per schedule: each run starts from the program's initial state.

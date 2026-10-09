@@ -5,7 +5,7 @@
 //! order as the values do for the types a program compares: `bool`, the integers (big-endian, the sign bit flipped for
 //! signed ones), `f64` (IEEE 754 totalOrder), strings and bytes (escaped: `00` is written `00 FF`, and `00 01` ends
 //! them), `Duration` and `Instant`, nodes (a deployment's by name, which is their order; a client member by its
-//! server's name and serial), and tuples, structs, enums, `Vec` and `Option` of those. A value holding anything else
+//! server's name and serial; a keyed member by its role's id and its key), and tuples, structs, enums, `Vec` and `Option` of those. A value holding anything else
 //! (sets, maps, lattice and group values, blobs, extern values, …) is encoded whole in the caller's canonical codec,
 //! escaped: equal values give equal bytes, distinct ones distinct bytes, in no meaningful order.
 
@@ -56,7 +56,8 @@ pub fn ordered(v: &Value) -> bool {
         | Value::Principal(_)
         | Value::Duration(_)
         | Value::Instant(_)
-        | Value::Node(_) => true,
+        | Value::Node(_)
+        | Value::Member(_) => true,
         Value::Tuple(xs) | Value::Struct(xs) | Value::Vec(xs) => xs.iter().all(ordered),
         Value::Enum { fields, .. } => fields.iter().all(ordered),
         Value::Option(o) => o.as_deref().is_none_or(ordered),
@@ -185,6 +186,13 @@ where
                 }
             }
         }
+        // After every node id, by role id, then key (the schema hash pins the keyed roles' ids).
+        Value::Member(m) => {
+            out.push(NODE);
+            out.push(2);
+            out.extend_from_slice(&m.role.raw().to_be_bytes());
+            put_escaped(out, m.key.as_bytes());
+        }
         Value::Tuple(xs) | Value::Struct(xs) => {
             out.push(if matches!(v, Value::Tuple(_)) { TUPLE } else { STRUCT });
             for x in xs.iter() {
@@ -261,7 +269,25 @@ mod tests {
                 .collect(),
             [-5i64, 0, 7].iter().map(|x| Value::Instant(Instant(*x))).collect(),
             [-5i64, 0, 7].iter().map(|x| Value::Duration(Duration(*x))).collect(),
-            vec![Value::Node(NodeId(0)), Value::Node(NodeId(1)), Value::Node(NodeId(2))],
+            {
+                // Keyed members after the nodes, by role, then key.
+                let m = |r: u32, k: &str| {
+                    Value::Member(blossom_value::time::MemberRef {
+                        role: blossom_base::RoleId::from_raw(r),
+                        key: k.into(),
+                    })
+                };
+                vec![
+                    Value::Node(NodeId(0)),
+                    Value::Node(NodeId(1)),
+                    Value::Node(NodeId(2)),
+                    m(0, ""),
+                    m(0, "\0"),
+                    m(0, "a"),
+                    m(1, ""),
+                    m(300, "a"),
+                ]
+            },
             vec![
                 Value::Option(None),
                 Value::Option(Some(Arc::new(Value::str("")))),

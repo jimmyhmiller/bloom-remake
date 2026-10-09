@@ -12,20 +12,25 @@ pub(super) fn std_externs() -> Result<std::sync::Arc<blossom_value::ExternRegist
         .map_err(|e| format!("the standard host functions: {e}"))
 }
 
-/// The engine's configuration for a deployment: its roles, node names, root seed and host functions.
+/// The engine's configuration for a deployment of `program`: its roles, node names (and so its keyed members), root
+/// seed and host functions.
 pub(super) fn engine_config(
+    program: &blossom_ir::core::Program,
     roles: &[Option<blossom_base::RoleId>],
     names: &[blossom_base::Symbol],
     seed: blossom_value::Seed,
     externs: std::sync::Arc<blossom_value::ExternRegistry>,
-) -> blossom_engine::EngineConfig {
-    blossom_engine::EngineConfig {
+) -> Result<blossom_engine::EngineConfig, String> {
+    let texts: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let members = blossom_ir::members::of_deployment(program, &texts, roles)?;
+    Ok(blossom_engine::EngineConfig {
         roles: roles.to_vec(),
+        members: std::sync::Arc::new(members),
         node_names: names.iter().map(|n| std::sync::Arc::from(n.as_str())).collect(),
         seed: Some(seed),
         externs,
         ..blossom_engine::EngineConfig::default()
-    }
+    })
 }
 
 /// Whether the oracle's run `reference` and the engine's run `mine` agree; the first difference otherwise.

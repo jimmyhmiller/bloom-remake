@@ -92,6 +92,8 @@ pub struct Oracle {
     params: BTreeMap<blossom_base::ParamId, Value>,
     /// The host functions the program's `extern fn`s call, bound when the oracle was built.
     externs: Arc<blossom_value::ExternRegistry>,
+    /// The keyed members the host gave node ids (docs/design/KEYED.md §3).
+    members: Arc<blossom_ir::members::Members>,
 }
 
 impl Oracle {
@@ -148,6 +150,7 @@ impl Oracle {
             roles: Vec::new(),
             params: BTreeMap::new(),
             externs,
+            members: Arc::default(),
         })
     }
 
@@ -211,9 +214,23 @@ impl Oracle {
         self
     }
 
-    /// Node `n`'s role: the deployment's, or the client role for a client id.
+    /// Runs keyed members (docs/design/KEYED.md §3): `members` names the ones the host gave node ids, so `self` and
+    /// senders are their values and sends to them go to those ids.
+    pub fn with_members(mut self, members: Arc<blossom_ir::members::Members>) -> Oracle {
+        self.members = members;
+        self
+    }
+
+    /// The keyed members the host gave node ids.
+    pub fn members(&self) -> &blossom_ir::members::Members {
+        &self.members
+    }
+
+    /// Node `n`'s role: a keyed member's, the deployment's, or the client role for a client id.
     pub(crate) fn role_of(&self, n: NodeId) -> Option<RoleId> {
-        if n.is_client() {
+        if let Some(m) = self.members.get(n) {
+            Some(m.role)
+        } else if n.is_client() {
             self.client_role
         } else {
             self.roles.get(n.0 as usize).copied().flatten()
@@ -282,6 +299,15 @@ impl Oracle {
 
     /// Node `n`'s seed σn.
     pub(crate) fn node_seed(&self, n: NodeId) -> Result<blossom_value::Seed, OracleError> {
+        // A keyed member's seed derives from its member name (`Game:"game-17"`), wherever it runs.
+        if let Some(m) = self.members.get(n)
+            && let Some(root) = self.root
+        {
+            let name = blossom_ir::members::member_name(self.program.get(), m);
+            return blossom_value::Seeds::derive(root, &name)
+                .map(|s| s.node)
+                .map_err(|e| blossom_base::internal_error!("deriving the seed of member {name}: {e}").into());
+        }
         // A client member's seed derives from its name, as a deployment node's does.
         if n.is_client()
             && let Some(root) = self.root

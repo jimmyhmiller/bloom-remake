@@ -1,0 +1,62 @@
+//! A lobby and its games (docs/design/KEYED.md), for `bls_keyed.rs`. `Game` is a keyed role: a game is a member named
+//! by its key (`Game.named("game-1")`), created by the first message to it. The lobby starts a game for each pair of
+//! players and forwards their moves; a game knows its own key (`self.key()`), keeps its players and moves, and tells
+//! the lobby when a player has made three moves, naming itself (`self`), and the lobby thanks the game it heard from.
+program games version 1;
+
+role Lobby;
+role Game: keyed;
+
+channel start(x: String, o: String): Lobby -> Game;
+channel move(who: String, cell: u64): Lobby -> Game;
+channel won(game: Node<Game>, key: String, winner: String): Game -> Lobby;
+channel thanks(): Lobby -> Game;
+
+at Lobby {
+    input pair(n: u64, x: String, o: String);
+    input play(n: u64, who: String, cell: u64);
+    durable table results(g: Node<Game>, key: String, winner: String);
+    /// Who the lobby heard from, as plain nodes: a keyed member among them.
+    durable table heard(n: Node);
+    /// The games in key order: members order by their keys.
+    view first(g = min!(g)) = results(g, _, _);
+
+    begin: on pair(n, x, o) {
+        send start(x, o) to Game.named(f"game-{n}");
+    }
+    forward: on play(n, who, cell) {
+        send move(who, cell) to Game.named(f"game-{n}");
+    }
+    record: on won(g, k, w) {
+        emit results(g, k, w);
+    }
+    /// A reply goes to the sender, a keyed member like any node.
+    ack: on won(_, _, _) from g {
+        send thanks() to g;
+        emit heard(g);
+    }
+}
+
+at Game {
+    durable table players(x: String, o: String) key();
+    durable table moves(who: String, cell: u64);
+    durable table done(winner: String) key();
+    table thanked(k: String);
+    view made(who, n = count!(c)) = moves(who, c);
+
+    setup: on start(x, o) {
+        upsert players(x, o);
+    }
+    take: on move(who, cell), players(x, o) where who == x || who == o {
+        emit moves(who, cell);
+    }
+    finish: while made(who, n), not done(_) where n >= 3u64 {
+        upsert done(who);
+    }
+    report: while made(who, n), not done(_), l in Lobby where n >= 3u64 {
+        send won(self, self.key(), who) to l;
+    }
+    thank: on thanks() {
+        next thanked(self.key());
+    }
+}

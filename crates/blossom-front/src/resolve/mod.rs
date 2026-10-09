@@ -894,11 +894,12 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 Some("cluster") => RoleKind::Cluster,
                 Some("external") => RoleKind::External,
                 Some("client") => RoleKind::Client,
+                Some("keyed") => RoleKind::Keyed,
                 Some(other) => {
                     self.error(
                         code!("BLS0200"),
                         kind.map_or(name.span, |k| k.span),
-                        format!("unknown role kind `{other}`: expected process, cluster, external or client"),
+                        format!("unknown role kind `{other}`: expected process, cluster, external, client or keyed"),
                     );
                     RoleKind::Process
                 }
@@ -970,7 +971,10 @@ impl<'t, 'd> Resolver<'t, 'd> {
 
     /// The roles an `at` section's items are placed at (unknown ones reported where `declare` reports them).
     fn section_roles(&self, s: ScopeIdx, roles: &[Ident]) -> Vec<HRoleId> {
-        roles.iter().filter_map(|r| self.scope(s).roles.get(&r.name).copied()).collect()
+        roles
+            .iter()
+            .filter_map(|r| self.scope(s).roles.get(&r.name).copied())
+            .collect()
     }
 
     /// What a section of several roles may not hold yet: each item would need a name per role.
@@ -980,10 +984,16 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 ItemKind::Import(_) => "an `import` (import it in each role's own section)",
                 ItemKind::Invariant(_) => "an invariant (write it in each role's own section)",
                 ItemKind::Interpose(_) => "an interposition",
-                ItemKind::Rel(d) if matches!(d.resolve, Some((ast::RelPolicy::Prefer(_), _))) => "a table with `resolve prefer`",
+                ItemKind::Rel(d) if matches!(d.resolve, Some((ast::RelPolicy::Prefer(_), _))) => {
+                    "a table with `resolve prefer`"
+                }
                 _ => continue,
             };
-            self.unsupported("LANG-009", &format!("{what} in an `at` section of several roles"), item.span);
+            self.unsupported(
+                "LANG-009",
+                &format!("{what} in an `at` section of several roles"),
+                item.span,
+            );
         }
     }
 
@@ -1034,8 +1044,16 @@ impl<'t, 'd> Resolver<'t, 'd> {
                     if placed.len() != roles.len() {
                         continue;
                     }
-                    if let Some(dup) = roles.iter().enumerate().find(|(i, r)| roles[..*i].iter().any(|x| x.name == r.name)) {
-                        self.error(code!("BLS0201"), dup.1.span, format!("`{}` is named twice", dup.1.as_str()));
+                    if let Some(dup) = roles
+                        .iter()
+                        .enumerate()
+                        .find(|(i, r)| roles.iter().take(*i).any(|x| x.name == r.name))
+                    {
+                        self.error(
+                            code!("BLS0201"),
+                            dup.1.span,
+                            format!("`{}` is named twice", dup.1.as_str()),
+                        );
                         continue;
                     }
                     if placed.len() > 1 {
@@ -2629,17 +2647,15 @@ impl<'t, 'd> Resolver<'t, 'd> {
     /// of a relation declared in a section of several roles.
     pub fn lookup_rel(&mut self, s: ScopeIdx, path: &[Ident]) -> Option<HRelId> {
         match path {
-            [name] => self
-                .rel_in(s, name.name)
-                .or_else(|| match name.as_str() {
-                    "boot" => Some(self.builtin(BuiltinRel::Boot, name.span)),
-                    "recovered" => Some(self.builtin(BuiltinRel::Recovered, name.span)),
-                    "localtick" => Some(self.builtin(BuiltinRel::LocalTick, name.span)),
-                    "halt" => Some(self.builtin(BuiltinRel::Halt, name.span)),
-                    "node_dir" => Some(self.builtin(BuiltinRel::NodeDir, name.span)),
-                    "crashed" if self.spec.is_some() => Some(self.crashed_oracle(name.span)),
-                    _ => None,
-                }),
+            [name] => self.rel_in(s, name.name).or_else(|| match name.as_str() {
+                "boot" => Some(self.builtin(BuiltinRel::Boot, name.span)),
+                "recovered" => Some(self.builtin(BuiltinRel::Recovered, name.span)),
+                "localtick" => Some(self.builtin(BuiltinRel::LocalTick, name.span)),
+                "halt" => Some(self.builtin(BuiltinRel::Halt, name.span)),
+                "node_dir" => Some(self.builtin(BuiltinRel::NodeDir, name.span)),
+                "crashed" if self.spec.is_some() => Some(self.crashed_oracle(name.span)),
+                _ => None,
+            }),
             [inst, name] => {
                 if let Some(found) = self
                     .scope(s)

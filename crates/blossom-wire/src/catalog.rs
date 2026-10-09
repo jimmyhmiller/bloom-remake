@@ -123,8 +123,21 @@ fn type_desc(p: &Program, ty: TypeId, out: &mut String, depth: u32) {
                 let _ = write!(out, "{other:?}");
             }
         },
-        // Scalars: `Node<R>` and `Node` encode alike.
-        Some(TypeDef::Node(_)) => out.push_str("Node"),
+        // `Node<R>` and `Node` encode alike, unless a keyed role's member may be among them (docs/design/KEYED.md):
+        // it is written with its role's id, so the keyed roles' ids are part of the schema.
+        Some(TypeDef::Node(r)) => match r {
+            Some(r) if p.is_keyed(*r) => {
+                let name = p.roles.get(*r).map(|d| d.name.to_string()).unwrap_or_default();
+                let _ = write!(out, "Node<keyed {name}#{}>", r.raw());
+            }
+            Some(_) => out.push_str("Node"),
+            None => {
+                out.push_str("Node");
+                for d in p.keyed_roles() {
+                    let _ = write!(out, "|keyed {}#{}", d.name, d.id.raw());
+                }
+            }
+        },
         Some(other) => {
             let _ = write!(out, "{other:?}");
         }

@@ -9,7 +9,7 @@
 //! - tuples and structs field by field; enums by variant number, then payload (an unknown variant after a known
 //!   one with the same number, then by wire number and bytes); `None < Some(x)`;
 //! - `Vec` lexicographically; `Set` and `Map` as their sorted sequences;
-//! - `Node` by node id; `Duration` and `Instant` numerically; `Mod` by width, then numerically;
+//! - `Node` by node id, then keyed members by role and key; `Duration` and `Instant` numerically; `Mod` by width, then numerically;
 //! - `Blob` by content address; lattice and group values by their canonical form (for deduplication and ties
 //!   only: this is not the lattice order);
 //! - values of different types (a type error upstream) by a fixed rank of their kind.
@@ -42,7 +42,8 @@ impl Value {
             Value::Blob(_) => 9,
             Value::Session(_) => 10,
             Value::Principal(_) => 11,
-            Value::Node(_) => 12,
+            // A keyed member orders after every node id (see `cmp`).
+            Value::Node(_) | Value::Member(_) => 12,
             Value::Tuple(_) => 13,
             Value::Struct(_) => 14,
             // Known and unknown variants of one enum type interleave by variant number.
@@ -92,6 +93,9 @@ impl Ord for Value {
             (V::Conn(a), V::Conn(b)) => a.cmp(b),
             (V::Principal(a), V::Principal(b)) => cmp_shared(a, b),
             (V::Node(a), V::Node(b)) => a.cmp(b),
+            (V::Member(a), V::Member(b)) => a.cmp(b),
+            (V::Node(_), V::Member(_)) => Ordering::Less,
+            (V::Member(_), V::Node(_)) => Ordering::Greater,
             (V::Tuple(a), V::Tuple(b)) | (V::Struct(a), V::Struct(b)) | (V::Vec(a), V::Vec(b)) => cmp_shared(a, b),
             (
                 V::Enum {
@@ -167,6 +171,7 @@ impl Hash for Value {
             Value::Session(s) => s.hash(state),
             Value::Conn(c) => c.hash(state),
             Value::Node(n) => n.hash(state),
+            Value::Member(m) => m.hash(state),
             Value::Tuple(items) | Value::Struct(items) | Value::Vec(items) => items.hash(state),
             Value::Enum { variant, fields } => {
                 variant.hash(state);
@@ -376,7 +381,21 @@ mod tests {
             Value::bytes(&[0, 0]),
             Value::bytes(&[1]),
         ]);
-        assert_strictly_increasing(&[Value::Node(NodeId(0)), Value::Node(NodeId(3))]);
+        // Keyed members after every node id (a client member's too), by role, then key.
+        let member = |r: u32, k: &str| {
+            Value::Member(crate::time::MemberRef {
+                role: blossom_base::RoleId::from_raw(r),
+                key: k.into(),
+            })
+        };
+        assert_strictly_increasing(&[
+            Value::Node(NodeId(0)),
+            Value::Node(NodeId(3)),
+            Value::Node(NodeId(u32::MAX)),
+            member(0, "b"),
+            member(0, "game-1"),
+            member(1, "a"),
+        ]);
         assert_strictly_increasing(&[Value::Duration(Duration(-1)), Value::Duration(Duration(2))]);
         assert_strictly_increasing(&[Value::Instant(Instant(-1)), Value::Instant(Instant(2))]);
         assert_strictly_increasing(&[

@@ -9,17 +9,17 @@
 //! | `u8`…`u64`, `Mod<N≤64>` | zero-extended |
 //! | `i8`…`i64`, `Duration`, `Instant` | sign-extended, then the lane's top bit flipped |
 //! | `f64` | IEEE totalOrder key: `if sign { !bits } else { bits ^ 1<<63 }` |
-//! | `Node` | the dense `NodeId` |
 //! | `Option<T>`, T with a niche (bool, ≤ 32-bit ints, tags) | `0` = None, `enc(v)+1` = Some |
 //!
-//! Every other column is `Interned`, `Bulk` or a lattice slot ([`ColEncTag`]). The encode and decode functions are
+//! Every other column is `Interned`, `Bulk` or a lattice slot ([`ColEncTag`]); `Node` is interned, since a keyed
+//! member is a role and a key (docs/design/KEYED.md). The encode and decode functions are
 //! implemented by WP M2.1.
 
 use blossom_base::TypeId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ValueError;
-use crate::time::{Duration, Instant, NodeId};
+use crate::time::{Duration, Instant};
 use crate::types::{IntTy, TypeDef, TypeTable};
 use crate::value::{IntValue, ModValue, Value};
 
@@ -97,8 +97,6 @@ pub enum ScalarKind {
         /// The width.
         bits: u16,
     },
-    /// `Node`.
-    Node,
     /// A C-like enum (no variant has a payload): the variant number.
     EnumTag,
     /// `Option<T>` for a `T` with a niche.
@@ -123,7 +121,7 @@ impl ScalarKind {
     /// Whether every value of this kind encodes in 32 bits, so the kind allows [`Lane::U32`].
     pub const fn fits_u32(self) -> bool {
         match self {
-            ScalarKind::Unit | ScalarKind::Bool | ScalarKind::Node | ScalarKind::EnumTag => true,
+            ScalarKind::Unit | ScalarKind::Bool | ScalarKind::EnumTag => true,
             ScalarKind::Int(t) => t.bits() <= 32,
             ScalarKind::Mod { bits } => bits <= 32,
             ScalarKind::F64 | ScalarKind::Duration | ScalarKind::Instant => false,
@@ -146,7 +144,6 @@ pub fn scalar_kind(types: &TypeTable, ty: TypeId) -> Result<Option<ScalarKind>, 
         TypeDef::Duration => Some(ScalarKind::Duration),
         TypeDef::Instant => Some(ScalarKind::Instant),
         TypeDef::Mod { bits } if *bits <= 64 => Some(ScalarKind::Mod { bits: *bits }),
-        TypeDef::Node(_) => Some(ScalarKind::Node),
         TypeDef::Enum(e) if e.variants.iter().all(|v| v.payload.is_empty()) => Some(ScalarKind::EnumTag),
         TypeDef::Option(t) => match scalar_kind(types, *t)? {
             Some(ScalarKind::Bool) => Some(ScalarKind::Option(NicheScalar::Bool)),
@@ -211,7 +208,6 @@ fn encode_inner(kind: ScalarKind, lane: Lane, value: &Value) -> Result<u64, Valu
         (ScalarKind::Duration, Value::Duration(Duration(n))) => signed_word(*n, lane),
         (ScalarKind::Instant, Value::Instant(Instant(n))) => signed_word(*n, lane),
         (ScalarKind::Mod { bits }, Value::Mod(m)) if m.bits() == bits && bits <= 64 => m.limbs()[3],
-        (ScalarKind::Node, Value::Node(NodeId(n))) => u64::from(*n),
         (ScalarKind::EnumTag, Value::Enum { variant, fields }) if fields.is_empty() => u64::from(*variant),
         (ScalarKind::Option(_), Value::Option(None)) => 0,
         (ScalarKind::Option(t), Value::Option(Some(v))) => {
@@ -275,11 +271,6 @@ pub fn decode_scalar(kind: ScalarKind, lane: Lane, word: Word) -> Result<Value, 
         ScalarKind::Duration => Value::Duration(Duration(signed_value(word.0, lane))),
         ScalarKind::Instant => Value::Instant(Instant(signed_value(word.0, lane))),
         ScalarKind::Mod { bits } if bits <= 64 => Value::Mod(ModValue::from_u64(bits, word.0)?),
-        ScalarKind::Node => Value::Node(NodeId(
-            word.0
-                .try_into()
-                .map_err(|_| ValueError::InvalidValue("node id too wide".into()))?,
-        )),
         ScalarKind::EnumTag => Value::Enum {
             variant: word
                 .0
@@ -408,7 +399,6 @@ mod m2_tests {
                 .into_iter()
                 .map(|n| Value::Mod(ModValue::from_u64(bits, n).unwrap()))
                 .collect(),
-            ScalarKind::Node => vec![Value::Node(NodeId(0)), Value::Node(NodeId(u32::MAX))],
             ScalarKind::EnumTag => vec![Value::variant(0, []), Value::variant(1, [])],
             ScalarKind::Option(_) => vec![Value::Option(None)],
         }
@@ -430,7 +420,6 @@ mod m2_tests {
             ScalarKind::Duration,
             ScalarKind::Instant,
             ScalarKind::Mod { bits: 32 },
-            ScalarKind::Node,
             ScalarKind::EnumTag,
         ];
         for kind in kinds {

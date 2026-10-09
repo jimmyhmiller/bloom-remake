@@ -57,6 +57,9 @@ pub struct EngineConfig {
     /// This node's role when it is a client member (CLIENTS.md §2): its id is outside the deployment, so `roles` and
     /// `node_names` do not name it.
     pub client_role: Option<RoleId>,
+    /// The keyed members the host gave node ids (docs/design/KEYED.md §3): `self` and senders are their values, and
+    /// sends to them go to those ids.
+    pub members: Arc<blossom_ir::members::Members>,
     /// How many rows the engine's tiered stores keep of their recent probes, together (docs/design/DATABASE.md §7,
     /// the hot tier; `None`: [`crate::store::HOT_ROWS`]).
     pub hot_rows: Option<usize>,
@@ -382,7 +385,7 @@ impl Engine {
         blossom_ir::tick::bind_externs(p, &cfg.externs)?;
         check_supported(p)?;
         let kinds = kinds(p);
-        let mut client_seed = None;
+        let mut own_seed = None;
         let (choice, node_seeds) = match cfg.seed {
             Some(root) => {
                 let choice = blossom_value::Seeds::derive(root, "")
@@ -396,10 +399,18 @@ impl Engine {
                             .node,
                     );
                 }
-                // A client member's seed derives from its name, as a deployment node's does.
-                if node.is_client() {
+                // A keyed member's seed derives from its member name (`Game:"game-17"`), wherever it runs.
+                if let Some(m) = cfg.members.get(node) {
+                    let name = blossom_ir::members::member_name(p, m);
+                    own_seed = Some(
+                        blossom_value::Seeds::derive(root, &name)
+                            .map_err(|e| internal_error!("deriving the seed of member {name}: {e}"))?
+                            .node,
+                    );
+                } else if node.is_client() {
+                    // A client member's seed derives from its name, as a deployment node's does.
                     let name = blossom_ir::printer::node_text(node, &cfg.node_names);
-                    client_seed = Some(
+                    own_seed = Some(
                         blossom_value::Seeds::derive(root, &name)
                             .map_err(|e| internal_error!("deriving the seed of client {name}: {e}"))?
                             .node,
@@ -409,7 +420,9 @@ impl Engine {
             }
             None => (None, Vec::new()),
         };
-        let my_role = if node.is_client() {
+        let my_role = if let Some(m) = cfg.members.get(node) {
+            Some(m.role)
+        } else if node.is_client() {
             cfg.client_role
         } else {
             cfg.roles.get(node.0 as usize).copied().flatten()
@@ -542,8 +555,9 @@ impl Engine {
                 params: cfg.params,
                 choice,
                 node_seeds,
-                client_seed,
+                own_seed,
                 roles: cfg.roles,
+                members: cfg.members,
                 kinds,
                 externs: cfg.externs,
                 node_names: cfg.node_names,
@@ -1279,7 +1293,7 @@ impl Engine {
                 .or_default()
                 .insert(d.row.clone());
             let mut with_sender = d.row.to_vec();
-            with_sender.push(Value::Node(d.from));
+            with_sender.push(self.shared.members.value(d.from));
             now_inputs
                 .entry(StoreKey::Sent(d.rel))
                 .or_default()
@@ -1410,6 +1424,16 @@ impl Engine {
                         out.outbox.insert(Send {
                             rel,
                             to: *to,
+                            row: row.clone(),
+                        });
+                    }
+                    Some(Value::Member(m)) => {
+                        let to = self.shared.members.id(m).ok_or_else(|| {
+                            EvalError::NoMember(blossom_ir::members::member_name(self.program.get(), m))
+                        })?;
+                        out.outbox.insert(Send {
+                            rel,
+                            to,
                             row: row.clone(),
                         });
                     }

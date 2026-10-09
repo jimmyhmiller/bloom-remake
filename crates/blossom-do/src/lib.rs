@@ -108,8 +108,7 @@ impl Object {
             })
             .collect();
         let params: BTreeMap<String, ParamBinding> = spec.params.iter().map(|(k, v)| (k.clone(), param(v))).collect();
-        let (compiled, sources) =
-            blossom_driver::bls::compile_with_loader(&root, &nodes, &params, &mut Files(files));
+        let (compiled, sources) = blossom_driver::bls::compile_with_loader(&root, &nodes, &params, &mut Files(files));
         let (artifact, _warnings) = compiled.map_err(|e| rendered(e, &sources))?;
         let kv = Arc::new(JournalKv::load(decode_entries(entries)?));
         let fs = KvFs::open(kv.clone() as Arc<dyn KvStore>).map_err(|e| e.to_string())?;
@@ -248,7 +247,8 @@ fn take_len(b: &mut &[u8]) -> Result<usize, String> {
 pub fn decode_entries(mut b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut out = Vec::new();
     while !b.is_empty() {
-        let op = take(&mut b, 1)?[0];
+        let (&op, rest) = b.split_first().ok_or("storage entries end in the middle of one")?;
+        b = rest;
         if op != 0 {
             return Err(format!("a stored entry with operation {op}, not a value"));
         }
@@ -271,7 +271,10 @@ mod tests {
         kv.put("b", b"").unwrap();
         kv.delete("b").unwrap();
         let out = encode_writes(kv.take_writes().unwrap()).unwrap();
-        assert_eq!(out, [0, 1, 0, 0, 0, b'a', 3, 0, 0, 0, b'x', b'y', b'z', 1, 1, 0, 0, 0, b'b']);
+        assert_eq!(
+            out,
+            [0, 1, 0, 0, 0, b'a', 3, 0, 0, 0, b'x', b'y', b'z', 1, 1, 0, 0, 0, b'b']
+        );
         // What the storage then holds loads back.
         let stored = [0, 1, 0, 0, 0, b'a', 3, 0, 0, 0, b'x', b'y', b'z'];
         assert_eq!(decode_entries(&stored).unwrap(), [("a".to_string(), b"xyz".to_vec())]);

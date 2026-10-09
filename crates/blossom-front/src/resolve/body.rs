@@ -906,20 +906,22 @@ impl<'t> Resolver<'t, '_> {
         ok
     }
 
-    /// Whether `role`'s members are known when the program is compiled; a client role's are not (BLS0404).
+    /// Whether `role`'s members are known when the program is compiled; a client role's and a keyed role's are not
+    /// (BLS0404).
     fn static_members(&mut self, role: HRoleId, span: Span, what: &str) -> bool {
-        if self.role_of(role).kind != RoleKind::Client {
-            return true;
-        }
         let name = self.role_of(role).name.clone();
-        self.error(
-            code!("BLS0404"),
-            span,
-            format!(
-                "{what}: `{name}` is a client role, whose members join at run time; a program learns of them from \
-                 their messages and from `{name}.connected`"
+        let why = match self.role_of(role).kind {
+            RoleKind::Client => format!(
+                "`{name}` is a client role, whose members join at run time; a program learns of them from their \
+                 messages and from `{name}.connected`"
             ),
-        );
+            RoleKind::Keyed => format!(
+                "`{name}` is a keyed role, whose members are created on demand; a program names one by its key, \
+                 `{name}.named(k)`"
+            ),
+            _ => return true,
+        };
+        self.error(code!("BLS0404"), span, format!("{what}: {why}"));
         false
     }
 
@@ -2879,6 +2881,57 @@ impl<'t> Resolver<'t, '_> {
         args: &[Arg],
         span: Span,
     ) -> Option<HExpr> {
+        // `R.named(k)`: a keyed role's member, by key (docs/design/KEYED.md).
+        if let ExprKind::Path(p, t) = &receiver.kind
+            && t.is_empty()
+            && let [r] = p.as_slice()
+            && let Some(role) = self.role_named(cx.ms, r.name)
+            && name.as_str() == "named"
+        {
+            if self.role_of(role).kind != RoleKind::Keyed {
+                let rname = self.role_of(role).name.clone();
+                self.error(
+                    code!("BLS0404"),
+                    span,
+                    format!("`{rname}.named(k)`: `{rname}` is not a keyed role (`role {rname}: keyed;`)"),
+                );
+                return None;
+            }
+            let [Arg::Pos(k)] = args else {
+                self.error(code!("BLS0302"), span, "`R.named(k)` takes one key, a String");
+                return None;
+            };
+            let k = self.expr(cx, k)?;
+            return Some(HExpr {
+                ty: None,
+                kind: HExprKind::Builtin {
+                    f: Builtin::Named(role),
+                    args: vec![k],
+                },
+                span,
+            });
+        }
+        // `self.key()`: a keyed member's own key.
+        if matches!(receiver.kind, ExprKind::SelfNode) && name.as_str() == "key" && args.is_empty() {
+            let keyed = cx.placement.is_some_and(|r| self.role_of(r).kind == RoleKind::Keyed);
+            if !keyed {
+                self.error(
+                    code!("BLS0404"),
+                    span,
+                    "`self.key()` is a keyed member's key: it is read only in a rule placed at a keyed role",
+                );
+                return None;
+            }
+            let me = self.expr(cx, receiver)?;
+            return Some(HExpr {
+                ty: None,
+                kind: HExprKind::Builtin {
+                    f: Builtin::MemberKey,
+                    args: vec![me],
+                },
+                span,
+            });
+        }
         // `R.size()`.
         if let ExprKind::Path(p, t) = &receiver.kind
             && t.is_empty()
@@ -3640,7 +3693,10 @@ impl<'t> Resolver<'t, '_> {
                     self.error(
                         code!("BLS0301"),
                         c.span,
-                        format!("`by` orders the values of `collect!` and `index!`, not `{}!`", name.as_str()),
+                        format!(
+                            "`by` orders the values of `collect!` and `index!`, not `{}!`",
+                            name.as_str()
+                        ),
                     );
                     return None;
                 }

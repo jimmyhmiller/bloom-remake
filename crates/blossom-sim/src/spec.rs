@@ -60,9 +60,13 @@ impl<'a> SpecSim<'a> {
         externs: std::sync::Arc<blossom_value::ExternRegistry>,
     ) -> Result<SpecSim<'a>, SimError> {
         let limits = blossom_oracle::Limits::default();
+        let names: Vec<&str> = artifact.nodes.iter().map(|n| n.as_str()).collect();
+        let members = blossom_ir::members::of_deployment(artifact.protocol.get(), &names, &artifact.roles)
+            .map_err(|e| SimError::Load(blossom_base::internal_error!("the deployment's members: {e}").into()))?;
         let protocol = Oracle::with_externs(artifact.protocol.clone(), limits, externs.clone())
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
+            .with_members(std::sync::Arc::new(members))
             .with_seed(artifact.seed)
             .and_then(|o| {
                 o.with_node_names(
@@ -258,7 +262,7 @@ impl<'a> SpecSim<'a> {
                 SpecFeed::Crashed { spec: rel } => {
                     for node in crashes.keys() {
                         if faults.crashed(*node, eot) {
-                            events.push((rel, Arc::from(vec![Value::Node(*node)])));
+                            events.push((rel, Arc::from(vec![self.protocol.members().value(*node)])));
                         }
                     }
                 }
@@ -270,8 +274,8 @@ impl<'a> SpecSim<'a> {
                             events.push((
                                 rel,
                                 Arc::from(vec![
-                                    Value::Node(observer),
-                                    Value::Node(*node),
+                                    self.protocol.members().value(observer),
+                                    self.protocol.members().value(*node),
                                     Value::Int(IntValue::I64(time)),
                                 ]),
                             ));
@@ -374,7 +378,7 @@ impl<'a> SpecSim<'a> {
             let node = node_id(n)?;
             for row in instance.rows(protocol) {
                 let mut full = Vec::with_capacity(row.len() + 1);
-                full.push(Value::Node(node));
+                full.push(self.protocol.members().value(node));
                 full.extend(row.iter().map(trace_value));
                 out.push((rel, Arc::from(full)));
             }

@@ -1926,6 +1926,93 @@ fn clients_talk_through_servers_and_links_cross_a_client_boundary() {
     );
 }
 
+// ---------------------------------------------------------------- keyed roles (docs/design/KEYED.md)
+
+const KEYED: &str = "program t version 1;\nrole Lobby;\nrole Game: keyed;\n\
+                     channel start(x: String): Lobby -> Game;\n\
+                     channel won(g: Node<Game>, k: String): Game -> Lobby;\n";
+
+fn with_keyed(body: &str) -> &'static str {
+    Box::leak(format!("{KEYED}{body}").into_boxed_str())
+}
+
+/// The diagnostics compiling a keyed-role program reports, deployed on the lobby alone (a keyed member is created on
+/// demand, no node of the deployment).
+fn keyed_codes(src: &'static str) -> Vec<(String, String)> {
+    let mut sources = SourceDb::new();
+    let nodes = [NodeSpec {
+        name: "lobby".to_owned(),
+        role: Some("Lobby".to_owned()),
+    }];
+    match compile("test.bls", &nodes, &mut One(src), &mut sources) {
+        Ok((_, warnings)) => warnings
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.clone()))
+            .collect(),
+        Err(BlsError::Rejected(d)) => d
+            .iter()
+            .map(|d| (d.code.as_str().to_owned(), d.message.clone()))
+            .collect(),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+#[test]
+fn a_keyed_role_names_its_members_by_key() {
+    let src = with_keyed(
+        "at Lobby {\n\
+           input go(n: u64);\n\
+           table seen(g: Node<Game>, k: String);\n\
+           s: on go(n) { send start(\"x\") to Game.named(f\"game-{n}\"); }\n\
+           w: on won(g, k) from h where g == h { emit seen(g, k); }\n\
+         }\n\
+         at Game {\n\
+           table me(k: String);\n\
+           b: on start(x), l in Lobby { send won(self, self.key()) to l; emit me(self.key()); }\n\
+         }\n",
+    );
+    assert_eq!(keyed_codes(src), Vec::<(String, String)>::new());
+}
+
+#[test]
+fn a_keyed_roles_members_are_not_known_statically_bls0404() {
+    let member = with_keyed("at Lobby { output n(g: Node<Game>);\nv: on won(_, _), g in Game { emit n(g); } }\n");
+    let d = keyed_codes(member);
+    assert!(
+        !d.is_empty() && d.iter().all(|(c, m)| c == "BLS0404" && m.contains("keyed role")),
+        "{d:?}"
+    );
+    let size = with_keyed("at Lobby { output n(k: u64);\nv: on won(_, _) { emit n(Game.size()); } }\n");
+    let d = keyed_codes(size);
+    assert!(!d.is_empty() && d.iter().all(|(c, _)| c == "BLS0404"), "{d:?}");
+}
+
+#[test]
+fn named_and_key_belong_to_keyed_roles_bls0404() {
+    // `R.named(k)` of a role that is not keyed.
+    let named = with_keyed("at Game { v: on start(x) { send won(Lobby.named(x), x) to Lobby.named(x); } }\n");
+    let d = keyed_codes(named);
+    assert!(
+        !d.is_empty() && d.iter().all(|(c, m)| c == "BLS0404" && m.contains("not a keyed role")),
+        "{d:?}"
+    );
+    // `self.key()` outside a keyed role.
+    let key = with_keyed("at Lobby { output o(k: String);\nv: on won(_, _) { emit o(self.key()); } }\n");
+    let d = keyed_codes(key);
+    assert!(
+        !d.is_empty() && d.iter().all(|(c, m)| c == "BLS0404" && m.contains("self.key()")),
+        "{d:?}"
+    );
+    // The key is a String.
+    let typed = with_keyed("at Lobby { input go(n: u64);\nv: on go(n) { send start(\"x\") to Game.named(n); } }\n");
+    assert!(!keyed_codes(typed).is_empty());
+    let kind = keyed_codes(with_head("role R: tab;\n"));
+    assert!(
+        kind.iter().any(|(c, m)| c == "BLS0200" && m.contains("keyed")),
+        "{kind:?}"
+    );
+}
+
 #[test]
 fn an_index_key_reads_only_the_views_columns_bls0511() {
     let src = with_head(
@@ -1969,7 +2056,10 @@ fn a_page_over_an_aggregate_without_default_is_bls1011() {
     };
     // A page (an output) over a count with no default: no row, and no page, while `items` is empty.
     assert_eq!(
-        codes(page("view total(k = count!(i)) = items(i);", "draw: while total(k) { emit shown(k); }")),
+        codes(page(
+            "view total(k = count!(i)) = items(i);",
+            "draw: while total(k) { emit shown(k); }"
+        )),
         ["BLS1011"]
     );
     assert_eq!(
@@ -1981,7 +2071,10 @@ fn a_page_over_an_aggregate_without_default_is_bls1011() {
     );
     // Waiting for a first row before acting on state is the usual idiom: not warned.
     assert_eq!(
-        codes(page("view top(k = max!(i)) = items(i);", "keep: while top(k) { upsert latest(k); }")),
+        codes(page(
+            "view top(k = max!(i)) = items(i);",
+            "keep: while top(k) { upsert latest(k); }"
+        )),
         Vec::<String>::new()
     );
 }

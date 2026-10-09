@@ -53,6 +53,18 @@ impl Program {
             translations: Vec::new(),
         }
     }
+
+    /// Whether `role` is keyed (docs/design/KEYED.md): its `Node<R>` values are keyed members.
+    pub fn is_keyed(&self, role: RoleId) -> bool {
+        self.roles
+            .get(role)
+            .is_some_and(|r| r.kind == crate::core::RoleKind::Keyed)
+    }
+
+    /// The keyed roles, in id order: an untyped `Node` of a program that has any may hold a keyed member.
+    pub fn keyed_roles(&self) -> impl Iterator<Item = &crate::core::RoleDecl> {
+        self.roles.iter().filter(|r| r.kind == crate::core::RoleKind::Keyed)
+    }
 }
 impl IrBuilder {
     /// Starts a program for a particular frontend.

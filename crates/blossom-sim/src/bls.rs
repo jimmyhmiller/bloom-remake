@@ -49,9 +49,13 @@ impl<'a> BlsSim<'a> {
         seed: blossom_value::Seed,
         externs: std::sync::Arc<blossom_value::ExternRegistry>,
     ) -> Result<BlsSim<'a>, SimError> {
+        let members = artifact
+            .members()
+            .map_err(|e| SimError::Load(blossom_base::internal_error!("the deployment's members: {e}").into()))?;
         let oracle = Oracle::with_externs(artifact.program.clone(), blossom_oracle::Limits::default(), externs)
             .map_err(SimError::Load)?
             .with_roles(artifact.roles.clone())
+            .with_members(std::sync::Arc::new(members))
             .with_seed(seed)
             .and_then(|o| {
                 o.with_node_names(

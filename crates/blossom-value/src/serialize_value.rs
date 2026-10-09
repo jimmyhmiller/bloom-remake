@@ -1,7 +1,7 @@
 //! Guarded serialization of recursive values; the wire shape matches the derived enum shape.
 use crate::bounded::DepthGuard;
 use crate::serde_util;
-use crate::time::{Duration, Instant, NodeId};
+use crate::time::{Duration, Instant, MemberRef, NodeId};
 use crate::types::ExternCodecId;
 use crate::value::{BlobRef, ConnId, GroupValue, IntValue, LatValue, ModValue, SessionId, Value};
 use serde::{Serialize, Serializer};
@@ -44,6 +44,7 @@ enum ValueRef<'a> {
         bytes: &'a Arc<[u8]>,
     },
     Conn(&'a ConnId),
+    Member(&'a MemberRef),
 }
 mod set_ref {
     use super::*;
@@ -93,6 +94,7 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Group(v) => Self::Group(v),
             Value::Extern { codec, bytes } => Self::Extern { codec, bytes },
             Value::Conn(v) => Self::Conn(v),
+            Value::Member(v) => Self::Member(v),
         }
     }
 }

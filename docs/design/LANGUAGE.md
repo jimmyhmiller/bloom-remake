@@ -416,7 +416,7 @@ ModuleItem      = [ 'monotone' ] ( "module" | "choreography" ) IDENT [ Generics 
 ModParams       = "(" [ ModParam { "," ModParam } [ "," ] ] ")" ;
 ModParam        = IDENT ":" ( 'rel' ParamList | Type [ "=" Expr ] ) ;
 ProtocolItem    = "protocol" IDENT [ Generics ] [ ":" Type { "+" Type } ] "{" { Item } "}" ;
-RoleItem        = 'role' IDENT [ ":" ( 'process' | 'cluster' | 'external' | 'client' ) ] ";" ;
+RoleItem        = 'role' IDENT [ ":" ( 'process' | 'cluster' | 'external' | 'client' | 'keyed' ) ] ";" ;
 AtSection       = 'at' IDENT { "," IDENT } "{" { Item } "}" ;
 InterposeItem   = "interpose" RelPath "as" "(" IDENT "," IDENT ")" "{" { Item } "}" ;
 BlockItem       = 'block' IDENT "{" { Item } "}" ;
@@ -1033,6 +1033,13 @@ at Coordinator { … }            // sections reopen, so the protocol reads in m
   `Node<R>` on both sides. Its member set is not known when the program is compiled, so `p in R`, `R.size()` and
   `majority(s, R)` over a client role are BLS0404; a program learns of members from their messages and from the
   link events (§7.15). Client roles talk only through other roles: a channel between two client roles is BLS0404.
+- **Keyed roles** (`role Game: keyed;`, docs/design/KEYED.md) hold rules too; a member is named by a key, a `String`,
+  and exists from the first message to it. `R.named(k)` is the member of `R` named `k`, a `Node<R>` every node computes
+  alike (BLS0404 when `R` is not keyed); `self.key()` at `R` is the member's own key (BLS0404 in a rule not placed at a
+  keyed role). A member's value is its role and key (`Game:"game-1"`), so it orders after every node, by role, then
+  key. As for client roles, `p in R`, `R.size()` and `majority(s, R)` over a keyed role are BLS0404. In simulation a
+  node of a keyed role is the member its name keys (`--nodes game-1=Game`); outside simulation a program with a keyed
+  role is refused until `blossom run` hosts members (KEYED.md §4).
 - **ACLs** are inferred: a channel accepts frames only from the roles that `send` into it (LANG-242 P0, ODD-33).
   A channel whose source role is `external` is open to that role's sessions; declaring the direction is the
   explicit opening ANA-105 asks for.
