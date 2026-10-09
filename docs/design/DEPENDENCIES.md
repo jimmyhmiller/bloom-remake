@@ -4,7 +4,8 @@ Every external crate the workspace uses, with its reason and license (ARCHITECTU
 
 **Policy.**
 - The license allowlist is ARCHITECTURE §1.2's: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib and
-  Unicode-3.0; MPL-2.0 only for `imbl` and `webpki-roots`. `deny.toml` enforces it with `cargo deny check`, which
+  Unicode-3.0; MPL-2.0 only for `imbl` and `webpki-roots`, and CDLA-Permissive-2.0 (webpki-roots 1.0's license) only for
+  `webpki-roots`. `deny.toml` enforces it with `cargo deny check`, which
   `scripts/ci.sh gate` runs when cargo-deny is installed (`scripts/install-dev-tools.sh`).
 - **The project is MIT-licensed** (`LICENSE`, PLAN §4 D19): every workspace package declares `license = "MIT"`
   (`license.workspace = true`), which the allowlist admits, and stays `publish = false`.
@@ -79,3 +80,10 @@ Appended at each milestone gate from the `## New dependencies` sections of `docs
 | serde, postcard, thiserror | workspace | MIT OR Apache-2.0 | blossom-artifact | the encoded client artifact (docs/design/CLIENTS.md §8) | S22 |
 | postcard | workspace | MIT OR Apache-2.0 | blossom-runtime | encoded queries (docs/design/DATABASE.md §5) | S23 |
 | serde_json | workspace | MIT OR Apache-2.0 | blossom-cli | a query's JSON answer | S23 |
+| rusqlite (bundled) | 0.40.2 | MIT | blossom-statestore-sqlite | the SQLite state store (docs/design/STATELESS.md §4.1); `bundled` builds SQLite (public domain) | stateless |
+| postgres | 0.19.14 | MIT OR Apache-2.0 | blossom-statestore-postgres | the Postgres state store (STATELESS.md §4.2); brings tokio and tokio-postgres into that crate only | stateless |
+| postgres_rustls | 0.1.5 | MIT OR Apache-2.0 | blossom-statestore-postgres | TLS for Postgres connections (0.1.6 needs rustc 1.97) | stateless |
+| rustls (ring) | 0.23.45 | Apache-2.0 OR ISC OR MIT | blossom-statestore-postgres | the TLS client of postgres_rustls | stateless |
+| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 | blossom-statestore-postgres, -s3 (via ureq) | the web's root certificates when no `sslrootcert` is given | stateless |
+| ureq (rustls) | 3.4.2 | MIT OR Apache-2.0 | blossom-statestore-s3 | the S3 store's HTTP client (STATELESS.md §4.3) | stateless |
+| hmac, sha2 | 0.12.1, 0.10.9 | MIT OR Apache-2.0 | blossom-statestore-s3 | AWS Signature Version 4, manifest and blob checksums | stateless |
