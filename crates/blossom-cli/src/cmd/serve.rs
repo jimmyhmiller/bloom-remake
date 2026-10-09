@@ -36,6 +36,10 @@ pub struct Args {
     /// `POST /blossom/wake` instead (a platform that freezes idle instances).
     #[arg(long, default_value = "250", value_name = "MS|off")]
     pub sweep: String,
+    /// How many objects (rooms, nodes) this host keeps in memory between requests; more are loaded again when
+    /// asked for.
+    #[arg(long, default_value_t = blossom_runtime::stateless::objects::DEFAULT_CACHE)]
+    pub cache: usize,
     /// Allow the plaintext development transport (`security.mode = "insecure-dev"`).
     #[arg(long)]
     pub insecure_dev: bool,
@@ -126,7 +130,7 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         Ok(d) => Arc::new(d),
         Err(e) => return fail(e.to_string(), exit_of(&e)),
     };
-    let objects = Arc::new(Objects::new(deploy, store));
+    let objects = Arc::new(Objects::new(deploy, store).with_cache(args.cache));
     let serving = match blossom_runtime::stateless::serve(
         objects,
         ServeConfig {
