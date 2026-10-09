@@ -116,6 +116,7 @@ fn member_hello(spec: &DeploymentSpec, a: &BlsArtifact, token: Option<Vec<u8>>, 
         token,
         received,
         acked,
+        keyed: None,
     };
     blossom_wire::link::hello(&identity(spec, a), peer, 0, 0, &catalog)
 }
@@ -315,6 +316,7 @@ fn a_page_built_from_another_program_is_refused() {
         token: None,
         received: 0,
         acked: 0,
+        keyed: None,
     };
     let hello = blossom_wire::link::hello(&identity(&spec, &a), peer, 0, 0, &catalog);
     let mut ws = Ws::connect(port).unwrap();

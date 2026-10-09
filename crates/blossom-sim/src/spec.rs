@@ -163,7 +163,11 @@ impl<'a> SpecSim<'a> {
                 boot,
                 recovered,
                 streams: self.streams.clone(),
-                links: crate::sync::Links::of(self.artifact.protocol.get(), &self.artifact.roles),
+                links: crate::sync::Links::of(
+                    self.artifact.protocol.get(),
+                    &self.artifact.roles,
+                    self.protocol.members(),
+                ),
             },
             faults,
         )

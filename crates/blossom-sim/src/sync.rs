@@ -177,13 +177,21 @@ pub struct Links {
 pub struct LinkPair {
     pub node: NodeId,
     pub peer: NodeId,
+    /// The peer as the node's link events name it: a node, or a keyed member (docs/design/KEYED.md).
+    pub peer_value: Value,
     pub connected: Option<RelId>,
     pub disconnected: Option<RelId>,
 }
 
 impl Links {
-    /// The links of `program` deployed with `roles` (node `n`'s role is `roles[n]`).
-    pub fn of(program: &blossom_ir::core::Program, roles: &[Option<blossom_base::RoleId>]) -> Links {
+    /// The links of `program` deployed with `roles` (node `n`'s role is `roles[n]`; `members` names its keyed
+    /// members). A client member is linked to every node of a process or cluster role and every keyed member, as a
+    /// page may be.
+    pub fn of(
+        program: &blossom_ir::core::Program,
+        roles: &[Option<blossom_base::RoleId>],
+        members: &blossom_ir::members::Members,
+    ) -> Links {
         use blossom_ir::core::{EventSource, RelClass, RoleKind};
         let kind = |r: Option<blossom_base::RoleId>| r.and_then(|r| program.roles.get(r)).map(|d| &d.kind);
         let rel = |peer: blossom_base::RoleId, up: bool| {
@@ -198,8 +206,13 @@ impl Links {
             for (j, b) in roles.iter().enumerate() {
                 let linked = matches!(
                     (kind(*a), kind(*b)),
-                    (Some(RoleKind::Client), Some(RoleKind::Process | RoleKind::Cluster))
-                        | (Some(RoleKind::Process | RoleKind::Cluster), Some(RoleKind::Client))
+                    (
+                        Some(RoleKind::Client),
+                        Some(RoleKind::Process | RoleKind::Cluster | RoleKind::Keyed)
+                    ) | (
+                        Some(RoleKind::Process | RoleKind::Cluster | RoleKind::Keyed),
+                        Some(RoleKind::Client)
+                    )
                 );
                 let (Some(peer_role), true) = (*b, linked) else {
                     continue;
@@ -208,9 +221,11 @@ impl Links {
                 if connected.is_none() && disconnected.is_none() {
                     continue;
                 }
+                let peer = NodeId(u32::try_from(j).unwrap_or(u32::MAX));
                 pairs.push(LinkPair {
                     node: NodeId(u32::try_from(i).unwrap_or(u32::MAX)),
-                    peer: NodeId(u32::try_from(j).unwrap_or(u32::MAX)),
+                    peer,
+                    peer_value: members.value(peer),
                     connected,
                     disconnected,
                 });
@@ -508,10 +523,10 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         ((tick == config.first || restarting) && peer_up) || faults.restarts_at(pair.peer, tick);
                     let goes_down = faults.crashes.get(&pair.peer) == Some(&tick);
                     if comes_up && let Some(r) = pair.connected {
-                        link_events.push((r, Row::from(vec![Value::Node(pair.peer), Value::Bool(false)])));
+                        link_events.push((r, Row::from(vec![pair.peer_value.clone(), Value::Bool(false)])));
                     }
                     if goes_down && let Some(r) = pair.disconnected {
-                        link_events.push((r, Row::from(vec![Value::Node(pair.peer)])));
+                        link_events.push((r, Row::from(vec![pair.peer_value.clone()])));
                     }
                 }
                 let with_more: Vec<(RelId, Row)>;

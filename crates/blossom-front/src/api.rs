@@ -91,7 +91,7 @@ pub fn compile_checking(
 }
 
 /// The deployment a program is checked on: one node `n1` when it has no roles, else one node per role but an
-/// external one (`server1` for `Server`).
+/// external or client one (`server1` for `Server`).
 pub(crate) fn checking_nodes(hir: &crate::hir::Hir) -> Vec<NodeSpec> {
     if hir.roles.is_empty() {
         return vec![NodeSpec {
@@ -101,13 +101,11 @@ pub(crate) fn checking_nodes(hir: &crate::hir::Hir) -> Vec<NodeSpec> {
     }
     hir.roles
         .iter()
-        // An external, client or keyed role holds no node of the deployment.
+        // An external or client role holds no node of the deployment; a keyed role's node is a host (or, in
+        // simulation, a member).
         .filter(|r| {
             r.name.segments().len() == 1
-                && !matches!(
-                    r.kind,
-                    crate::hir::RoleKind::External | crate::hir::RoleKind::Client | crate::hir::RoleKind::Keyed
-                )
+                && !matches!(r.kind, crate::hir::RoleKind::External | crate::hir::RoleKind::Client)
         })
         .map(|r| NodeSpec {
             name: format!("{}1", r.name.to_string().to_lowercase()),

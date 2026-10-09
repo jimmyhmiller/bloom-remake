@@ -725,12 +725,23 @@ async function runMember(appText) {
     return;
   }
   const role = roles[0];
+  // A host of a keyed role serves its members' pages: the URL names the member the page links to
+  // (docs/design/KEYED.md), and the page keeps its link and tables per member.
+  const key = search.get("member");
+  if (desc.keyed && key === null) {
+    report(`this node hosts members of ${desc.keyed}: open the page as ?member=KEY`);
+    return;
+  }
+  if (key !== null) {
+    desc.member = key;
+    appText = JSON.stringify(desc);
+  }
   const res = await fetch(new URL(desc.clients[role], location.href));
   if (!res.ok) {
     report(`cannot load ${role}'s part of the program: ${res.status}`);
     return;
   }
-  const base = `blossom-member:${desc.deployment}:${desc.node}:${role}`;
+  const base = `blossom-member:${desc.deployment}:${desc.node}:${role}${key === null ? "" : `:member:${key}`}`;
   storageKey = `${base}:${await claimSlot(base)}`;
   rowPrefix = `${storageKey}:row:`;
   tablesKey = `${storageKey}:tables`;

@@ -1,0 +1,31 @@
+# A deployment of rooms.bls whose pages are served by the host of its rooms (docs/design/KEYED.md). From the
+# repository root: `scripts/run-app.sh rooms`, then open http://localhost:8080/?member=lunch in two tabs (any name
+# makes a room; each room is a member of the keyed role `Room`, with a store of its own under the host's). By hand,
+# after scripts/build-web.sh:
+#
+#   BLOSSOM_SEED=$(openssl rand -hex 16) blossom run --deploy examples/web/rooms.deploy.toml --node s --insecure-dev \
+#       --init-fresh --web 127.0.0.1:8080
+#
+# Later runs drop --init-fresh to keep the store (and keep the same seed).
+format = 1
+
+[deployment]
+id = "rooms-demo"
+program = "rooms"
+version = 1
+source = "rooms.bls"
+
+[[node]]
+name = "s"
+role = "Room"
+addr = "127.0.0.1:7475"
+principal = "spiffe://demo/rooms/Room/s"
+
+[security]
+mode = "insecure-dev"
+
+[storage]
+data_dir = ".data/rooms"
+
+[web]
+style = "rooms.css"

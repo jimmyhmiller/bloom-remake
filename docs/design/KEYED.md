@@ -7,9 +7,9 @@ is the design; nothing here is built yet.
 Name: the role kind is `keyed` (`role Game: keyed;`), not `object`, so it does not collide with the runtime's
 `object` module (a node a Durable Object hosts). A keyed role's members are **keyed members**.
 
-**Status (2026-10-09):** sub-slices 1 and 2 are built (§4): the value, the language, both evaluators, the codecs, the
-simulator, and `blossom run`'s hosts. Pages connect to members in sub-slice 3; a Durable Object refuses a send to a
-member until sub-slice 4.
+**Status (2026-10-09):** sub-slices 1 to 3 are built (§4): the value, the language, both evaluators, the codecs, the
+simulator, `blossom run`'s hosts, and pages linked to members (examples/web/rooms.bls). A Durable Object refuses a
+send to a member until sub-slice 4.
 
 ## 1. What a program says
 
@@ -111,8 +111,15 @@ Its cost is breadth, not depth: each layer gains one case.
   messages leave (Invariant R per member); a message to a host that is down may be lost, as any message may.
   Not yet: pages at a host (sub-slice 3), streams, external sessions, queries and traces at a host, and traces of a
   node of a program with keyed roles (a trace would name members by one incarnation's ids).
-- **Pages**: a host's web listener serves `/?member=K`; the page's `HELLO` names the member; the member's client
-  registry admits it.
+- **Pages** (built): a host's web listener (`blossom run --web`) serves the program's pages; its `app.json` names
+  the keyed role it hosts (`"keyed"`), and a page names the member it links to by its URL (`/?member=K`), in its
+  `HELLO` (peer kind 3: the role's name and the key) and in where it keeps its link and tables (per member). The host
+  admits the page with one client registry for all its members (a page's id is the host's, `#serial@host`, so pages
+  of different members never share one), and hands the link to the member, which raises `Browser.connected` and
+  answers the page; the page sees its server as the member (`Room.connected(r, _)`, `r` a `Value::Member`), and
+  its sends to `r` go over the link. A page naming a member another host runs is refused, naming that host; a node
+  that runs no keyed members refuses a page naming one. In simulation a page is linked to every keyed member, as to
+  every server node. Not yet: sending a page to the right host (a front that routes by member, or a redirect).
 - **Durable Objects**: each member is an object (`idFromName("R/" + k)`), and a send to a member is an RPC to that
   object; the prototype's single object becomes the hosts' role.
 
@@ -128,7 +135,9 @@ Its cost is breadth, not depth: each layer gains one case.
    two hosts, replies by sender, member-to-member on one host and across hosts, a host stopped mid-game and restarted
    from its store, and a member's timer running again after the restart).
 3. **Pages to members**: the `member` parameter, the `HELLO` field, link events. Gate: tic-tac-toe with a member per
-   game, in Playwright.
+   game, in Playwright. **Done** (examples/web/rooms.bls; tests/web/apps.spec.mjs `rooms`: two rooms on a host,
+   played, then the host killed and restarted, both rooms back from their own stores; web_apps.rs plays a room on
+   both evaluators).
 4. **Durable Objects**: a member per object, RPC between objects. Gate: the same tic-tac-toe on a local workerd.
 
 ## 5. Out of scope

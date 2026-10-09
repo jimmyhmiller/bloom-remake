@@ -64,6 +64,8 @@ pub struct Link {
     server: NodeId,
     id: Identity,
     catalog: Catalog,
+    /// The keyed member the link goes to, when its server hosts one (its role's name and its key).
+    keyed: Option<(String, String)>,
     member: Option<Member>,
     received: u64,
     acked: u64,
@@ -110,6 +112,7 @@ impl Link {
         part: [u8; 16],
         server: NodeId,
         id: Identity,
+        keyed: Option<(String, String)>,
         state: Option<&LinkState>,
     ) -> Result<Link, HostError> {
         let catalog = Catalog::of(artifact.program.get()).map_err(link_error)?;
@@ -120,6 +123,7 @@ impl Link {
             server,
             id,
             catalog,
+            keyed,
             member: None,
             received: 0,
             acked: 0,
@@ -180,6 +184,7 @@ impl Link {
             token: self.member.as_ref().map(|m| m.token.clone()),
             received: self.received,
             acked: self.acked,
+            keyed: self.keyed.clone(),
         };
         hello(&self.id, peer, 0, 0, &self.catalog).encode()
     }

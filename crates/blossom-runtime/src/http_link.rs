@@ -357,6 +357,7 @@ fn open(body: &[u8], w: &mut TcpStream, ctx: &WebCtx, keep: bool) -> Result<(), 
         token: admitted.token,
         received: admitted.received,
         acked: admitted.acked,
+        keyed: admitted.keyed,
         conn,
         link: Box::new(crate::members::ThreadConn {
             writer: tx,

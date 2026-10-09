@@ -1,0 +1,42 @@
+//! Chat rooms that are keyed members (docs/design/KEYED.md), for `bls_keyed.rs`: a browser tab links to one room, and
+//! sees it as `Room.connected(r, _)` with `r` the room's member value; the room sees the tab as `Browser.connected`.
+program rooms version 1;
+
+role Room: keyed;
+role Browser: client;
+
+channel say(text: String): Browser -> Room;
+channel heard(room: String, who: Node<Browser>, text: String): Room -> Browser;
+
+at Room {
+    table online(b: Node<Browser>);
+
+    join: on Browser.connected(b, _) {
+        emit online(b);
+    }
+    leave: on Browser.disconnected(b), not Browser.connected(b, _) {
+        delete online(b);
+    }
+    fan: on say(t) from b, online(o) {
+        send heard(self.key(), b, t) to o;
+    }
+}
+
+at Browser {
+    input line(text: String);
+    table up(r: Node<Room>);
+    table seen(room: String, who: Node<Browser>, text: String);
+
+    link: on Room.connected(r, _) {
+        emit up(r);
+    }
+    lost: on Room.disconnected(r) {
+        delete up(r);
+    }
+    talk: on line(t), up(r) {
+        send say(t) to r;
+    }
+    hear: on heard(k, w, t) {
+        emit seen(k, w, t);
+    }
+}

@@ -166,6 +166,9 @@ pub struct ObjectNode {
     next_conn: u64,
     /// The host's member table (a member's role, for admission).
     members_table: Arc<Members>,
+    /// The keyed member this object runs, if it runs one, and this node as rows addressed to it name it.
+    member: Option<MemberRef>,
+    me_value: blossom_value::Value,
     pub stats: ObjectStats,
 }
 
@@ -285,6 +288,8 @@ impl ObjectNode {
             app,
             random: cfg.random,
             next_conn: 0,
+            me_value: members.value(me),
+            member: cfg.member.clone(),
             members_table: members,
             stats: ObjectStats::default(),
             artifact,
@@ -342,6 +347,13 @@ impl ObjectNode {
                 }
             }
         }
+        self.run(now)
+    }
+
+    /// An event of a page's link that the host's web listener admitted for the keyed member this object runs
+    /// (crate::hosting), then the ticks it makes ready.
+    pub(crate) fn link_event(&mut self, event: MemberEvent, now: Instant) -> Result<(), RuntimeError> {
+        self.handle(event)?;
         self.run(now)
     }
 
@@ -425,10 +437,24 @@ impl ObjectNode {
     }
 
     fn hello(&mut self, conn: u64, h: blossom_wire::frame::Hello) -> Result<(), RuntimeError> {
+        if self.member.is_some() {
+            // A host admits its members' pages (crate::hosting); an object that is a member of its own needs ids for
+            // them that name it.
+            return Err(blossom_base::unimplemented_error!(
+                "LANG-153",
+                "a page's link straight to an object that runs a keyed member (KEYED.md §4, sub-slice 4)"
+            )
+            .into());
+        }
         let (registry, me, random) = (&mut self.registry, self.me, &mut self.random);
-        let admitted = admit_with(&self.id, &self.catalog, &self.client_roles, h, &mut |role, token| {
-            identify_in(registry, me, role, token, random)
-        });
+        let admitted = admit_with(
+            &self.id,
+            &self.catalog,
+            &self.client_roles,
+            &crate::members::no_keyed,
+            h,
+            &mut |role, token| identify_in(registry, me, role, token, random),
+        );
         let a: Admitted = match admitted {
             Ok(a) => a,
             Err(AdmitError::Refused(reason, detail)) => {
@@ -467,6 +493,7 @@ impl ObjectNode {
             token: a.token,
             received: a.received,
             acked: a.acked,
+            keyed: None,
             conn,
             link: Box::new(link),
         })
@@ -485,6 +512,7 @@ impl ObjectNode {
     fn handle(&mut self, event: MemberEvent) -> Result<(), RuntimeError> {
         let mut host = ObjectHost {
             driver: &mut self.driver,
+            me_value: &self.me_value,
             acl: &self.acl,
             oracle: &self.oracle,
             stats: &self.stats,
@@ -550,6 +578,7 @@ impl ObjectNode {
             let (batches, _oversized) = crate::net::batches(&codec, p, sid, rel, t.tick.0, &rows)?;
             let mut host = ObjectHost {
                 driver: &mut self.driver,
+                me_value: &self.me_value,
                 acl: &self.acl,
                 oracle: &self.oracle,
                 stats: &self.stats,
@@ -563,6 +592,7 @@ impl ObjectNode {
         }
         let mut host = ObjectHost {
             driver: &mut self.driver,
+            me_value: &self.me_value,
             acl: &self.acl,
             oracle: &self.oracle,
             stats: &self.stats,
@@ -578,6 +608,7 @@ impl ObjectNode {
 /// The node and counters, as the member links see them.
 struct ObjectHost<'a> {
     driver: &'a mut ManualDriver<Box<dyn Executor>>,
+    me_value: &'a blossom_value::Value,
     acl: &'a AclTable,
     oracle: &'a Oracle,
     stats: &'a ObjectStats,
@@ -606,6 +637,10 @@ impl Host for ObjectHost<'_> {
 
     fn me(&self) -> NodeId {
         self.me
+    }
+
+    fn me_value(&self) -> blossom_value::Value {
+        self.me_value.clone()
     }
 
     fn dropped_unroutable(&self, n: u64) {
