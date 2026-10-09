@@ -85,11 +85,42 @@ start_minio() {
   pid=$!
   echo "$pid" >"$dir/minio.pid"
   for _ in $(seq 1 100); do
-    if curl -sf "http://127.0.0.1:$s3_port/minio/health/live" >/dev/null; then return; fi
+    if curl -sf "http://127.0.0.1:$s3_port/minio/health/live" >/dev/null; then
+      make_bucket blossom-test
+      return
+    fi
     sleep 0.1
   done
   echo "minio did not come up; see $dir/minio.log" >&2
   exit 1
+}
+
+# Creates a bucket (done when it exists): a PUT signed with AWS Signature V4, in Python's standard library.
+make_bucket() {
+  python3 -I - "$1" "127.0.0.1:$s3_port" "$s3_user" "$s3_secret" <<'PY'
+import datetime, hashlib, hmac, sys, urllib.error, urllib.request
+bucket, host, key, secret = sys.argv[1:5]
+now = datetime.datetime.now(datetime.timezone.utc)
+amz, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+empty = hashlib.sha256(b"").hexdigest()
+headers = {"host": host, "x-amz-content-sha256": empty, "x-amz-date": amz}
+signed = ";".join(sorted(headers))
+canonical = "\n".join(["PUT", "/" + bucket, "", "".join(f"{k}:{headers[k]}\n" for k in sorted(headers)), signed, empty])
+scope = f"{day}/us-east-1/s3/aws4_request"
+to_sign = "\n".join(["AWS4-HMAC-SHA256", amz, scope, hashlib.sha256(canonical.encode()).hexdigest()])
+k = ("AWS4" + secret).encode()
+for part in (day, "us-east-1", "s3", "aws4_request"):
+    k = hmac.new(k, part.encode(), hashlib.sha256).digest()
+sig = hmac.new(k, to_sign.encode(), hashlib.sha256).hexdigest()
+auth = f"AWS4-HMAC-SHA256 Credential={key}/{scope}, SignedHeaders={signed}, Signature={sig}"
+req = urllib.request.Request(f"http://{host}/{bucket}", method="PUT", headers={**headers, "authorization": auth})
+try:
+    urllib.request.urlopen(req)
+except urllib.error.HTTPError as e:
+    body = e.read().decode()
+    if "BucketAlreadyOwnedByYou" not in body:
+        sys.exit(f"creating bucket {bucket}: {e.code} {body}")
+PY
 }
 
 stop() {

@@ -19,6 +19,7 @@ pub mod release;
 pub mod repl;
 pub mod run;
 pub mod self_check;
+pub mod serve;
 pub mod sim;
 pub mod store;
 pub mod trace;

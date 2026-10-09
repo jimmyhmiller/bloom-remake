@@ -40,6 +40,8 @@ enum Commands {
     Explain(cmd::explain::Args),
     /// Run a node.
     Run(cmd::run::Args),
+    /// Serve a deployment from a state store, keeping nothing between requests (docs/design/STATELESS.md).
+    Serve(cmd::serve::Args),
     /// Query a running node's database (Datalog).
     Query(cmd::query::Args),
     /// Create a deployment, or launch one locally.
@@ -113,6 +115,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Commands::Plan(args) => cmd::plan::run(args, &cx),
         Commands::Explain(args) => cmd::explain::run(args, &cx),
         Commands::Run(args) => cmd::run::run(args, &cx),
+        Commands::Serve(args) => cmd::serve::run(args, &cx),
         Commands::Query(args) => cmd::query::run(args, &cx),
         Commands::Deploy(args) => cmd::deploy::run(args, &cx),
         Commands::Node(args) => cmd::node::run(args, &cx),

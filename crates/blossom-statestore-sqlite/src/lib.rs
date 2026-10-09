@@ -112,7 +112,21 @@ impl SqliteStore {
         )
         .map_err(|e| StateError::Unavailable(format!("sqlite: opening {}: {e}", self.path.display())))?;
         conn.busy_timeout(BUSY).map_err(unavailable)?;
-        conn.execute_batch("pragma journal_mode = wal; pragma synchronous = full; pragma foreign_keys = off;")
+        // Switching to the WAL journal can be refused as busy without the busy handler waiting (another process
+        // creating the same file): tried again until the busy timeout.
+        let clock = Elapsed::start();
+        loop {
+            match conn.execute_batch("pragma journal_mode = wal;") {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::DatabaseBusy && clock.elapsed() < BUSY =>
+                {
+                    std::thread::sleep(POLL);
+                }
+                Err(e) => return Err(unavailable(e)),
+            }
+        }
+        conn.execute_batch("pragma synchronous = full; pragma foreign_keys = off;")
             .map_err(unavailable)?;
         Ok(conn)
     }

@@ -64,3 +64,26 @@ fn urls() {
     h.open().unwrap();
     SqliteStore::from_url(&format!("sqlite:{}", h.0.display())).unwrap();
 }
+
+#[test]
+fn many_processes_create_one_file_at_once() {
+    // Handles opened at once on a file that does not exist yet (instances starting together) all open it.
+    let h = fresh();
+    std::fs::create_dir_all(h.0.parent().unwrap()).unwrap();
+    let path = h.0.clone();
+    let opened: Vec<Result<(), String>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..12)
+            .map(|_| {
+                let path = path.clone();
+                s.spawn(move || {
+                    let store = SqliteStore::open(&path).map_err(|e| e.to_string())?;
+                    store.version("o").map(drop).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        hs.into_iter().map(|j| j.join().unwrap()).collect()
+    });
+    for r in opened {
+        r.unwrap();
+    }
+}
