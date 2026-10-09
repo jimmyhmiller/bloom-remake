@@ -77,6 +77,10 @@ blossom-smt = { path = "crates/blossom-smt" }
 blossom-std-host = { path = "crates/blossom-std-host" }
 blossom-std-src = { path = "crates/blossom-std-src" }
 blossom-store = { path = "crates/blossom-store" }
+blossom-statestore = { path = "crates/blossom-statestore" }
+blossom-statestore-sqlite = { path = "crates/blossom-statestore-sqlite" }
+blossom-statestore-postgres = { path = "crates/blossom-statestore-postgres" }
+blossom-statestore-s3 = { path = "crates/blossom-statestore-s3" }
 blossom-syntax = { path = "crates/blossom-syntax" }
 blossom-testkit = { path = "crates/blossom-testkit" }
 blossom-trace = { path = "crates/blossom-trace" }

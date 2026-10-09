@@ -1,0 +1,15 @@
+[package]
+name = "blossom-statestore-sqlite"
+description = "A state store in one SQLite file (docs/design/STATELESS.md §4.1), for stateless hosts on one machine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+blossom-statestore.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[lints]
+workspace = true

@@ -99,6 +99,11 @@ deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-schema"]
 layer = "L3"
 deps = ["blossom-base", "blossom-value", "blossom-schema", "blossom-wire"]
 
+[crates.blossom-statestore]
+layer = "L3"
+# Stateless hosting (docs/design/STATELESS.md §3): the state store trait, a memory store and the conformance suite.
+deps = []
+
 [crates.blossom-trace]
 layer = "L3"
 deps = ["blossom-base", "blossom-value", "blossom-ir"]
@@ -137,6 +142,21 @@ deps = ["blossom-base", "blossom-value", "blossom-ir", "blossom-artifact", "blos
 layer = "L4"
 deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "blossom-syntax", "blossom-ir", "blossom-schema", "blossom-artifact", "blossom-front", "blossom-analysis", "blossom-rewrite", "blossom-plan", "blossom-oracle", "blossom-driver", "blossom-kernel", "blossom-engine", "blossom-prov", "blossom-codegen", "blossom-std-host", "blossom-wire", "blossom-store", "blossom-trace", "blossom-node", "blossom-runtime", "blossom-sim", "blossom-smt", "blossom-sat", "blossom-ldfi", "blossom-verify"]
 test_only = true
+
+[crates.blossom-statestore-sqlite]
+layer = "L4"
+# A state store in one SQLite file (docs/design/STATELESS.md §4.1).
+deps = ["blossom-statestore"]
+
+[crates.blossom-statestore-postgres]
+layer = "L4"
+# A state store in Postgres (docs/design/STATELESS.md §4.2).
+deps = ["blossom-statestore"]
+
+[crates.blossom-statestore-s3]
+layer = "L4"
+# A state store in an S3 bucket (docs/design/STATELESS.md §4.3).
+deps = ["blossom-statestore"]
 
 [crates.blossom-web]
 layer = "L5"
