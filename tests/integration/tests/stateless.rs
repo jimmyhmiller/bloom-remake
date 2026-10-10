@@ -391,10 +391,42 @@ fn run(seed: u64, faults: bool) {
             t.room
         );
     }
-    // The rooms' logs hold each line once.
+    // The rooms' logs hold each line once: as the node reads them, and as SQL rows in the `log` table, whose
+    // typed `text` column holds the lines; the rooms' entries hold no LSM (their database is the tables).
+    let log = store
+        .table_defs()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.view.as_deref() == Some("log"))
+        .expect("a table whose view is `log`");
+    let text = log
+        .columns
+        .iter()
+        .position(|(c, _)| c == "text")
+        .expect("a `text` column");
     for (room, lines) in &said {
         let rows = hosts.hosts[0].rows(&format!("member/Room/{room}"), "log").unwrap();
         assert_eq!(rows.len(), lines.len(), "seed {seed}: room {room}'s log");
+        let owner = blossom_statestore::Owner {
+            node: "rooms".into(),
+            member: room.clone(),
+        };
+        let mut sql: Vec<String> = store
+            .open_rows(&log.name, &owner)
+            .unwrap()
+            .into_iter()
+            .map(|(_, v)| match &v[text] {
+                blossom_statestore::SqlValue::Text(t) => t.clone(),
+                other => panic!("a text column holding {other:?}"),
+            })
+            .collect();
+        sql.sort();
+        let mut want = lines.clone();
+        want.sort();
+        assert_eq!(sql, want, "seed {seed}: room {room}'s SQL rows");
+        let entries = store.load(&format!("member/Room/{room}")).unwrap().entries;
+        let lsm: Vec<&String> = entries.iter().map(|(k, _)| k).filter(|k| k.contains("/db/")).collect();
+        assert!(lsm.is_empty(), "seed {seed}: room {room} keeps an LSM: {lsm:?}");
     }
 }
 
