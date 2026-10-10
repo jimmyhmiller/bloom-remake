@@ -1,5 +1,18 @@
 # Durable relations as SQL tables
 
+**Status (2026-10-09):** built on branch `slice-sql`: `KeyTree` (§1), the tables and `TableStore` on Postgres,
+SQLite and memory (§2, §5), the SQL tree and stateless objects on it (§4). With the keyed chat on Postgres:
+
+```sql
+set search_path = <the store's schema>;
+select member, who, k, text from log order by at;
+--  member |       who       | k |         text
+-- --------+-----------------+---+----------------------
+--  lunch  | Browser#0@rooms | 0 | anyone up for tacos?
+--  lunch  | Browser#1@rooms | 0 | yes! 12:30?
+--  dinner | Browser#2@rooms | 0 | pasta tonight
+```
+
 The user (2026-10-09), after stateless hosting (STATELESS.md): durable relations as real Postgres and SQLite tables,
 "so state is queryable with SQL and a request reads only what it touches". Their choices:
 
@@ -42,7 +55,12 @@ create index on r_R_T (node, member, key) where to_tick is null;
 create view R as select node, member, c1, c2, … from r_R_T where to_tick is null;
 ```
 
-`T` (8 hex digits of the relation's tag) changes with the relation's schema, as its keyspace does in the LSM: a
+A client role's durable tables live in its pages, never at a node: they have no table. A typed column named like a
+system column (`node`, `member`, `key`, `from_tick`, `to_tick`) is renamed with a trailing `_` (`key_`); a name
+that is not an identifier has its other characters as `_` (`Server.votes` is `Server_votes`). Durable views
+(DATABASE.md §8) are derived: their rows stay in the internal keyspace table, with the indexes.
+
+`T` (16 hex digits of the relation's tag) changes with the relation's schema, as its keyspace does in the LSM: a
 relation whose schema changed starts as a new, empty table (DATABASE.md), and the view `R` follows the deployed
 program. The derived keyspaces, which only the database reads, share one table:
 
@@ -66,7 +84,7 @@ serves one deployment, and a second one is refused.
 | `f64` | `double precision` | `real` |
 | `String`, `Principal` | `text` | `text` |
 | `Bytes` | `bytea` | `blob` |
-| `Node<R>` | `text` (the node's name, or `ROLE/KEY` for a keyed member, `ROLE#N@HOST` for a page) | `text` |
+| `Node<R>` | `text`, as Blossom writes it: `rooms`, `Browser#3@rooms`, `Room:"lunch"` | `text` |
 | `Blob` | `text` (`HASH:LEN`) | `text` |
 | tuples, structs, enums, `Option`, collections, `Session` | `jsonb` | `text` (JSON) |
 
