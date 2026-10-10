@@ -31,3 +31,8 @@ fn a_failed_commit_applies_nothing_and_a_lost_one_applies() {
         "a lost commit's outcome is unknown to its caller, but it applied"
     );
 }
+
+mod tables {
+    use super::*;
+    blossom_statestore::statestore_conformance!(tables, || Mem(MemStore::new()));
+}

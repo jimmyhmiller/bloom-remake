@@ -10,10 +10,12 @@
 
 pub mod conformance;
 mod mem;
+pub mod tables;
 
 use std::time::Duration;
 
 pub use mem::{Fault, MemStore};
+pub use tables::{KEYS_TABLE, Owner, RowChange, SqlType, SqlValue, TableDef, TableStore};
 
 /// An object's committed state: its version (0: never committed) and its entries, in key order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -96,6 +98,10 @@ pub trait StateStore: Send + Sync {
     /// unreferenced blobs), collecting it. `now` is milliseconds since the epoch. Most stores have none.
     fn maintain(&self, _now: u64) -> Result<(), StateError> {
         Ok(())
+    }
+    /// The store's tables, when its objects' durable relations can be tables (docs/design/SQL-TABLES.md).
+    fn tables(&self) -> Option<&dyn TableStore> {
+        None
     }
 }
 

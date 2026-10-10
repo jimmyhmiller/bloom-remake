@@ -10,6 +10,7 @@ license.workspace = true
 [dependencies]
 blossom-statestore.workspace = true
 postgres = "0.19.14"
+serde_json.workspace = true
 postgres_rustls = "0.1.5"
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1.0.9"

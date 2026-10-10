@@ -3,13 +3,13 @@
 //! The store's tables live in a schema of their own (`?schema=NAME`, `blossom` by default), created on first use:
 //!
 //! ```sql
-//! create table meta    (key text primary key, value bigint not null);               -- format = 1
-//! create table objects (object text collate "C" primary key, version bigint not null);
-//! create table entries (object text collate "C" not null, key text collate "C" not null, value bytea not null,
+//! create table blossom_meta    (key text primary key, value bigint not null);               -- format = 1
+//! create table blossom_objects (object text collate "C" primary key, version bigint not null);
+//! create table blossom_entries (object text collate "C" not null, key text collate "C" not null, value bytea not null,
 //!                       primary key (object, key));
-//! create table wakes   (object text collate "C" not null, at bigint not null, primary key (object, at));
-//! create index wakes_at on wakes (at, object);
-//! create table side    (key text collate "C" primary key, value bytea not null);
+//! create table blossom_wakes   (object text collate "C" not null, at bigint not null, primary key (object, at));
+//! create index wakes_at on blossom_wakes (at, object);
+//! create table blossom_side    (key text collate "C" primary key, value bytea not null);
 //! ```
 //!
 //! Text collates by bytes (`"C"`), so entries come back in the byte order of their keys.
@@ -35,7 +35,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use blossom_statestore::{Commit, Snapshot, StateError, StateStore, Write, check_commit, check_name};
+use blossom_statestore::tables::{KEYS_TABLE, check_ident, check_table};
+use blossom_statestore::{
+    Commit, Owner, RowChange, Snapshot, SqlType, SqlValue, StateError, StateStore, TableDef, TableStore, Write,
+    check_commit, check_name,
+};
 use postgres::config::SslMode;
 use postgres::fallible_iterator::FallibleIterator;
 use postgres::{Client, Config, NoTls};
@@ -108,25 +112,29 @@ struct Sql {
 impl Sql {
     fn of(s: &str) -> Sql {
         Sql {
-            version: format!("select version from \"{s}\".objects where object = $1"),
-            entries: format!("select key, value from \"{s}\".entries where object = $1 order by key"),
-            create: format!("insert into \"{s}\".objects (object, version) values ($1, 1) on conflict do nothing"),
-            bump: format!("update \"{s}\".objects set version = version + 1 where object = $1 and version = $2"),
+            version: format!("select version from \"{s}\".blossom_objects where object = $1"),
+            entries: format!("select key, value from \"{s}\".blossom_entries where object = $1 order by key"),
+            create: format!(
+                "insert into \"{s}\".blossom_objects (object, version) values ($1, 1) on conflict do nothing"
+            ),
+            bump: format!(
+                "update \"{s}\".blossom_objects set version = version + 1 where object = $1 and version = $2"
+            ),
             upsert: format!(
-                "insert into \"{s}\".entries (object, key, value) values ($1, $2, $3)
+                "insert into \"{s}\".blossom_entries (object, key, value) values ($1, $2, $3)
                  on conflict (object, key) do update set value = excluded.value"
             ),
-            delete: format!("delete from \"{s}\".entries where object = $1 and key = $2"),
+            delete: format!("delete from \"{s}\".blossom_entries where object = $1 and key = $2"),
             notify: "select pg_notify($1, $2)".into(),
-            schedule: format!("insert into \"{s}\".wakes (object, at) values ($1, $2) on conflict do nothing"),
-            due: format!("select object, at from \"{s}\".wakes where at <= $1 order by at, object limit $2"),
-            unschedule: format!("delete from \"{s}\".wakes where object = $1 and at = $2"),
+            schedule: format!("insert into \"{s}\".blossom_wakes (object, at) values ($1, $2) on conflict do nothing"),
+            due: format!("select object, at from \"{s}\".blossom_wakes where at <= $1 order by at, object limit $2"),
+            unschedule: format!("delete from \"{s}\".blossom_wakes where object = $1 and at = $2"),
             put_side: format!(
-                "insert into \"{s}\".side (key, value) values ($1, $2)
+                "insert into \"{s}\".blossom_side (key, value) values ($1, $2)
                  on conflict (key) do update set value = excluded.value"
             ),
-            get_side: format!("select value from \"{s}\".side where key = $1"),
-            delete_side: format!("delete from \"{s}\".side where key = $1"),
+            get_side: format!("select value from \"{s}\".blossom_side where key = $1"),
+            delete_side: format!("delete from \"{s}\".blossom_side where key = $1"),
         }
     }
 }
@@ -153,6 +161,8 @@ pub struct PostgresStore {
     channel: String,
     sql: Sql,
     idle: Mutex<Vec<Client>>,
+    /// The tables' definitions this handle knows (from its `ensure_tables`, or read from the catalog).
+    defs: Mutex<BTreeMap<String, TableDef>>,
     listen: Arc<Listen>,
     listener: Mutex<Option<JoinHandle<()>>>,
 }
@@ -241,6 +251,7 @@ impl PostgresStore {
             schema,
             connect,
             idle: Mutex::new(Vec::new()),
+            defs: Mutex::new(BTreeMap::new()),
             listen: Arc::new(Listen {
                 heard: Mutex::new(Heard::default()),
                 notified: Condvar::new(),
@@ -263,24 +274,28 @@ impl PostgresStore {
         .map_err(unavailable)?;
         tx.batch_execute(&format!(
             "create schema if not exists \"{s}\";
-             create table if not exists \"{s}\".meta (key text primary key, value bigint not null);
-             create table if not exists \"{s}\".objects (object text collate \"C\" primary key, version bigint not null);
-             create table if not exists \"{s}\".entries (object text collate \"C\" not null,
+             create table if not exists \"{s}\".blossom_meta (key text primary key, value bigint not null);
+             create table if not exists \"{s}\".blossom_objects (object text collate \"C\" primary key, version bigint not null);
+             create table if not exists \"{s}\".blossom_entries (object text collate \"C\" not null,
                  key text collate \"C\" not null, value bytea not null, primary key (object, key));
-             create table if not exists \"{s}\".wakes (object text collate \"C\" not null, at bigint not null,
+             create table if not exists \"{s}\".blossom_wakes (object text collate \"C\" not null, at bigint not null,
                  primary key (object, at));
-             create index if not exists wakes_at on \"{s}\".wakes (at, object);
-             create table if not exists \"{s}\".side (key text collate \"C\" primary key, value bytea not null);"
+             create index if not exists wakes_at on \"{s}\".blossom_wakes (at, object);
+             create table if not exists \"{s}\".blossom_side (key text collate \"C\" primary key, value bytea not null);
+             create table if not exists \"{s}\".blossom_catalog (key text collate \"C\" primary key, value text not null);"
         ))
         .map_err(unavailable)?;
         let format: Option<i64> = tx
-            .query_opt(&format!("select value from \"{s}\".meta where key = 'format'"), &[])
+            .query_opt(
+                &format!("select value from \"{s}\".blossom_meta where key = 'format'"),
+                &[],
+            )
             .map_err(unavailable)?
             .map(|r| r.get(0));
         match format {
             None => {
                 tx.execute(
-                    &format!("insert into \"{s}\".meta (key, value) values ('format', $1)"),
+                    &format!("insert into \"{s}\".blossom_meta (key, value) values ('format', $1)"),
                     &[&FORMAT],
                 )
                 .map_err(unavailable)?;
@@ -450,46 +465,7 @@ impl StateStore for PostgresStore {
     }
 
     fn commit(&self, object: &str, expected: u64, writes: &[Write]) -> Result<Commit, StateError> {
-        check_commit(object, writes)?;
-        let exp = int("version", expected)?;
-        let next = expected.saturating_add(1);
-        int("version", next)?;
-        self.with_client(|c| {
-            let mut tx = c.transaction().map_err(unavailable)?;
-            let won = if expected == 0 {
-                tx.execute(&self.sql.create, &[&object]).map_err(unavailable)?
-            } else {
-                tx.execute(&self.sql.bump, &[&object, &exp]).map_err(unavailable)?
-            };
-            if won != 1 {
-                let current = self.version_on(&mut tx, object)?;
-                tx.rollback().map_err(unavailable)?;
-                return Ok(Commit::Conflict { current });
-            }
-            {
-                let upsert = tx.prepare(&self.sql.upsert).map_err(unavailable)?;
-                let delete = tx.prepare(&self.sql.delete).map_err(unavailable)?;
-                for w in writes {
-                    match w {
-                        Write::Put(k, v) => tx.execute(&upsert, &[&object, k, v]),
-                        Write::Delete(k) => tx.execute(&delete, &[&object, k]),
-                    }
-                    .map_err(unavailable)?;
-                }
-            }
-            tx.execute(&self.sql.notify, &[&self.channel, &format!("{next} {object}")])
-                .map_err(unavailable)?;
-            match tx.commit() {
-                Ok(()) => Ok(Commit::Done { version: next }),
-                // The server refused the commit: it rolled back.
-                Err(e) if e.as_db_error().is_some() => Err(unavailable(e)),
-                // No answer: it may have committed.
-                Err(e) => Err(StateError::Unknown {
-                    object: object.to_owned(),
-                    reason: format!("postgres: {e}"),
-                }),
-            }
-        })
+        self.commit_rows(object, expected, writes, &Owner::default(), &[], None)
     }
 
     fn wait(&self, object: &str, since: u64, timeout: Duration) -> Result<u64, StateError> {
@@ -556,6 +532,379 @@ impl StateStore for PostgresStore {
     fn delete_side(&self, key: &str) -> Result<(), StateError> {
         check_name("side key", key)?;
         self.with_client(|c| c.execute(&self.sql.delete_side, &[&key]).map(drop).map_err(unavailable))
+    }
+    fn tables(&self) -> Option<&dyn TableStore> {
+        Some(self)
+    }
+}
+
+/// A column's Postgres type.
+fn pg_type(t: SqlType) -> &'static str {
+    match t {
+        SqlType::Bool => "boolean",
+        SqlType::Int => "bigint",
+        SqlType::Numeric => "numeric",
+        SqlType::Real => "double precision",
+        SqlType::Text => "text",
+        SqlType::Bytes => "bytea",
+        SqlType::Json => "jsonb",
+    }
+}
+
+/// The parameter of a column of type `t` in an insert: numeric and JSON values travel as text.
+fn pg_param(t: SqlType, n: usize) -> String {
+    match t {
+        SqlType::Numeric => format!("${n}::text::numeric"),
+        SqlType::Json => format!("${n}::text::jsonb"),
+        _ => format!("${n}"),
+    }
+}
+
+/// A value bound to a column of type `t` (a null of the column's own type).
+fn pg_value(t: SqlType, v: &SqlValue) -> Result<Box<dyn postgres::types::ToSql + Sync>, StateError> {
+    let mismatch = || StateError::Invalid(format!("a value {v:?} for a column of type {t:?}"));
+    Ok(match (t, v) {
+        (SqlType::Bool, SqlValue::Bool(b)) => Box::new(Some(*b)),
+        (SqlType::Bool, SqlValue::Null) => Box::new(None::<bool>),
+        (SqlType::Int, SqlValue::Int(n)) => Box::new(Some(*n)),
+        (SqlType::Int, SqlValue::Null) => Box::new(None::<i64>),
+        (SqlType::Real, SqlValue::Real(x)) => Box::new(Some(*x)),
+        (SqlType::Real, SqlValue::Null) => Box::new(None::<f64>),
+        (SqlType::Bytes, SqlValue::Bytes(b)) => Box::new(Some(b.clone())),
+        (SqlType::Bytes, SqlValue::Null) => Box::new(None::<Vec<u8>>),
+        (SqlType::Text, SqlValue::Text(t))
+        | (SqlType::Numeric, SqlValue::Numeric(t))
+        | (SqlType::Json, SqlValue::Json(t)) => Box::new(Some(t.clone())),
+        (SqlType::Text | SqlType::Numeric | SqlType::Json, SqlValue::Null) => Box::new(None::<String>),
+        _ => return Err(mismatch()),
+    })
+}
+
+fn keys_def() -> TableDef {
+    TableDef {
+        name: KEYS_TABLE.into(),
+        view: None,
+        columns: Vec::new(),
+    }
+}
+
+fn catalog_lock() -> StateError {
+    StateError::Unavailable("the Postgres catalog lock is poisoned".into())
+}
+
+impl PostgresStore {
+    /// A table's definition: known to this handle, or read from the catalog (another instance created it).
+    fn def_of(&self, c: &mut impl postgres::GenericClient, table: &str) -> Result<TableDef, StateError> {
+        if let Some(d) = self.defs.lock().map_err(|_| catalog_lock())?.get(table) {
+            return Ok(d.clone());
+        }
+        let s = &self.schema;
+        let text: Option<String> = c
+            .query_opt(
+                &format!("select value from \"{s}\".blossom_catalog where key = $1"),
+                &[&format!("table:{table}")],
+            )
+            .map_err(unavailable)?
+            .map(|r| r.get(0));
+        let text = text.ok_or_else(|| StateError::Invalid(format!("no table {table}")))?;
+        let d: TableDef = serde_json::from_str(&text)
+            .map_err(|e| StateError::Corrupt(format!("the catalog's entry for {table}: {e}")))?;
+        self.defs
+            .lock()
+            .map_err(|_| catalog_lock())?
+            .insert(table.to_owned(), d.clone());
+        Ok(d)
+    }
+}
+
+impl TableStore for PostgresStore {
+    fn ensure_tables(&self, deployment: &str, tables: &[TableDef]) -> Result<(), StateError> {
+        for t in tables {
+            check_table(t)?;
+        }
+        let keys = keys_def();
+        let s = self.schema.clone();
+        self.with_client(|c| {
+            let mut tx = c.transaction().map_err(unavailable)?;
+            tx.execute(
+                "select pg_advisory_xact_lock(hashtext($1))",
+                &[&format!("blossom tables {s}")],
+            )
+            .map_err(unavailable)?;
+            let held: Option<String> = tx
+                .query_opt(
+                    &format!("select value from \"{s}\".blossom_catalog where key = 'deployment'"),
+                    &[],
+                )
+                .map_err(unavailable)?
+                .map(|r| r.get(0));
+            match held {
+                Some(d) if d != deployment => {
+                    return Err(StateError::Config(format!(
+                        "the store holds the tables of deployment {d}, not {deployment}"
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    tx.execute(
+                        &format!("insert into \"{s}\".blossom_catalog (key, value) values ('deployment', $1)"),
+                        &[&deployment],
+                    )
+                    .map_err(unavailable)?;
+                }
+            }
+            for t in tables.iter().chain(std::iter::once(&keys)) {
+                let json = serde_json::to_string(t).map_err(|e| StateError::Invalid(e.to_string()))?;
+                let held: Option<String> = tx
+                    .query_opt(
+                        &format!("select value from \"{s}\".blossom_catalog where key = $1"),
+                        &[&format!("table:{}", t.name)],
+                    )
+                    .map_err(unavailable)?
+                    .map(|r| r.get(0));
+                match held {
+                    Some(h) if h != json => {
+                        return Err(StateError::Config(format!(
+                            "table {} exists with another definition than the program's",
+                            t.name
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        let cols: String = t
+                            .columns
+                            .iter()
+                            .map(|(c, ty)| format!(", \"{c}\" {}", pg_type(*ty)))
+                            .collect();
+                        tx.batch_execute(&format!(
+                            "create table \"{s}\".\"{n}\" (node text collate \"C\" not null,
+                                 member text collate \"C\" not null, key bytea not null, from_tick bigint not null,
+                                 to_tick bigint{cols}, primary key (node, member, key, from_tick));
+                             create index \"{n}__open\" on \"{s}\".\"{n}\" (node, member, key) where to_tick is null;",
+                            n = t.name
+                        ))
+                        .map_err(unavailable)?;
+                        tx.execute(
+                            &format!("insert into \"{s}\".blossom_catalog (key, value) values ($1, $2)"),
+                            &[&format!("table:{}", t.name), &json],
+                        )
+                        .map_err(unavailable)?;
+                    }
+                }
+                if let Some(v) = &t.view {
+                    let cols: String = t.columns.iter().map(|(c, _)| format!(", \"{c}\"")).collect();
+                    tx.batch_execute(&format!(
+                        "drop view if exists \"{s}\".\"{v}\";
+                         create view \"{s}\".\"{v}\" as select node, member{cols} from \"{s}\".\"{n}\"
+                           where to_tick is null;",
+                        n = t.name
+                    ))
+                    .map_err(unavailable)?;
+                }
+            }
+            tx.commit().map_err(unavailable)?;
+            let mut defs = self.defs.lock().map_err(|_| catalog_lock())?;
+            for t in tables.iter().chain(std::iter::once(&keys)) {
+                defs.insert(t.name.clone(), t.clone());
+            }
+            Ok(())
+        })
+    }
+
+    fn scan_keys(
+        &self,
+        table: &str,
+        owner: &Owner,
+        lo: &[u8],
+        hi: Option<&[u8]>,
+        at: u64,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>, StateError> {
+        check_ident("table name", table)?;
+        let at = int("tick", at)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let s = &self.schema;
+        let hi: Option<Vec<u8>> = hi.map(<[u8]>::to_vec);
+        self.with_client(|c| {
+            Ok(c.query(
+                &format!(
+                    "select key from \"{s}\".\"{table}\" where node = $1 and member = $2 and key >= $3
+                       and ($4::bytea is null or key < $4) and from_tick <= $5 and (to_tick is null or to_tick > $5)
+                     order by key limit $6"
+                ),
+                &[&owner.node, &owner.member, &lo, &hi, &at, &limit],
+            )
+            .map_err(unavailable)?
+            .into_iter()
+            .map(|r| r.get::<_, Vec<u8>>(0))
+            .collect())
+        })
+    }
+
+    fn has_key(&self, table: &str, owner: &Owner, key: &[u8], at: u64) -> Result<bool, StateError> {
+        check_ident("table name", table)?;
+        let at = int("tick", at)?;
+        let s = &self.schema;
+        self.with_client(|c| {
+            Ok(c.query_one(
+                &format!(
+                    "select exists (select 1 from \"{s}\".\"{table}\" where node = $1 and member = $2 and key = $3
+                       and from_tick <= $4 and (to_tick is null or to_tick > $4))"
+                ),
+                &[&owner.node, &owner.member, &key, &at],
+            )
+            .map_err(unavailable)?
+            .get(0))
+        })
+    }
+
+    fn commit_rows(
+        &self,
+        object: &str,
+        expected: u64,
+        writes: &[Write],
+        owner: &Owner,
+        rows: &[RowChange],
+        prune_below: Option<u64>,
+    ) -> Result<Commit, StateError> {
+        check_commit(object, writes)?;
+        let exp = int("version", expected)?;
+        let next = expected.saturating_add(1);
+        int("version", next)?;
+        let s = self.schema.clone();
+        self.with_client(|c| {
+            let mut tx = c.transaction().map_err(unavailable)?;
+            let won = if expected == 0 {
+                tx.execute(&self.sql.create, &[&object]).map_err(unavailable)?
+            } else {
+                tx.execute(&self.sql.bump, &[&object, &exp]).map_err(unavailable)?
+            };
+            if won != 1 {
+                let current = self.version_on(&mut tx, object)?;
+                tx.rollback().map_err(unavailable)?;
+                return Ok(Commit::Conflict { current });
+            }
+            {
+                let upsert = tx.prepare(&self.sql.upsert).map_err(unavailable)?;
+                let delete = tx.prepare(&self.sql.delete).map_err(unavailable)?;
+                for w in writes {
+                    match w {
+                        Write::Put(k, v) => tx.execute(&upsert, &[&object, k, v]),
+                        Write::Delete(k) => tx.execute(&delete, &[&object, k]),
+                    }
+                    .map_err(unavailable)?;
+                }
+            }
+            for change in rows {
+                match change {
+                    RowChange::Open {
+                        table,
+                        key,
+                        from,
+                        values,
+                    } => {
+                        let def = self.def_of(&mut tx, table)?;
+                        if values.len() != def.columns.len() {
+                            return Err(StateError::Invalid(format!(
+                                "{} values for the {} columns of {table}",
+                                values.len(),
+                                def.columns.len()
+                            )));
+                        }
+                        let open: bool = tx
+                            .query_one(
+                                &format!(
+                                    "select exists (select 1 from \"{s}\".\"{table}\" where node = $1
+                                       and member = $2 and key = $3 and to_tick is null)"
+                                ),
+                                &[&owner.node, &owner.member, key],
+                            )
+                            .map_err(unavailable)?
+                            .get(0);
+                        if open {
+                            return Err(StateError::Corrupt(format!("{table}: a key opened while open")));
+                        }
+                        let names: String = def.columns.iter().map(|(c, _)| format!(", \"{c}\"")).collect();
+                        let marks: String = def
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (_, t))| format!(", {}", pg_param(*t, i + 5)))
+                            .collect();
+                        let from = int("tick", *from)?;
+                        let typed: Vec<Box<dyn postgres::types::ToSql + Sync>> = def
+                            .columns
+                            .iter()
+                            .zip(values)
+                            .map(|((_, t), v)| pg_value(*t, v))
+                            .collect::<Result<_, _>>()?;
+                        let mut args: Vec<&(dyn postgres::types::ToSql + Sync)> =
+                            vec![&owner.node, &owner.member, key, &from];
+                        args.extend(typed.iter().map(|b| &**b as &(dyn postgres::types::ToSql + Sync)));
+                        tx.execute(
+                            &format!(
+                                "insert into \"{s}\".\"{table}\" (node, member, key, from_tick{names})
+                                 values ($1, $2, $3, $4{marks})"
+                            ),
+                            &args,
+                        )
+                        .map_err(unavailable)?;
+                    }
+                    RowChange::Close { table, key, at } => {
+                        check_ident("table name", table)?;
+                        let at = int("tick", *at)?;
+                        let n = tx
+                            .execute(
+                                &format!(
+                                    "update \"{s}\".\"{table}\" set to_tick = $4 where node = $1 and member = $2
+                                       and key = $3 and to_tick is null"
+                                ),
+                                &[&owner.node, &owner.member, key, &at],
+                            )
+                            .map_err(unavailable)?;
+                        if n != 1 {
+                            return Err(StateError::Corrupt(format!("{table}: a key closed while not open")));
+                        }
+                    }
+                }
+            }
+            if let Some(floor) = prune_below {
+                let floor = int("tick", floor)?;
+                let names: Vec<String> = tx
+                    .query(
+                        &format!("select key from \"{s}\".blossom_catalog where key like 'table:%'"),
+                        &[],
+                    )
+                    .map_err(unavailable)?
+                    .into_iter()
+                    .map(|r| r.get::<_, String>(0))
+                    .collect();
+                for k in names {
+                    let table = k.trim_start_matches("table:");
+                    check_ident("table name", table)?;
+                    tx.execute(
+                        &format!(
+                            "delete from \"{s}\".\"{table}\" where node = $1 and member = $2
+                               and to_tick is not null and to_tick <= $3"
+                        ),
+                        &[&owner.node, &owner.member, &floor],
+                    )
+                    .map_err(unavailable)?;
+                }
+            }
+            tx.execute(&self.sql.notify, &[&self.channel, &format!("{next} {object}")])
+                .map_err(unavailable)?;
+            match tx.commit() {
+                Ok(()) => Ok(Commit::Done { version: next }),
+                // The server refused the commit: it rolled back.
+                Err(e) if e.as_db_error().is_some() => Err(unavailable(e)),
+                // No answer: it may have committed.
+                Err(e) => Err(StateError::Unknown {
+                    object: object.to_owned(),
+                    reason: format!("postgres: {e}"),
+                }),
+            }
+        })
     }
 }
 
