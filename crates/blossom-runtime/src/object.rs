@@ -404,8 +404,11 @@ impl ObjectNode {
             ),
         };
         let members = cfg.members.clone();
+        // The engine, unless a test run asks every harness for another (`BLOSSOM_EVALUATOR`: `checked` runs the
+        // engine against the oracle at every tick).
+        let backend = Backend::from_env().map_err(RuntimeError::Config)?;
         let executors = Executors::new(
-            Backend::Engine,
+            backend,
             artifact.program.clone(),
             artifact.roles.clone(),
             names.to_vec(),

@@ -56,7 +56,8 @@ case "$tier" in
     # The simulated clusters again with every node's engine checked against the oracle at every tick (its tiered
     # tables included, docs/design/DATABASE.md §7).
     BLOSSOM_EVALUATOR=checked cargo test -p blossom-integration-tests --no-fail-fast "$@" \
-      --test kafka_sim --test raft_kv --test raft_groups --test sim_streams --test kafka_retention || status=1
+      --test kafka_sim --test raft_kv --test raft_groups --test sim_streams --test kafka_retention \
+      --test stateless || status=1
     # The cluster tests that need a release build's speed (a debug build skips them).
     BLOSSOM_FULL=1 cargo test --release -p blossom-cli --test it --no-fail-fast "$@" -- --ignored \
       a_restarted_follower_catches_up_on_batches_near_the_size_limit || status=1
