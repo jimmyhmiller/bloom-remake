@@ -39,6 +39,8 @@ blossom-std-host.workspace = true
 blossom-std-src.workspace = true
 blossom-store.workspace = true
 blossom-statestore.workspace = true
+blossom-statestore-sqlite.workspace = true
+blossom-statestore-postgres.workspace = true
 blossom-syntax.workspace = true
 blossom-trace.workspace = true
 blossom-value.workspace = true
@@ -48,6 +50,7 @@ blossom-web.workspace = true
 proptest.workspace = true
 
 [dev-dependencies]
+postgres = "0.19.14"
 # The test kit is a dev-dependency only of integration-test crates (ARCHITECTURE §1.3).
 blossom-testkit.workspace = true
 toml.workspace = true

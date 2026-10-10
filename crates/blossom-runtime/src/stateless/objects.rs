@@ -11,17 +11,20 @@
 //! - `H/w`: the object's next wake (milliseconds since the epoch), the truth the store's wake hints point at;
 //! - `H/xn`, `H/x/SEQ`: the outbox: messages to other objects, numbered, until they are delivered;
 //! - `H/r/SENDER`: the highest outbox number taken from each sender;
-//! - `H/t`: the registry's next serial.
+//! - `H/t`: the registry's next serial;
+//! - `T/meta`: on a store with tables, the node's database's tree ([`SqlTree`], docs/design/SQL-TABLES.md): its rows
+//!   are the store's tables, committed with the entries.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use blossom_statestore::{Commit, StateError, StateStore, Write};
+use blossom_statestore::{Commit, Owner, StateError, StateStore, Write};
 use blossom_store::{JournalKv, KvFs, KvStore};
 use blossom_value::time::Instant;
 
 use super::deployment::{Deployment, REGISTRY, Runs};
+use super::sqltree::{SqlTree, TREE_META_KEY, TableMap, TreeMeta};
 use crate::RuntimeError;
 use crate::object::{Cursor, LinkState, ObjectNode, Output, Received};
 
@@ -114,6 +117,8 @@ struct Running {
     kv: Arc<JournalKv>,
     /// None for the registry.
     node: Option<ObjectNode>,
+    /// The node's database's rows as tables, when the store has them.
+    tree: Option<SqlTree>,
 }
 
 /// What an instance knows of one object.
@@ -216,6 +221,8 @@ pub struct Objects {
     pub deploy: Arc<Deployment>,
     pub store: Arc<dyn StateStore>,
     slots: Mutex<Slots>,
+    /// The deployment's tables, once created (a store with tables, docs/design/SQL-TABLES.md).
+    tables: Mutex<Option<Arc<TableMap>>>,
 }
 
 /// Milliseconds since the epoch of an instant.
@@ -261,7 +268,31 @@ impl Objects {
                 clock: 0,
                 cap: DEFAULT_CACHE,
             }),
+            tables: Mutex::new(None),
         }
+    }
+
+    /// The deployment's tables, created on first use; `None` for a store without tables (S3), whose objects keep
+    /// their rows in their entries.
+    pub fn table_map(&self) -> Result<Option<Arc<TableMap>>, ServeError> {
+        let Some(tables) = self.store.tables() else {
+            return Ok(None);
+        };
+        let mut held = lock(&self.tables)?;
+        if let Some(m) = held.as_ref() {
+            return Ok(Some(m.clone()));
+        }
+        let map = Arc::new(TableMap::of(&self.deploy.artifact.program, self.deploy.spec.names())?);
+        let id: String = self
+            .deploy
+            .spec
+            .deployment_id()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        tables.ensure_tables(&id, map.defs())?;
+        *held = Some(map.clone());
+        Ok(Some(map))
     }
 
     /// Keeps at most `cap` objects' nodes and links in memory (`blossom serve --cache`).
@@ -318,9 +349,27 @@ impl Objects {
         }
         let entries = s.snapshot.take().unwrap_or_default();
         let kv = Arc::new(JournalKv::load(entries));
+        let mut tree = None;
         let node = match self.deploy.runs(object)? {
             Runs::Registry => None,
             Runs::Node { node, member } => {
+                if let Some(map) = self.table_map()? {
+                    let meta = match kv.get(TREE_META_KEY)? {
+                        Some(b) => postcard::from_bytes(&b).map_err(|e| pe("a tree's meta", e))?,
+                        None => TreeMeta::default(),
+                    };
+                    let owner = Owner {
+                        node: node.clone(),
+                        member: member.as_ref().map(|m| m.key.to_string()).unwrap_or_default(),
+                    };
+                    tree = Some(SqlTree::new(
+                        self.store.clone(),
+                        owner,
+                        map,
+                        meta,
+                        blossom_node::database::KEY_FORMAT,
+                    ));
+                }
                 let hibernation = match kv.get(HIBERNATION_KEY)? {
                     Some(b) => Some(postcard::from_bytes(&b).map_err(|e| pe("a node's hibernation", e))?),
                     None => None,
@@ -334,14 +383,16 @@ impl Objects {
                         fs: Arc::new(fs),
                         now,
                         hibernation,
-                        tree: None,
+                        tree: tree
+                            .clone()
+                            .map(|t| Box::new(t) as Box<dyn blossom_store::tree::KeyTree>),
                     },
                 )?;
                 node.restore_links(s.links.clone())?;
                 Some(node)
             }
         };
-        s.running = Some(Running { kv, node });
+        s.running = Some(Running { kv, node, tree });
         Ok(())
     }
 
@@ -415,6 +466,18 @@ impl Objects {
         };
         let value = f(&mut ctx)?;
         let frames = self.bookkeep(object, &mut ctx)?;
+        // The rows go with the entries: the tree's meta (its committed version) with them, in the same commit.
+        let rows = match &run.tree {
+            Some(tree) => {
+                let (rows, prune, meta) = tree.changes()?;
+                let bytes = postcard::to_allocvec(&meta).map_err(|e| pe("a tree's meta", e))?;
+                if run.kv.get(TREE_META_KEY)?.as_deref() != Some(bytes.as_slice()) {
+                    run.kv.put(TREE_META_KEY, &bytes)?;
+                }
+                Some((tree.clone(), rows, prune, meta))
+            }
+            None => None,
+        };
         let writes: Vec<Write> = run
             .kv
             .take_writes()?
@@ -424,12 +487,25 @@ impl Objects {
                 None => Write::Delete(k),
             })
             .collect();
-        if writes.is_empty() {
+        if writes.is_empty() && rows.as_ref().is_none_or(|(_, r, _, _)| r.is_empty()) {
             return Ok(Some(Done { value, frames }));
         }
-        match self.store.commit(object, version, &writes)? {
+        let commit = match &rows {
+            Some((tree, rows, prune, _)) => {
+                let tables = self
+                    .store
+                    .tables()
+                    .ok_or_else(|| ServeError::Unavailable("the state store has no tables".into()))?;
+                tables.commit_rows(object, version, &writes, tree.owner(), rows, *prune)?
+            }
+            None => self.store.commit(object, version, &writes)?,
+        };
+        match commit {
             Commit::Done { version } => {
                 s.version = Some(version);
+                if let Some((tree, _, _, meta)) = rows {
+                    tree.committed(meta)?;
+                }
                 if let Some(run) = &s.running {
                     if let Some(node) = &run.node {
                         s.links = node.link_state()?;
