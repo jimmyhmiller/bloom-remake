@@ -7,6 +7,7 @@ mod kafka_kill9;
 mod kill9;
 mod query;
 mod raft3;
+mod serve;
 
 use std::process::Command;
 

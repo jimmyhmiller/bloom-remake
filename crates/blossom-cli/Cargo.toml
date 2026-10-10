@@ -57,6 +57,8 @@ clap.workspace = true
 clap_complete = "4.6.11"
 # The process's allocator (S10: small allocations on the engine's hot paths).
 mimalloc = { version = "0.1", default-features = false }
+# `blossom serve` drains on SIGTERM, as function and container platforms stop instances (docs/design/DEPLOY.md).
+signal-hook = "0.4.4"
 
 [dev-dependencies]
 blossom-bench.workspace = true

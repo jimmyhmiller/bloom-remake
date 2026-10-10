@@ -243,6 +243,11 @@ pub fn now() -> Result<Instant, ServeError> {
     crate::clock::wall_now().map_err(|e| ServeError::Runtime(RuntimeError::Config(e)))
 }
 
+/// Whether two session secrets are the same, compared whole: how much of a guessed secret matched must not show.
+fn same_secret(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 fn random_bytes(buf: &mut [u8]) -> Result<(), ServeError> {
     crate::members::urandom(buf).map_err(ServeError::Runtime)
 }
@@ -657,8 +662,7 @@ impl Objects {
             .sessions
             .get(&conn)
             .ok_or_else(|| ServeError::Gone("the session ended".into()))?;
-        // Compared whole: how much of a guessed secret matched must not show.
-        if rec.secret.iter().zip(secret).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0 {
+        if !same_secret(&rec.secret, secret) {
             return Err(ServeError::Gone("no such session".into()));
         }
         Ok(rec.clone())
@@ -753,7 +757,7 @@ impl Objects {
             self.check(&s, conn, secret)?;
         }
         self.request(object, |ctx| {
-            if ctx.session(conn)?.is_none_or(|s| s.secret != *secret) {
+            if ctx.session(conn)?.is_none_or(|s| !same_secret(&s.secret, secret)) {
                 return Err(ServeError::Gone("the session ended".into()));
             }
             let now = ctx.now;
