@@ -112,11 +112,17 @@ at Browser {
     /// The room, once the link reached it: lines typed while offline go to it when the link is back.
     durable table host(r: Node<Room>) key();
     table draft(s: String) key();
+    /// This tab's lines the room has not sent back yet: shown at once, as pending, and gone when the room's copy
+    /// comes (`heard` from this tab with the same number). Kept across reloads, like the lines.
+    durable table unconfirmed(k: u64, at: Instant, text: String) key(k);
 
     view next_k(k = max!(n default 0u64)) = sent_n(n);
 
     hear: on heard(w, k, at, t), not lines(w, k, _, _) {
         next lines(w, k, at, t);
+    }
+    confirmed: on heard(w, k, _, _), unconfirmed(k, a, t) where w == self {
+        delete unconfirmed(k, a, t);
     }
     hear_room: on room(k) {
         upsert called(k);
@@ -147,6 +153,7 @@ at Browser {
     /// Sends while offline wait for the link: the line goes out when it is back.
     send_it: on keydown("say", "Enter", v), host(r), next_k(k) where v != "" {
         send say(k, v) to r;
+        next unconfirmed(k, now(), v);
         upsert sent_n(k + 1u64);
         upsert draft("");
     }
@@ -178,6 +185,12 @@ at Browser {
                     li[id: f"line-{k}-{w}", pos: at.as_millis()](class: "line") {
                         span[id: f"who-{k}-{w}"](class: "who") { w.to_string() }
                         span[id: f"text-{k}-{w}"](class: "text") { t }
+                    }
+                }
+                for unconfirmed(k, at, t) {
+                    li[id: f"pending-{k}", pos: at.as_millis()](class: "line pending") {
+                        span[id: f"pending-who-{k}"](class: "who") { "you" }
+                        span[id: f"pending-text-{k}"](class: "text") { t }
                     }
                 }
             }

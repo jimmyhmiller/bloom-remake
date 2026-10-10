@@ -231,6 +231,26 @@ test.describe("keyed chat as a Vercel function", () => {
     }
   });
 
+  test("a line shows at once, as pending, until the room confirms it", async ({ page }) => {
+    const c = deployed ? null : await local();
+    const base = deployed ?? c.base;
+    try {
+      await open(page, base, `quick${randomBytes(4).toString("hex")}`);
+      await expect(bid(page, "status")).toHaveText("online, 1 here", { timeout: 30_000 });
+      // The room is slow to hear this tab: its sends take 2 s.
+      await page.route("**/blossom/http/**/send", async (route) => {
+        await new Promise((done) => setTimeout(done, 2000));
+        await route.continue();
+      });
+      await say(page, "right away");
+      await expect(page.locator(".line.pending .text")).toHaveText(["right away"], { timeout: 1000 });
+      await expect(page.locator(".line.pending")).toHaveCount(0, { timeout: 15_000 });
+      await expect(lines(page)).toHaveText(["right away"]);
+    } finally {
+      if (c) await c.remove();
+    }
+  });
+
   test("the function answers only page requests", async ({ request }) => {
     const c = deployed ? null : await local();
     const base = deployed ?? c.base;
