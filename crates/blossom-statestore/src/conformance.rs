@@ -474,6 +474,268 @@ pub fn side_records(h: &dyn Harness) -> Outcome {
     expect("deleted", s.get_side("side/a").map_err(e)?, None)
 }
 
+// ---------------------------------------------------------------------------------------------------- tables
+
+use crate::tables::{Owner, RowChange, SqlType, SqlValue, TableDef, TableStore};
+
+fn tables_of(s: &dyn StateStore) -> Result<&dyn TableStore, String> {
+    s.tables().ok_or_else(|| "the store has no tables".to_string())
+}
+
+fn def(name: &str) -> TableDef {
+    TableDef {
+        name: name.into(),
+        view: Some(format!("{name}_now")),
+        columns: vec![
+            ("who".into(), SqlType::Text),
+            ("n".into(), SqlType::Int),
+            ("big".into(), SqlType::Numeric),
+            ("x".into(), SqlType::Real),
+            ("ok".into(), SqlType::Bool),
+            ("raw".into(), SqlType::Bytes),
+            ("doc".into(), SqlType::Json),
+        ],
+    }
+}
+
+fn values(i: i64) -> Vec<SqlValue> {
+    vec![
+        SqlValue::Text(format!("who {i}")),
+        SqlValue::Int(i),
+        SqlValue::Numeric(format!("1844674407370955161{i}")),
+        SqlValue::Real(i as f64 / 2.0),
+        SqlValue::Bool(i % 2 == 0),
+        SqlValue::Bytes(vec![0, 0xff, i as u8]),
+        SqlValue::Json(format!("{{\"variant\": {i}, \"fields\": []}}")),
+    ]
+}
+
+fn open(table: &str, key: &[u8], from: u64, i: i64) -> RowChange {
+    RowChange::Open {
+        table: table.into(),
+        key: key.to_vec(),
+        from,
+        values: values(i),
+    }
+}
+
+fn close(table: &str, key: &[u8], at: u64) -> RowChange {
+    RowChange::Close {
+        table: table.into(),
+        key: key.to_vec(),
+        at,
+    }
+}
+
+fn owner(node: &str, member: &str) -> Owner {
+    Owner {
+        node: node.into(),
+        member: member.into(),
+    }
+}
+
+/// Tables are created once (again: nothing changes), with their views; another deployment's are refused, and so are
+/// names a store cannot hold.
+pub fn tables_created(h: &dyn Harness) -> Outcome {
+    let s = h.open().map_err(e)?;
+    let t = tables_of(&*s)?;
+    t.ensure_tables("dep-a", &[def("r_log_00aa"), def("r_seen_00bb")])
+        .map_err(e)?;
+    t.ensure_tables("dep-a", &[def("r_log_00aa"), def("r_seen_00bb")])
+        .map_err(e)?;
+    if t.ensure_tables("dep-b", &[def("r_log_00aa")]).is_ok() {
+        return Err("a second deployment's tables were taken".into());
+    }
+    let mut bad = def("r_bad");
+    bad.columns.push(("key".into(), SqlType::Text));
+    if t.ensure_tables("dep-a", &[bad]).is_ok() {
+        return Err("a column named as a system column was taken".into());
+    }
+    for name in ["blossom_objects", "1abc", "a-b", "a\"b"] {
+        let mut d = def("r_ok");
+        d.name = name.into();
+        if t.ensure_tables("dep-a", &[d]).is_ok() {
+            return Err(format!("the table name `{name}` was taken"));
+        }
+    }
+    let other = h.open().map_err(e)?;
+    tables_of(&*other)?
+        .ensure_tables("dep-a", &[def("r_log_00aa")])
+        .map_err(e)?;
+    Ok(())
+}
+
+/// Rows open and close at ticks, in the commit of their object: present from the tick they opened until the one
+/// they closed; reads as of every tick, by range, with a limit, apart per owner.
+pub fn rows_in_commits(h: &dyn Harness) -> Outcome {
+    let s = h.open().map_err(e)?;
+    let t = tables_of(&*s)?;
+    t.ensure_tables("dep-a", &[def("r_log_00aa")]).map_err(e)?;
+    let (lunch, dinner) = (owner("rooms", "lunch"), owner("rooms", "dinner"));
+    let tbl = "r_log_00aa";
+    let c = t
+        .commit_rows(
+            "tables/lunch",
+            0,
+            &[put("e", b"1")],
+            &lunch,
+            &[
+                open(tbl, b"\x01a", 5, 1),
+                open(tbl, b"\x01b", 5, 2),
+                open(tbl, b"\x01c", 6, 3),
+            ],
+            None,
+        )
+        .map_err(e)?;
+    expect("first commit", c, Commit::Done { version: 1 })?;
+    t.commit_rows("tables/dinner", 0, &[], &dinner, &[open(tbl, b"\x01a", 2, 9)], None)
+        .map_err(e)?;
+    // In one commit: b closes at 7, opens again at 9; a closes at 8.
+    t.commit_rows(
+        "tables/lunch",
+        1,
+        &[],
+        &lunch,
+        &[
+            close(tbl, b"\x01b", 7),
+            close(tbl, b"\x01a", 8),
+            open(tbl, b"\x01b", 9, 4),
+        ],
+        None,
+    )
+    .map_err(e)?;
+    let other = h.open().map_err(e)?;
+    let o = tables_of(&*other)?;
+    let at = |tick: u64| o.scan_keys(tbl, &lunch, b"", None, tick, 100).map_err(e);
+    expect("as of 4", at(4)?, Vec::<Vec<u8>>::new())?;
+    expect("as of 5", at(5)?, vec![b"\x01a".to_vec(), b"\x01b".to_vec()])?;
+    expect(
+        "as of 6",
+        at(6)?,
+        vec![b"\x01a".to_vec(), b"\x01b".to_vec(), b"\x01c".to_vec()],
+    )?;
+    expect("as of 7", at(7)?, vec![b"\x01a".to_vec(), b"\x01c".to_vec()])?;
+    expect("as of 8", at(8)?, vec![b"\x01c".to_vec()])?;
+    expect("as of 9", at(9)?, vec![b"\x01b".to_vec(), b"\x01c".to_vec()])?;
+    expect(
+        "a range",
+        o.scan_keys(tbl, &lunch, b"\x01b", Some(b"\x01c"), 9, 100).map_err(e)?,
+        vec![b"\x01b".to_vec()],
+    )?;
+    expect(
+        "a limit",
+        o.scan_keys(tbl, &lunch, b"", None, 6, 2).map_err(e)?,
+        vec![b"\x01a".to_vec(), b"\x01b".to_vec()],
+    )?;
+    expect(
+        "dinner apart",
+        o.scan_keys(tbl, &dinner, b"", None, 9, 100).map_err(e)?,
+        vec![b"\x01a".to_vec()],
+    )?;
+    expect("has b at 7", o.has_key(tbl, &lunch, b"\x01b", 7).map_err(e)?, false)?;
+    expect("has b at 9", o.has_key(tbl, &lunch, b"\x01b", 9).map_err(e)?, true)?;
+    expect(
+        "has a for another member",
+        o.has_key(tbl, &owner("rooms", "x"), b"\x01a", 9).map_err(e)?,
+        false,
+    )?;
+    // The object's entries went with its rows.
+    expect("the entries", other.load("tables/lunch").map_err(e)?.version, 2)
+}
+
+/// A commit at the wrong version applies none of its rows; one whose row change cannot apply (closing a key that
+/// is not open) applies nothing at all.
+pub fn rows_atomic(h: &dyn Harness) -> Outcome {
+    let s = h.open().map_err(e)?;
+    let t = tables_of(&*s)?;
+    t.ensure_tables("dep-a", &[def("r_log_00aa")]).map_err(e)?;
+    let me = owner("n", "");
+    let tbl = "r_log_00aa";
+    t.commit_rows("tables/atomic", 0, &[], &me, &[open(tbl, b"k1", 1, 1)], None)
+        .map_err(e)?;
+    expect(
+        "a stale commit",
+        t.commit_rows(
+            "tables/atomic",
+            0,
+            &[put("x", b"1")],
+            &me,
+            &[open(tbl, b"k2", 2, 2)],
+            None,
+        )
+        .map_err(e)?,
+        Commit::Conflict { current: 1 },
+    )?;
+    let bad = t.commit_rows(
+        "tables/atomic",
+        1,
+        &[put("x", b"1")],
+        &me,
+        &[open(tbl, b"k3", 2, 3), close(tbl, b"never", 2)],
+        None,
+    );
+    if bad.is_ok() {
+        return Err("closing a key that is not open was taken".into());
+    }
+    expect(
+        "after both",
+        t.scan_keys(tbl, &me, b"", None, 5, 10).map_err(e)?,
+        vec![b"k1".to_vec()],
+    )?;
+    expect("the version", s.version("tables/atomic").map_err(e)?, 1)?;
+    expect("the entries", s.load("tables/atomic").map_err(e)?.entries, Vec::new())
+}
+
+/// Pruning deletes the owner's rows that ended at or before the floor, and nothing else.
+pub fn rows_pruned(h: &dyn Harness) -> Outcome {
+    let s = h.open().map_err(e)?;
+    let t = tables_of(&*s)?;
+    t.ensure_tables("dep-a", &[def("r_log_00aa")]).map_err(e)?;
+    let (me, them) = (owner("n", "me"), owner("n", "them"));
+    let tbl = "r_log_00aa";
+    t.commit_rows(
+        "tables/prune-me",
+        0,
+        &[],
+        &me,
+        &[
+            open(tbl, b"a", 1, 1),
+            open(tbl, b"b", 1, 2),
+            close(tbl, b"a", 3),
+            close(tbl, b"b", 8),
+        ],
+        None,
+    )
+    .map_err(e)?;
+    t.commit_rows(
+        "tables/prune-them",
+        0,
+        &[],
+        &them,
+        &[open(tbl, b"a", 1, 1), close(tbl, b"a", 2)],
+        None,
+    )
+    .map_err(e)?;
+    t.commit_rows("tables/prune-me", 1, &[], &me, &[open(tbl, b"c", 9, 3)], Some(5))
+        .map_err(e)?;
+    // As of 2 the pruned row is gone for me (history before the floor is not kept), not for them.
+    expect(
+        "mine as of 2",
+        t.scan_keys(tbl, &me, b"", None, 2, 10).map_err(e)?,
+        vec![b"b".to_vec()],
+    )?;
+    expect(
+        "theirs as of 1",
+        t.scan_keys(tbl, &them, b"", None, 1, 10).map_err(e)?,
+        vec![b"a".to_vec()],
+    )?;
+    expect(
+        "mine as of 9",
+        t.scan_keys(tbl, &me, b"", None, 9, 10).map_err(e)?,
+        vec![b"c".to_vec()],
+    )
+}
+
 /// Elapsed time for the promptness check (the case measures a host's I/O, not a node's time).
 struct Stopwatch(std::time::Instant);
 
@@ -502,6 +764,14 @@ macro_rules! statestore_conformance {
         $crate::statestore_conformance!(@cases [$($attr)*] $make;
             unknown_object, commit_and_load, version_check, writes_in_order, objects_apart, names_checked,
             strange_keys, large_values, concurrent_committers, waits, wait_is_prompt, wakes, side_records);
+    };
+    (tables, ignore = $why:literal, $make:expr) => {
+        $crate::statestore_conformance!(@cases [ignore = $why] $make;
+            tables_created, rows_in_commits, rows_atomic, rows_pruned);
+    };
+    (tables, $make:expr) => {
+        $crate::statestore_conformance!(@cases [] $make;
+            tables_created, rows_in_commits, rows_atomic, rows_pruned);
     };
     (@cases $attrs:tt $make:expr; $($case:ident),*) => {
         $( $crate::statestore_conformance!(@one $attrs $make; $case); )*

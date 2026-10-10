@@ -84,7 +84,10 @@ fn a_schema_of_another_format_is_refused() {
     let plain = url.split('?').next().unwrap().to_string();
     let mut c = postgres::Client::connect(&format!("{plain}?sslmode=disable"), postgres::NoTls).unwrap();
     c.execute(
-        &format!("update \"{}\".meta set value = 99 where key = 'format'", h.schema),
+        &format!(
+            "update \"{}\".blossom_meta set value = 99 where key = 'format'",
+            h.schema
+        ),
         &[],
     )
     .unwrap();
@@ -158,4 +161,85 @@ fn a_waiter_hears_a_commit_by_its_notification() {
             heard.1
         );
     }
+}
+
+mod tables {
+    use super::*;
+    blossom_statestore::statestore_conformance!(tables, ignore = "needs Postgres: scripts/test-services.sh", || fresh(
+        "BLOSSOM_TEST_POSTGRES"
+    ));
+}
+
+/// What SQL readers see: the current-rows view, its typed columns holding the values committed.
+#[test]
+#[ignore = "needs Postgres: scripts/test-services.sh"]
+fn the_view_shows_current_rows_typed() {
+    use blossom_statestore::{Owner, RowChange, SqlType, SqlValue, TableDef};
+    let h = fresh("BLOSSOM_TEST_POSTGRES");
+    let s = h.open().unwrap();
+    let t = s.tables().unwrap();
+    let def = TableDef {
+        name: "r_log_0123abcd".into(),
+        view: Some("log".into()),
+        columns: vec![
+            ("who".into(), SqlType::Text),
+            ("k".into(), SqlType::Numeric),
+            ("at".into(), SqlType::Int),
+            ("doc".into(), SqlType::Json),
+            ("ok".into(), SqlType::Bool),
+        ],
+    };
+    t.ensure_tables("dep", std::slice::from_ref(&def)).unwrap();
+    let owner = Owner {
+        node: "rooms".into(),
+        member: "lunch".into(),
+    };
+    let row = |k: &str, who: &str| RowChange::Open {
+        table: def.name.clone(),
+        key: k.as_bytes().to_vec(),
+        from: 3,
+        values: vec![
+            SqlValue::Text(who.into()),
+            SqlValue::Numeric("18446744073709551615".into()),
+            SqlValue::Int(-5),
+            SqlValue::Json(r#"{"variant": 1, "fields": ["x"]}"#.into()),
+            SqlValue::Bool(true),
+        ],
+    };
+    t.commit_rows("o", 0, &[], &owner, &[row("a", "ada"), row("b", "bob")], None)
+        .unwrap();
+    t.commit_rows(
+        "o",
+        1,
+        &[],
+        &owner,
+        &[RowChange::Close {
+            table: def.name.clone(),
+            key: b"b".to_vec(),
+            at: 4,
+        }],
+        None,
+    )
+    .unwrap();
+    let url = h.url.clone().unwrap();
+    let plain = url.split('?').next().unwrap().to_string();
+    let mut c = postgres::Client::connect(&format!("{plain}?sslmode=disable"), postgres::NoTls).unwrap();
+    let rows = c
+        .query(
+            &format!(
+                "select node, member, who, k::text, at, doc->'fields'->>0, ok from \"{}\".log",
+                h.schema
+            ),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "only the current row");
+    let r = &rows[0];
+    assert_eq!(r.get::<_, String>(0), "rooms");
+    assert_eq!(r.get::<_, String>(1), "lunch");
+    assert_eq!(r.get::<_, String>(2), "ada");
+    assert_eq!(r.get::<_, String>(3), "18446744073709551615");
+    assert_eq!(r.get::<_, i64>(4), -5);
+    assert_eq!(r.get::<_, String>(5), "x");
+    assert!(r.get::<_, bool>(6));
 }

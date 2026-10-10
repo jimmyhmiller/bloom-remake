@@ -656,6 +656,7 @@ dependencies = [
 name = "blossom-statestore"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror",
 ]
 
@@ -667,6 +668,7 @@ dependencies = [
  "postgres",
  "postgres_rustls",
  "rustls",
+ "serde_json",
  "webpki-roots",
 ]
 
@@ -686,6 +688,7 @@ version = "0.1.0"
 dependencies = [
  "blossom-statestore",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
