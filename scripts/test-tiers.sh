@@ -43,6 +43,8 @@ services() {
   scripts/test-services.sh start
   eval "$(scripts/test-services.sh env)"
   cargo test --no-fail-fast -p blossom-statestore-postgres -p blossom-statestore-s3 -- --include-ignored
+  # The SQL tree on Postgres's tables (docs/design/SQL-TABLES.md).
+  cargo test --no-fail-fast -p blossom-integration-tests --test sql_tree -- --include-ignored
 }
 
 case "$tier" in
