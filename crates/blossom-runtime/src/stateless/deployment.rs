@@ -17,6 +17,15 @@ use crate::web::Transport;
 /// The object that mints pages' tokens (docs/design/STATELESS.md §7).
 pub const REGISTRY: &str = "registry";
 
+/// Where an object's node starts from: its store's filesystem, the time, where it hibernated, and the tree its
+/// database keeps its rows in (`None`: the LSM in its store).
+pub(crate) struct Start {
+    pub fs: Arc<dyn blossom_store::Vfs>,
+    pub now: blossom_value::time::Instant,
+    pub hibernation: Option<blossom_node::Hibernation>,
+    pub tree: Option<Box<dyn blossom_store::tree::KeyTree>>,
+}
+
 /// What an object runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Runs {
@@ -157,17 +166,22 @@ impl Deployment {
         )))
     }
 
-    /// Starts the node of `object` over the filesystem `fs` (its store, recovered, or created on its first start), or
-    /// resumes it from where it hibernated; its start's nonce and its tokens' secrets come from the OS.
+    /// Starts the node of `object` (the deployment's `node`, or its keyed `member` for that host) from `start`: its
+    /// store (recovered, or created on its first start), or resumed from where it hibernated; its start's nonce and
+    /// its tokens' secrets come from the OS.
     pub(crate) fn open_node(
         &self,
         object: &str,
         node: String,
         member: Option<MemberRef>,
-        fs: Arc<dyn blossom_store::Vfs>,
-        now: blossom_value::time::Instant,
-        hibernation: Option<blossom_node::Hibernation>,
+        start: Start,
     ) -> Result<ObjectNode, RuntimeError> {
+        let Start {
+            fs,
+            now,
+            hibernation,
+            tree,
+        } = start;
         let mut nonce = [0u8; 8];
         crate::members::urandom(&mut nonce)?;
         let random: Random = Box::new(crate::members::urandom);
@@ -185,6 +199,7 @@ impl Deployment {
             random,
             externs: self.externs.clone(),
             hibernation,
+            tree,
         })
     }
 }

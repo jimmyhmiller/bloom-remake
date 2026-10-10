@@ -4,12 +4,13 @@
 mod blob;
 mod ckpt;
 mod clients;
-mod kvfs;
-pub mod lsm;
 pub mod conformance;
 pub mod crash;
+mod kvfs;
+pub mod lsm;
 mod meta;
 mod simfs;
+pub mod tree;
 mod vfs;
 mod wal;
 pub use blob::*;

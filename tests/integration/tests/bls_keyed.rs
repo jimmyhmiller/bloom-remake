@@ -297,6 +297,7 @@ fn a_host_is_not_run_as_a_node() {
         random: Box::new(|_| Ok(())),
         externs: Arc::new(blossom_std_host::registry().unwrap()),
         hibernation: None,
+        tree: None,
     });
     let err = match opened {
         Ok(_) => panic!("a host ran as a node"),

@@ -326,9 +326,17 @@ impl Objects {
                     None => None,
                 };
                 let fs = KvFs::open(kv.clone() as Arc<dyn KvStore>)?;
-                let mut node = self
-                    .deploy
-                    .open_node(object, node, member, Arc::new(fs), now, hibernation)?;
+                let mut node = self.deploy.open_node(
+                    object,
+                    node,
+                    member,
+                    super::deployment::Start {
+                        fs: Arc::new(fs),
+                        now,
+                        hibernation,
+                        tree: None,
+                    },
+                )?;
                 node.restore_links(s.links.clone())?;
                 Some(node)
             }
