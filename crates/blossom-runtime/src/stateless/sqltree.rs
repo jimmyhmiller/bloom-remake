@@ -91,6 +91,14 @@ impl TableMap {
                 .rels
                 .get(*rel)
                 .ok_or_else(|| blossom_base::internal_error!("no relation {rel:?}"))?;
+            // A client role's durable tables live in its pages (their storage), never at a node: no table.
+            if let blossom_ir::core::Placement::Role(r) = decl.placement
+                && p.roles
+                    .get(r)
+                    .is_some_and(|r| r.kind == blossom_ir::core::RoleKind::Client)
+            {
+                continue;
+            }
             let base = ident(&decl.name.to_string());
             let short: String = base.chars().take(40).collect();
             let name = format!("r_{short}_{}", hex(&tag));
@@ -218,8 +226,10 @@ fn sql_value(
         (SqlType::Numeric, Value::Mod(m)) => SqlValue::Numeric(m.to_string()),
         (SqlType::Real, Value::F64(x)) => SqlValue::Real(*x),
         (SqlType::Text, Value::Str(s) | Value::Principal(s)) => SqlValue::Text(s.to_string()),
-        (SqlType::Text, Value::Node(n)) => SqlValue::Text(node(*n)),
-        (SqlType::Text, Value::Member(m)) => SqlValue::Text(format!("{}/{}", m.role_name, m.key)),
+        // Nodes and members as Blossom writes them: `rooms`, `Browser#3@rooms`, `Room:"lunch"`.
+        (SqlType::Text, Value::Node(_) | Value::Member(_)) => {
+            SqlValue::Text(blossom_ir::printer::value_text(Some(p), v, Some(ty), node))
+        }
         (SqlType::Text, Value::Blob(b)) => SqlValue::Text(format!("{}:{}", b.hex(), b.len)),
         (SqlType::Bytes, Value::Bytes(b)) => SqlValue::Bytes(b.to_vec()),
         (SqlType::Json, _) => SqlValue::Json(json(p, v, Some(ty), node)),
@@ -283,8 +293,7 @@ fn json(
         Value::Bytes(b) => json_str(&hex(b)),
         Value::Duration(d) => d.0.to_string(),
         Value::Instant(i) => i.0.to_string(),
-        Value::Node(n) => json_str(&node(*n)),
-        Value::Member(m) => json_str(&format!("{}/{}", m.role_name, m.key)),
+        Value::Node(_) | Value::Member(_) => json_str(&blossom_ir::printer::value_text(Some(p), v, ty, node)),
         Value::Blob(b) => json_str(&format!("{}:{}", b.hex(), b.len)),
         Value::Option(None) => "null".into(),
         Value::Option(Some(x)) => {
