@@ -5,6 +5,8 @@
 #   DEPLOY  the deployment spec, relative to the repository (its program and stylesheet beside it)
 
 FROM rust:1.96.0-bookworm AS build
+# The SAT solver blossom links (CaDiCaL, through rustsat-cadical) generates its bindings with libclang.
+RUN apt-get update && apt-get install -y --no-install-recommends libclang-dev clang && rm -rf /var/lib/apt/lists/*
 # The page's wasm glue must be the version crates/blossom-web pins (scripts/build-web.sh checks).
 ARG WASM_BINDGEN=0.2.114
 ARG WASM_BINDGEN_SHA256=ce21be002bdbc22ede2a5cf250cb801d2106956fc3c529c75d9452729db3490c
