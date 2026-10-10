@@ -163,22 +163,13 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
         Ok(x) => x,
         Err(e) => return fail(e.to_string(), Exit::Internal),
     };
-    // The pages are a keyed role's members' when the deployment has one; else they link to its first node.
-    let node = match &args.node {
-        Some(n) => n.clone(),
-        None => {
-            let p = artifact.program.get();
-            let keyed = spec
-                .nodes
-                .iter()
-                .zip(&artifact.roles)
-                .find(|(_, r)| r.is_some_and(|r| p.is_keyed(r)))
-                .map(|(n, _)| n.name.clone());
-            match keyed.or_else(|| spec.nodes.first().map(|n| n.name.clone())) {
-                Some(n) => n,
-                None => return fail("the deployment has no nodes".into(), Exit::Refused),
-            }
-        }
+    let node = match args
+        .node
+        .clone()
+        .or_else(|| blossom_runtime::stateless::deployment::page_node(&spec, &artifact))
+    {
+        Some(n) => n,
+        None => return fail("the deployment has no nodes".into(), Exit::Refused),
     };
     let store = match open_store(&args.store) {
         Ok(s) => s,

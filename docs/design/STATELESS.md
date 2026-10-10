@@ -252,9 +252,12 @@ the receive loop sends the cursor it was last given (`?cursor=`). Both are ignor
 As on `blossom run` (CLIENTS.md §3a): the page closes it, the member opens another, the page does not take what the
 node sends (the replay buffer's bound), or no request reached it for 30 s. The last needs a clock that does not live
 in an instance: each request a session makes records the time in a side record (`presence/OBJECT/SESSION`, no
-version, last write wins, so receives still never conflict), and the object schedules a wake at the session's
-deadline. At the wake, a session whose presence is older than 30 s ends: the node hears `disconnected`. A session
-seen since is checked again at its new deadline.
+version, last write wins, so receives still never conflict). Who is here is settled when the object is asked: before
+a page's request on the object (and as a receive waits), a session whose check has come and whose presence is older
+than 30 s ends, and the node hears `disconnected`; a session seen since is checked again at its new deadline. So a
+page that went away without a word leaves at the next request in its room, with nothing else running (a function
+host, DEPLOY.md §1). The object also schedules a wake at the deadline, which `blossom serve`'s sweeper takes, so a room
+nobody asks settles too.
 
 ### 6.5 WebSockets
 

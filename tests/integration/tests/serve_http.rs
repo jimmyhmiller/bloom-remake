@@ -263,7 +263,7 @@ fn each_client_is_given_its_allowance_of_page_tokens() {
     assert_eq!(a.status, 429);
     let after: u64 = a.header("retry-after").unwrap().parse().unwrap();
     assert!((1..=20).contains(&after), "a token comes back every 20 s: {after}");
-    assert_eq!(h.stats.tokens_refused.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(h.front.tokens_refused(), 1);
     h.stop();
 
     // Behind a proxy: by the header it sets.

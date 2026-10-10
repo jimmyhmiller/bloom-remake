@@ -461,7 +461,8 @@ fn digest(parts: &[&[u8]]) -> [u8; 16] {
     out
 }
 
-fn parse_seed(hex: &str, what: &str) -> Result<Seed, RuntimeError> {
+/// A seed written as 32 hex digits; `what` names where it came from, for the error.
+pub fn parse_seed(hex: &str, what: &str) -> Result<Seed, RuntimeError> {
     let bad = || RuntimeError::Config(format!("{what} must be 32 hex digits"));
     let digits: Vec<u8> = hex
         .trim()

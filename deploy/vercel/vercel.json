@@ -1,8 +1,15 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "services": {
-    "blossom": { "root": ".", "entrypoint": "Dockerfile.vercel", "runtime": "container" }
-  },
-  "rewrites": [{ "source": "/(.*)", "destination": { "service": "blossom" } }],
-  "crons": [{ "path": "/blossom/wake", "schedule": "* * * * *" }]
+  "builds": [
+    {
+      "src": "crates/blossom-vercel/api/blossom.rs",
+      "use": "@vercel/rust",
+      "config": { "includeFiles": ["DEPLOY_DIR/**"] }
+    },
+    { "src": "web/**", "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/blossom/(.*)", "dest": "/crates/blossom-vercel/api/blossom.rs" },
+    { "src": "/(.*)", "dest": "/web/$1" }
+  ]
 }

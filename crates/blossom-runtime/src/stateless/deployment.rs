@@ -49,7 +49,38 @@ pub struct Deployment {
     clients: BTreeMap<String, Vec<u8>>,
 }
 
+/// The node whose pages a host serves by default: the deployment's first node of a keyed role, when it has one (the
+/// pages are its members'), else its first node.
+pub fn page_node(spec: &DeploymentSpec, artifact: &BlsArtifact) -> Option<String> {
+    let p = artifact.program.get();
+    let keyed = spec
+        .nodes
+        .iter()
+        .zip(&artifact.roles)
+        .find(|(_, r)| r.is_some_and(|r| p.is_keyed(r)))
+        .map(|(n, _)| n.name.clone());
+    keyed.or_else(|| spec.nodes.first().map(|n| n.name.clone()))
+}
+
 impl Deployment {
+    /// The timers of the deployment's nodes that fire when time passes (`every`, `once after`; not `once`, which
+    /// fires in a node's first tick), by name: a host that runs nothing between requests (a function platform) has
+    /// no clock to fire them by. A client role's timers are not among them: they run in its pages.
+    pub fn clocked_timers(&self) -> Vec<String> {
+        use blossom_ir::core::{EventSource, Placement, RelClass, RoleKind};
+        let p = self.artifact.program.get();
+        let at_a_node = |placement: &Placement| match placement {
+            Placement::Shared => true,
+            Placement::Role(r) => p.roles.get(*r).is_none_or(|role| role.kind != RoleKind::Client),
+        };
+        p.rels
+            .iter()
+            .filter(|r| matches!(&r.class, RelClass::Event(EventSource::Timer(t)) if !t.once))
+            .filter(|r| at_a_node(&r.placement))
+            .map(|r| r.name.to_string())
+            .collect()
+    }
+
     /// The deployment `spec`, its program compiled for its nodes, pages served for node `node`, their links over
     /// `transport` by default.
     pub fn new(

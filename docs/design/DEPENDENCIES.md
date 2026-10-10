@@ -88,3 +88,5 @@ Appended at each milestone gate from the `## New dependencies` sections of `docs
 | ureq (rustls) | 3.4.2 | MIT OR Apache-2.0 | blossom-statestore-s3 | the S3 store's HTTP client (STATELESS.md §4.3) | stateless |
 | hmac, sha2 | 0.12.1, 0.10.9 | MIT OR Apache-2.0 | blossom-statestore-s3 | AWS Signature Version 4, manifest and blob checksums | stateless |
 | signal-hook | 0.4.4 | MIT OR Apache-2.0 | blossom-cli | `blossom serve` drains on SIGTERM, as function and container platforms stop instances (DEPLOY.md §2); 0.4.5 was days old | deploy |
+| vercel_runtime | 2.4.1 | Apache-2.0 | blossom-vercel | Vercel's Rust runtime: its bridge hands the function each request (DEPLOY.md §3); brings hyper and tokio into that crate | deploy |
+| tokio (macros, rt-multi-thread), http-body-util | 1.53.2, 0.1 | MIT | blossom-vercel | the runtime's async handler; a request's body read within a limit | deploy |

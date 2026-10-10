@@ -2,6 +2,7 @@
 //! state store, served by hosts that keep nothing between requests.
 
 pub mod deployment;
+pub mod front;
 pub mod objects;
 pub mod serve;
 pub mod sqltree;

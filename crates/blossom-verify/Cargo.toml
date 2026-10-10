@@ -8,18 +8,13 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+# The law harness (laws.rs) is all the crate has yet; the solvers come with the checks that use them (M9.5, M10.4).
 blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-ir.workspace = true
 blossom-lattice.workspace = true
 blossom-oracle.workspace = true
 blossom-artifact.workspace = true
-blossom-analysis.workspace = true
-blossom-prov.workspace = true
-blossom-sim.workspace = true
-blossom-trace.workspace = true
-blossom-smt.workspace = true
-blossom-sat.workspace = true
 thiserror.workspace = true
 
 [lints]

@@ -29,7 +29,7 @@ use super::sqltree::{SqlTree, TREE_META_KEY, TableMap, TreeMeta};
 use crate::RuntimeError;
 use crate::object::{Cursor, LinkState, ObjectNode, Output, Received};
 
-/// How long a session lives with no request (CLIENTS.md §3a).
+/// How long a session lives with no request (CLIENTS.md §3a), unless [`Objects::with_lease`] says otherwise.
 pub const LEASE: Duration = Duration::from_secs(30);
 /// How long a receive waits for something to answer (CLIENTS.md §3a).
 pub const POLL_WAIT: Duration = Duration::from_secs(25);
@@ -226,6 +226,8 @@ pub struct Objects {
     slots: Mutex<Slots>,
     /// The deployment's tables, once created (a store with tables, docs/design/SQL-TABLES.md).
     tables: Mutex<Option<Arc<TableMap>>>,
+    /// How long a session lives with no request.
+    lease: Duration,
 }
 
 /// Milliseconds since the epoch of an instant.
@@ -277,7 +279,42 @@ impl Objects {
                 cap: DEFAULT_CACHE,
             }),
             tables: Mutex::new(None),
+            lease: LEASE,
         }
+    }
+
+    /// Sessions that make no request for `lease` end (tests shorten it).
+    pub fn with_lease(mut self, lease: Duration) -> Objects {
+        self.lease = lease;
+        self
+    }
+
+    fn lease_ms(&self) -> u64 {
+        u64::try_from(self.lease.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Who is here is settled when the object is asked (docs/design/STATELESS.md §6.4): before a page's request on
+    /// `object`, every session whose check has come ends if its page made no request for the lease, and is checked
+    /// again a lease after its last request if it did. Nothing else has to run for a page that went away without a
+    /// word to leave: the next request on its object sees to it. Until a check comes, this reads nothing more than
+    /// the request does.
+    fn settle_presence(&self, object: &str) -> Result<(), ServeError> {
+        if object == REGISTRY {
+            return Ok(());
+        }
+        let now_ms = ms_of(now()?);
+        let (_, slot) = self.current(object)?;
+        let due = lock(&slot)?.sessions.values().any(|s| s.check_at <= now_ms);
+        if due {
+            self.check_sessions(object, false)?;
+        }
+        Ok(())
+    }
+
+    /// The store's housekeeping (history below the floor, unreferenced blobs: `StateStore::maintain`), now.
+    pub fn maintain(&self) -> Result<(), ServeError> {
+        self.store.maintain(ms_of(now()?))?;
+        Ok(())
     }
 
     /// The deployment's tables, created on first use; `None` for a store without tables (S3), whose objects keep
@@ -680,6 +717,8 @@ impl Objects {
     ) -> Result<(Vec<Vec<u8>>, Cursor), ServeError> {
         let mut waited = Duration::ZERO;
         loop {
+            // A long wait settles presence as it goes: a page waiting in a room sees another leave.
+            self.settle_presence(object)?;
             let (version, slot) = self.current(object)?;
             let received = {
                 let s = lock(&slot)?;
@@ -710,6 +749,8 @@ impl Objects {
     /// `WELCOME` and the replay; or a `REJECT`), and, when the page was admitted, its session's connection, secret
     /// and cursor.
     pub fn open(&self, object: &str, hello: &[u8]) -> Result<Opened, ServeError> {
+        self.settle_presence(object)?;
+        let lease = self.lease_ms();
         let done = self.request(object, |ctx| {
             let now = ctx.now;
             let now_ms = ctx.now_ms;
@@ -724,7 +765,7 @@ impl Objects {
                 random_bytes(&mut secret)?;
                 let s = Session {
                     secret,
-                    check_at: now_ms + LEASE.as_millis() as u64,
+                    check_at: now_ms + lease,
                 };
                 ctx.put_session(conn, &s)?;
                 Some(s)
@@ -751,6 +792,7 @@ impl Objects {
 
     /// A page's frames (`MSG`s and `ACK`s) on its session.
     pub fn send(&self, object: &str, conn: u64, secret: &[u8; 16], frames: &[Vec<u8>]) -> Result<(), ServeError> {
+        self.settle_presence(object)?;
         {
             let (_, slot) = self.current(object)?;
             let s = lock(&slot)?;
@@ -772,6 +814,7 @@ impl Objects {
 
     /// The page is going: its session ends now.
     pub fn close(&self, object: &str, conn: u64, secret: &[u8; 16]) -> Result<(), ServeError> {
+        self.settle_presence(object)?;
         {
             let (_, slot) = self.current(object)?;
             let s = lock(&slot)?;
@@ -785,7 +828,7 @@ impl Objects {
         Ok(())
     }
 
-    /// The object's time came (a wake hint): sessions not seen for [`LEASE`] end, and the node's timers due run.
+    /// The object's time came (a wake hint): sessions not seen for the lease end, and the node's timers due run.
     pub fn wake(&self, object: &str) -> Result<(), ServeError> {
         self.check_sessions(object, false)
     }
@@ -799,10 +842,10 @@ impl Objects {
         if object == REGISTRY {
             return Ok(());
         }
+        let lease = self.lease_ms();
         self.request(object, |ctx| {
             let now = ctx.now;
             let now_ms = ctx.now_ms;
-            let lease = LEASE.as_millis() as u64;
             let due: Vec<(u64, Session)> = ctx
                 .kv
                 .list("H/s/")?

@@ -179,6 +179,11 @@ deps = ["blossom-base", "blossom-value", "blossom-lattice", "blossom-std-src", "
 # blossom-bench: slice 3 (docs/design/SLICES.md) — the kill -9 test drives `blossom run` processes with the workload.
 dev_deps = ["blossom-bench"]
 
+[crates.blossom-vercel]
+layer = "L5"
+# A deployment as a Vercel function (docs/design/DEPLOY.md §3): the stateless engine behind Vercel's Rust runtime.
+deps = ["blossom-base", "blossom-value", "blossom-front", "blossom-artifact", "blossom-driver", "blossom-verify", "blossom-std-host", "blossom-runtime", "blossom-statestore", "blossom-statestore-postgres", "blossom-statestore-s3"]
+
 [crates.blossom]
 layer = "L5"
 deps = ["blossom-base", "blossom-value", "blossom-node", "blossom-runtime", "blossom-std-host", "blossom-driver"]
