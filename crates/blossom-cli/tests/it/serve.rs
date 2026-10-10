@@ -50,7 +50,16 @@ fn a_host_only_a_scheduler_sweeps_needs_a_wake_secret() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("set BLOSSOM_WAKE_SECRET"));
 
     let out = serve(
-        &["--store", "memory:", "--web", "127.0.0.1:0", "--sweep", "off", "--wake-secret-env", "CRON_SECRET"],
+        &[
+            "--store",
+            "memory:",
+            "--web",
+            "127.0.0.1:0",
+            "--sweep",
+            "off",
+            "--wake-secret-env",
+            "CRON_SECRET",
+        ],
         &root,
     )
     .env("CRON_SECRET", "short")
@@ -82,6 +91,7 @@ fn get(port: u16, path: &str) -> (u16, String) {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // the test's own deadlines
 fn a_host_takes_its_port_and_store_from_the_environment_and_drains_on_sigterm() {
     let root = web_root("env");
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
@@ -94,8 +104,13 @@ fn a_host_takes_its_port_and_store_from_the_environment_and_drains_on_sigterm() 
         .spawn()
         .unwrap();
     let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
-    assert!(line.contains(&format!("serving the page on http://0.0.0.0:{port}/")), "{line}");
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(
+        line.contains(&format!("serving the page on http://0.0.0.0:{port}/")),
+        "{line}"
+    );
     assert!(line.contains("store memory:"), "{line}");
     assert_eq!(get(port, "/blossom/health"), (200, "ok".into()));
 
@@ -109,7 +124,10 @@ fn a_host_takes_its_port_and_store_from_the_environment_and_drains_on_sigterm() 
         if let Some(s) = child.try_wait().unwrap() {
             break s;
         }
-        assert!(started.elapsed() < Duration::from_secs(10), "still running after SIGTERM");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "still running after SIGTERM"
+        );
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(status.code(), Some(0));

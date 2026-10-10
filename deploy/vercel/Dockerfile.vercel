@@ -1,0 +1,33 @@
+# A Blossom deployment as a Vercel container function (docs/design/DEPLOY.md §3): `blossom serve` over the state store
+# `BLOSSOM_STORE` names, with the page it serves. scripts/deploy-vercel.sh builds the context (the repository at a
+# commit) and deploys it; this file only says how the image is made.
+#
+#   DEPLOY  the deployment spec, relative to the repository (its program and stylesheet beside it)
+
+FROM rust:1.96.0-bookworm AS build
+# The page's wasm glue must be the version crates/blossom-web pins (scripts/build-web.sh checks).
+ARG WASM_BINDGEN=0.2.114
+ARG WASM_BINDGEN_SHA256=ce21be002bdbc22ede2a5cf250cb801d2106956fc3c529c75d9452729db3490c
+RUN curl -sSfL -o /tmp/wb.tgz \
+      "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN}/wasm-bindgen-${WASM_BINDGEN}-x86_64-unknown-linux-musl.tar.gz" \
+ && echo "${WASM_BINDGEN_SHA256}  /tmp/wb.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/wb.tgz -C /tmp \
+ && install "/tmp/wasm-bindgen-${WASM_BINDGEN}-x86_64-unknown-linux-musl/wasm-bindgen" /usr/local/bin/ \
+ && rm -rf /tmp/wb.tgz /tmp/wasm-bindgen-*
+WORKDIR /src
+COPY . .
+# The image's compiler is the one rust-toolchain.toml pins; the page needs its wasm target too.
+RUN rustup target add wasm32-unknown-unknown && rustup component add rustfmt clippy
+RUN cargo build --release --locked -p blossom-cli --bin blossom
+RUN scripts/build-web.sh
+
+FROM debian:bookworm-slim
+ARG DEPLOY=examples/web/keyed_chat.deploy.toml
+COPY --from=build /src/target/release/blossom /usr/local/bin/blossom
+COPY --from=build /src/web /app/web
+COPY --from=build /src/examples /app/examples
+WORKDIR /app
+ENV BLOSSOM_DEPLOY=${DEPLOY}
+# Vercel freezes an instance between requests, so its own sweeper runs only while it serves; Vercel's cron job calls
+# /blossom/wake every minute with `Authorization: Bearer $CRON_SECRET` for the rest. Vercel's proxy sets x-real-ip.
+CMD ["sh", "-c", "exec blossom serve --deploy \"$BLOSSOM_DEPLOY\" --web-root web --sweep 1000 --wake-secret-env CRON_SECRET --client-ip-header x-real-ip"]

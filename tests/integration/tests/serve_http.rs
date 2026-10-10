@@ -53,7 +53,8 @@ fn config() -> ServeConfig {
         web_root: None,
         style: None,
         sweep: None,
-        report: Arc::new(|m: &str| eprintln!("serve: {m}")),
+        // What a host reports goes nowhere: each test reads the answers it gets.
+        report: Arc::new(|_: &str| {}),
         wake_secret: Some(SECRET.into()),
         max_connections: 64,
         client: ClientAddr::Peer,
@@ -126,7 +127,8 @@ fn call(addr: SocketAddr, method: &str, path: &str, headers: &[(&str, &str)]) ->
 fn kept(addr: SocketAddr) -> BufReader<TcpStream> {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
-    s.write_all(b"GET /blossom/health HTTP/1.1\r\nHost: test\r\n\r\n").unwrap();
+    s.write_all(b"GET /blossom/health HTTP/1.1\r\nHost: test\r\n\r\n")
+        .unwrap();
     let mut r = BufReader::new(s);
     assert_eq!(read_answer(&mut r).status, 200);
     r
@@ -134,6 +136,7 @@ fn kept(addr: SocketAddr) -> BufReader<TcpStream> {
 
 /// Waits until `f` holds, for at most `limit`.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // the test's own deadlines
 fn until(limit: Duration, mut f: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + limit;
     while Instant::now() < end {
@@ -150,12 +153,22 @@ fn wake_is_only_for_a_caller_with_the_secret() {
     let h = host(Arc::new(MemStore::new()), config());
     assert_eq!(call(h.addr, "GET", "/blossom/wake", &[]).status, 401);
     assert_eq!(
-        call(h.addr, "GET", "/blossom/wake", &[("Authorization", "Bearer not-the-secret")]).status,
+        call(
+            h.addr,
+            "GET",
+            "/blossom/wake",
+            &[("Authorization", "Bearer not-the-secret")]
+        )
+        .status,
         401
     );
-    let prefix = &SECRET[..SECRET.len() - 1];
+    // All but its last character: a guess that matches almost all of it.
+    let prefix = SECRET.strip_suffix('h').unwrap();
     let shown = format!("Bearer {prefix}");
-    assert_eq!(call(h.addr, "GET", "/blossom/wake", &[("Authorization", &shown)]).status, 401);
+    assert_eq!(
+        call(h.addr, "GET", "/blossom/wake", &[("Authorization", &shown)]).status,
+        401
+    );
     let shown = format!("Bearer {SECRET}");
     for method in ["GET", "POST"] {
         let a = call(h.addr, method, "/blossom/wake", &[("Authorization", &shown)]);
@@ -173,7 +186,10 @@ fn wake_is_only_for_a_caller_with_the_secret() {
             ..config()
         },
     );
-    assert_eq!(call(h.addr, "POST", "/blossom/wake", &[("Authorization", &shown)]).status, 403);
+    assert_eq!(
+        call(h.addr, "POST", "/blossom/wake", &[("Authorization", &shown)]).status,
+        403
+    );
     h.stop();
 }
 
@@ -287,7 +303,10 @@ fn a_host_serves_at_most_its_connections_at_once() {
     let a = kept(h.addr);
     let _b = kept(h.addr);
     let third = call(h.addr, "GET", "/blossom/health", &[]);
-    assert_eq!((third.status, third.body.as_slice()), (503, b"too many connections".as_slice()));
+    assert_eq!(
+        (third.status, third.body.as_slice()),
+        (503, b"too many connections".as_slice())
+    );
     assert_eq!(h.stats.turned_away.load(std::sync::atomic::Ordering::Relaxed), 1);
     drop(a);
     assert!(until(Duration::from_secs(5), || h.connections() == 1));
@@ -296,6 +315,7 @@ fn a_host_serves_at_most_its_connections_at_once() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // the test's own deadlines
 fn a_drain_closes_idle_connections_at_once_and_takes_no_new_ones() {
     let h = host(Arc::new(MemStore::new()), config());
     let addr = h.addr;
@@ -305,6 +325,10 @@ fn a_drain_closes_idle_connections_at_once_and_takes_no_new_ones() {
     // Well before the connection's idle limit (75 s): at the host's next look.
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     let mut rest = Vec::new();
-    assert_eq!(idle.read_to_end(&mut rest).unwrap(), 0, "the idle connection was closed");
+    assert_eq!(
+        idle.read_to_end(&mut rest).unwrap(),
+        0,
+        "the idle connection was closed"
+    );
     assert!(TcpStream::connect(addr).is_err(), "a drained host takes no connections");
 }

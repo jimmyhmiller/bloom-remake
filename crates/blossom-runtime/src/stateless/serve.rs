@@ -11,7 +11,7 @@
 //! The HTTP server is the hand-written one of `blossom run` (crate::web): HTTP/1.1 with keep-alive, a thread per
 //! connection.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -115,9 +115,9 @@ impl Serving {
     /// every request's effect is committed before it is answered.
     pub fn drain(mut self, grace: Duration) -> bool {
         self.halt();
-        let until = Instant::now() + grace;
+        let until = crate::clock::host_monotonic() + grace;
         while self.active.load(Ordering::Relaxed) > 0 {
-            if Instant::now() >= until {
+            if crate::clock::host_monotonic() >= until {
                 return false;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -158,7 +158,7 @@ struct Ctx {
 /// rate.
 struct Allowances {
     per_minute: u32,
-    buckets: Mutex<HashMap<String, (f64, Instant)>>,
+    buckets: Mutex<BTreeMap<String, (f64, Instant)>>,
 }
 
 impl Allowances {
@@ -220,7 +220,7 @@ pub fn serve(objects: Arc<Objects>, cfg: ServeConfig) -> Result<Serving, Runtime
         client: cfg.client,
         tokens: Allowances {
             per_minute: cfg.tokens_per_minute,
-            buckets: Mutex::new(HashMap::new()),
+            buckets: Mutex::new(BTreeMap::new()),
         },
         stop: stop.clone(),
         active: active.clone(),
@@ -319,7 +319,7 @@ fn quiet(e: &RuntimeError) -> bool {
 /// Waits for a connection's next request: whether one is coming. A connection idle for [`IDLE`], or idle while the
 /// host drains, is closed; one whose request has begun is served.
 fn next_request(reader: &mut BufReader<TcpStream>, ctx: &Ctx) -> Result<bool, RuntimeError> {
-    let until = Instant::now() + IDLE;
+    let until = crate::clock::host_monotonic() + IDLE;
     reader
         .get_ref()
         .set_read_timeout(Some(DRAIN_CHECK))
@@ -331,7 +331,7 @@ fn next_request(reader: &mut BufReader<TcpStream>, ctx: &Ctx) -> Result<bool, Ru
         match reader.fill_buf() {
             Ok(b) => break !b.is_empty(),
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-                if Instant::now() >= until {
+                if crate::clock::host_monotonic() >= until {
                     break false;
                 }
             }
@@ -340,7 +340,10 @@ fn next_request(reader: &mut BufReader<TcpStream>, ctx: &Ctx) -> Result<bool, Ru
         }
     };
     // The request itself may take its time between bytes, up to IDLE.
-    reader.get_ref().set_read_timeout(Some(IDLE)).map_err(RuntimeError::Io)?;
+    reader
+        .get_ref()
+        .set_read_timeout(Some(IDLE))
+        .map_err(RuntimeError::Io)?;
     Ok(coming)
 }
 
@@ -474,7 +477,10 @@ fn request(
                 )
                 .write(w, keep);
             };
-            if let Err(wait) = ctx.tokens.take(&client_of(req, peer, &ctx.client), Instant::now()) {
+            if let Err(wait) = ctx
+                .tokens
+                .take(&client_of(req, peer, &ctx.client), crate::clock::host_monotonic())
+            {
                 ctx.stats.tokens_refused.fetch_add(1, Ordering::Relaxed);
                 let after = wait.as_secs().max(1).to_string();
                 return Response {
