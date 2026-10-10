@@ -550,7 +550,7 @@ impl Sst {
 }
 
 /// The smallest byte string greater than every one starting with `prefix` (`None`: there is none).
-fn successor(prefix: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn successor(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut out = prefix.to_vec();
     while let Some(last) = out.pop() {
         if last < 0xff {
@@ -791,13 +791,18 @@ struct State {
 }
 
 /// What a flush or compaction left durable: the version and mark the tables cover.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Flushed {
     version: Option<u64>,
     mark: u64,
 }
 
 impl Flushed {
+    /// What a tree other than this one reports covering (`crate::tree::KeyTree`).
+    pub fn at(version: Option<u64>, mark: u64) -> Flushed {
+        Flushed { version, mark }
+    }
+
     /// Every version at or below this one is in the tables (`None`: no version is).
     pub fn version(&self) -> Option<u64> {
         self.version
@@ -1542,6 +1547,54 @@ impl<I: Iterator<Item = Result<Entry, StoreError>>> Iterator for Gc<I> {
             }
             return Some(Ok(e));
         }
+    }
+}
+
+impl crate::tree::KeyTree for Lsm {
+    fn key_format(&self) -> Result<Option<u32>, StoreError> {
+        manifest_format(&*self.fs, &self.dir)
+    }
+    fn applied(&self) -> Result<Option<u64>, StoreError> {
+        Lsm::applied(self)
+    }
+    fn apply(&self, version: u64, mark: u64, changes: Vec<(Vec<u8>, Op)>) -> Result<(), StoreError> {
+        Lsm::apply(self, version, mark, changes)
+    }
+    fn amend(&self, changes: Vec<(Vec<u8>, Op)>) -> Result<(), StoreError> {
+        Lsm::amend(self, changes)
+    }
+    fn needs_flush(&self) -> Result<bool, StoreError> {
+        Lsm::needs_flush(self)
+    }
+    fn flush(&self) -> Result<Flushed, StoreError> {
+        Lsm::flush(self)
+    }
+    fn flushed(&self) -> Result<Flushed, StoreError> {
+        Lsm::flushed(self)
+    }
+    fn compact(&self) -> Result<bool, StoreError> {
+        Lsm::compact(self)
+    }
+    fn floor(&self) -> Result<u64, StoreError> {
+        Lsm::floor(self)
+    }
+    fn raise_floor(&self, version: u64) -> Result<(), StoreError> {
+        Lsm::raise_floor(self, version)
+    }
+    fn get(&self, key: &[u8], as_of: u64) -> Result<bool, StoreError> {
+        Lsm::get(self, key, as_of)
+    }
+    fn scan(&self, prefix: &[u8], as_of: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        Lsm::scan(self, prefix, as_of)
+    }
+    fn scan_range(&self, start: &[u8], end: Option<&[u8]>, as_of: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        Lsm::scan_range(self, start, end, as_of)
+    }
+    fn scan_page(&self, start: &[u8], end: Option<&[u8]>, as_of: u64, keys: usize) -> Result<Page, StoreError> {
+        Lsm::scan_page(self, start, end, as_of, keys)
+    }
+    fn info(&self) -> Result<TreeInfo, StoreError> {
+        Lsm::info(self)
     }
 }
 

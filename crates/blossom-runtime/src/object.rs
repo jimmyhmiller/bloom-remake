@@ -102,6 +102,9 @@ pub struct ObjectConfig {
     /// The node's state when it last hibernated (a stateless host, docs/design/STATELESS.md §5a): it resumes from it
     /// instead of starting again. `None`: it starts (a fresh store, or a restart).
     pub hibernation: Option<blossom_node::Hibernation>,
+    /// The tree the node's database keeps its rows in, when not the LSM under its store (SQL tables,
+    /// docs/design/SQL-TABLES.md).
+    pub tree: Option<Box<dyn blossom_store::tree::KeyTree>>,
 }
 
 /// A connection's frames, queued for the host.
@@ -415,7 +418,7 @@ impl ObjectNode {
         // A store that does not exist yet is created: an object's first start.
         let fresh = cfg.fs.list(&cfg.dir).map_or(true, |entries| entries.is_empty());
         cfg.fs.create_dir_all(&cfg.dir)?;
-        let opened = recovery::open(
+        let opened = recovery::open_with(
             cfg.fs.clone(),
             &StoreSpec {
                 dir: cfg.dir.clone(),
@@ -427,6 +430,7 @@ impl ObjectNode {
                     ..blossom_store::lsm::LsmOptions::default()
                 },
             },
+            cfg.tree,
             &artifact.program,
             names.clone(),
             cfg.now,

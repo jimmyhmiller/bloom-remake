@@ -164,10 +164,17 @@ impl FileCheckpoints {
         };
         let m = self.manifest(id)?;
         let base_tick = m.base.unwrap_or(id.tick);
-        let base = if m.base.is_some() { self.manifest_at(base_tick)? } else { m.clone() };
+        let base = if m.base.is_some() {
+            self.manifest_at(base_tick)?
+        } else {
+            m.clone()
+        };
         let mut base_bytes = 0u64;
         for (rel, _) in &base.files {
-            let f = self.fs.open(&self.path(base_tick).join(format!("rel-{rel}.dat")), OpenOpts::default())?;
+            let f = self.fs.open(
+                &self.path(base_tick).join(format!("rel-{rel}.dat")),
+                OpenOpts::default(),
+            )?;
             base_bytes = base_bytes.saturating_add(f.len()?);
         }
         Ok(Some(ChainInfo {

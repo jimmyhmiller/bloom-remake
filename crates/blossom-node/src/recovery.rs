@@ -232,6 +232,20 @@ pub fn open(
     wall: Instant,
     boot_nonce: u64,
 ) -> Result<Opened, NodeError> {
+    open_with(fs, spec, None, program, names, wall, boot_nonce)
+}
+
+/// [`open`], the database on `tree` instead of the LSM under the store (docs/design/SQL-TABLES.md): its rows live
+/// elsewhere, and the store holds the rest (META, the WAL, blobs).
+pub fn open_with(
+    fs: Arc<dyn Vfs>,
+    spec: &StoreSpec,
+    tree: Option<Box<dyn blossom_store::tree::KeyTree>>,
+    program: &ValidatedProgram,
+    names: Arc<[Arc<str>]>,
+    wall: Instant,
+    boot_nonce: u64,
+) -> Result<Opened, NodeError> {
     let dir = spec.dir.as_path();
     // 1. Lock, then identity.
     if spec.mode == OpenMode::InitFresh {
@@ -270,7 +284,10 @@ pub fn open(
     let codec = DurableCodec::new(program.get(), &schema, names.clone());
     // 2. The database: the rows its tables hold, as of the tick they cover. A store from before the database (none,
     //    or one of an older key format) starts from its checkpoint chain, once.
-    let (database, fresh) = Database::open(fs.clone(), dir, program, names, spec.database)?;
+    let (database, fresh) = match tree {
+        Some(tree) => Database::open_on(tree, program, names)?,
+        None => Database::open(fs.clone(), dir, program, names, spec.database)?,
+    };
     let database = Arc::new(database);
     let legacy = if fresh {
         FileCheckpoints::from_existing(fs.clone(), dir).current()?

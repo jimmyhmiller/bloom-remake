@@ -13,6 +13,7 @@ use blossom_base::RelId;
 use blossom_ir::ValidatedProgram;
 use blossom_oracle::Row;
 use blossom_store::lsm::{Flushed, Lsm, LsmOptions, Op};
+use blossom_store::tree::KeyTree;
 use blossom_store::{StoreError, Vfs, WalScan};
 use blossom_value::BlobRef;
 
@@ -131,7 +132,8 @@ fn clear(fs: &dyn Vfs, db_dir: &Path) -> Result<(), NodeError> {
 /// It is the cold side of the engine's tiered tables (`blossom_engine::ColdTables`): their probes read it at its
 /// newest applied version.
 pub struct Database {
-    lsm: Lsm,
+    /// The versioned keys: an LSM under the store, or another tree (docs/design/SQL-TABLES.md).
+    tree: Box<dyn KeyTree>,
     program: ValidatedProgram,
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,
@@ -176,19 +178,41 @@ impl Database {
                 ..opts
             },
         )?;
-        let db = Database::with(lsm, program, names, false)?;
+        let db = Database::with(Box::new(lsm), program, names, false)?;
+        db.keep_blobs()?;
+        Ok((db, fresh))
+    }
+
+    /// Opens a database on `tree` (one that is not the store's LSM: docs/design/SQL-TABLES.md), for `program` and the
+    /// deployment's node names. `fresh`: whether it held nothing yet. A tree of another key format is refused (one is
+    /// not rebuilt in place).
+    pub fn open_on(
+        tree: Box<dyn KeyTree>,
+        program: &ValidatedProgram,
+        names: Arc<[Arc<str>]>,
+    ) -> Result<(Database, bool), NodeError> {
+        let fresh = match tree.key_format()? {
+            None => true,
+            Some(KEY_FORMAT) => false,
+            Some(f) => {
+                return Err(NodeError::Store(format!(
+                    "the database's tree holds keys of format {f}; this build writes format {KEY_FORMAT}"
+                )));
+            }
+        };
+        let db = Database::with(tree, program, names, false)?;
         db.keep_blobs()?;
         Ok((db, fresh))
     }
 
     fn with(
-        lsm: Lsm,
+        tree: Box<dyn KeyTree>,
         program: &ValidatedProgram,
         names: Arc<[Arc<str>]>,
         read_only: bool,
     ) -> Result<Database, NodeError> {
         let mut db = Database {
-            lsm,
+            tree,
             schema: DurableSchema::of(program.get()),
             program: program.clone(),
             names,
@@ -216,12 +240,12 @@ impl Database {
     /// Reads the derived keyspaces' definitions (those of relations this program has no more are left alone: no
     /// apply keeps them, nor their relation's rows).
     fn load_definitions(&self) -> Result<(), NodeError> {
-        let Some(at) = self.lsm.applied()? else {
+        let Some(at) = self.tree.applied()? else {
             return Ok(());
         };
         let tag = defs_tag();
         let mut d = self.derived()?;
-        for key in self.lsm.scan(&tag, at)? {
+        for key in self.tree.scan(&tag, at)? {
             let body = key.get(tag.len()..).unwrap_or_default();
             match body.split_first() {
                 Some((&DEF_BLOBS, [])) => d.blobs = true,
@@ -271,7 +295,7 @@ impl Database {
         }
         let mut def = defs_tag().to_vec();
         def.push(DEF_BLOBS);
-        let Some(at) = self.lsm.applied()? else {
+        let Some(at) = self.tree.applied()? else {
             d.blobs = true;
             d.unwritten.push(def);
             return Ok(());
@@ -288,7 +312,7 @@ impl Database {
             })?;
         }
         changes.push((def, Op::Put));
-        self.lsm.amend(changes)?;
+        self.tree.amend(changes)?;
         d.blobs = true;
         Ok(())
     }
@@ -332,7 +356,7 @@ impl Database {
     ) -> Result<(), NodeError> {
         let mut from = start.to_vec();
         loop {
-            let page = self.lsm.scan_page(&from, end, at, PAGE_KEYS)?;
+            let page = self.tree.scan_page(&from, end, at, PAGE_KEYS)?;
             for key in &page.keys {
                 each(key)?;
             }
@@ -359,7 +383,7 @@ impl Database {
         def.push(DEF_INDEX);
         def.extend_from_slice(&rel_tag);
         def.extend_from_slice(&cols_bytes(cols)?);
-        match self.lsm.applied()? {
+        match self.tree.applied()? {
             None => d.unwritten.push(def),
             Some(at) => {
                 let tag = index_tag(&rel_tag, cols)?;
@@ -369,7 +393,7 @@ impl Database {
                     Ok(())
                 })?;
                 changes.push((def, Op::Put));
-                self.lsm.amend(changes)?;
+                self.tree.amend(changes)?;
             }
         }
         d.indexes.entry(rel).or_default().insert(cols.to_vec());
@@ -428,7 +452,7 @@ impl Database {
                 ..LsmOptions::default()
             },
         )?;
-        let db = Database::with(lsm, program, names, true)?;
+        let db = Database::with(Box::new(lsm), program, names, true)?;
         let scan = WalScan::scan(&*fs, &crate::recovery::wal_dir(dir), uuid, false)?;
         let codec = db.codec();
         let after = db.flushed()?;
@@ -459,8 +483,8 @@ impl Database {
             }
         }
         changes.extend(d.unwritten.drain(..).map(|k| (k, Op::Put)));
-        self.lsm.apply(tick, tick, changes)?;
-        Ok(self.lsm.raise_floor(tick)?)
+        self.tree.apply(tick, tick, changes)?;
+        Ok(self.tree.raise_floor(tick)?)
     }
 
     /// Applies a released tick's durable delta (none: the tick changed no durable row).
@@ -529,30 +553,30 @@ impl Database {
             }
         }
         changes.extend(d.unwritten.drain(..).map(|k| (k, Op::Put)));
-        Ok(self.lsm.apply(tick, tick, changes)?)
+        Ok(self.tree.apply(tick, tick, changes)?)
     }
 
     /// Whether the memtable has grown past its size.
     pub fn needs_flush(&self) -> Result<bool, NodeError> {
-        Ok(self.lsm.needs_flush()?)
+        Ok(self.tree.needs_flush()?)
     }
 
     /// Writes the memtable to the tables and compacts what is due: what the tables now cover (the WAL may truncate
     /// behind it).
     pub fn flush(&self) -> Result<Flushed, NodeError> {
-        let flushed = self.lsm.flush()?;
-        while self.lsm.compact()? {}
+        let flushed = self.tree.flush()?;
+        while self.tree.compact()? {}
         Ok(flushed)
     }
 
     /// The tick every tick up to which is in the tables (`None`: none is).
     pub fn flushed(&self) -> Result<Option<u64>, NodeError> {
-        Ok(self.lsm.flushed()?.version())
+        Ok(self.tree.flushed()?.version())
     }
 
     /// The oldest tick an as-of read may ask for, and the newest applied (`None`: none yet).
     pub fn range(&self) -> Result<(u64, Option<u64>), NodeError> {
-        Ok((self.lsm.floor()?, self.lsm.applied()?))
+        Ok((self.tree.floor()?, self.tree.applied()?))
     }
 
     /// The rows of the durable relation `rel` whose leading columns are `leading`, as of `tick`.
@@ -560,7 +584,7 @@ impl Database {
         let codec = self.codec();
         let prefix = codec.key_prefix(rel, leading)?;
         let mut out = Vec::new();
-        for key in self.lsm.scan(&prefix, tick)? {
+        for key in self.tree.scan(&prefix, tick)? {
             out.push(codec.key_row(rel, &key)?);
         }
         Ok(out)
@@ -579,7 +603,7 @@ impl Database {
         let codec = self.codec();
         let (start, end) = codec.key_range(rel, leading, lo, hi)?;
         let mut out = Vec::new();
-        for key in self.lsm.scan_range(&start, end.as_deref(), tick)? {
+        for key in self.tree.scan_range(&start, end.as_deref(), tick)? {
             out.push(codec.key_row(rel, &key)?);
         }
         Ok(out)
@@ -588,7 +612,7 @@ impl Database {
     /// Whether `rel` holds a row led by `principal` as of the newest tick applied (an ACL's `principal in REL`, read
     /// by prefix).
     pub fn committed(&self, rel: RelId, principal: &str) -> Result<bool, NodeError> {
-        let Some(tick) = self.lsm.applied()? else {
+        let Some(tick) = self.tree.applied()? else {
             return Ok(false);
         };
         let lead = [blossom_value::Value::Principal(Arc::from(principal))];
@@ -597,7 +621,7 @@ impl Database {
 
     /// Every durable relation's rows as of the newest tick applied (none applied: none).
     pub fn latest_image(&self) -> Result<DurableImage, NodeError> {
-        match self.lsm.applied()? {
+        match self.tree.applied()? {
             Some(t) => self.image(t),
             None => Ok(DurableImage::default()),
         }
@@ -617,7 +641,7 @@ impl Database {
 
     /// What the tree holds (tables, versions, floor), for tools and tests.
     pub fn info(&self) -> Result<blossom_store::lsm::TreeInfo, NodeError> {
-        Ok(self.lsm.info()?)
+        Ok(self.tree.info()?)
     }
 
     /// The durable relations: id and name.
@@ -649,7 +673,7 @@ impl Database {
     /// database counts its carried rows' blobs from the blob keyspaces, a page at a time).
     pub fn blob_counts(&self) -> Result<BTreeMap<BlobRef, u64>, NodeError> {
         let mut out = BTreeMap::new();
-        let Some(at) = self.lsm.applied()? else {
+        let Some(at) = self.tree.applied()? else {
             return Ok(out);
         };
         if !self.derived()?.blobs {
@@ -694,7 +718,7 @@ impl Database {
             }
         };
         let all: Vec<usize> = (0..row.len()).collect();
-        if !self.lsm.get(&codec.tagged_key(&tag, rel, &all, row)?, at)? {
+        if !self.tree.get(&codec.tagged_key(&tag, rel, &all, row)?, at)? {
             return Ok(0);
         }
         let Some(counts) = counts else {
@@ -705,7 +729,7 @@ impl Database {
         // Pages until a live key: an older count's key, deleted, sorts among them.
         let mut from = prefix.clone();
         loop {
-            let page = self.lsm.scan_page(&from, end.as_deref(), at, PAGE_KEYS)?;
+            let page = self.tree.scan_page(&from, end.as_deref(), at, PAGE_KEYS)?;
             if let Some(key) = page.keys.first() {
                 return key
                     .get(prefix.len()..)
@@ -768,7 +792,7 @@ impl Database {
         loop {
             // With a bound, a page no larger than what proves it passed.
             let keys = max.map_or(PAGE_KEYS, |m| (m + 1).saturating_sub(out.len()).clamp(1, PAGE_KEYS));
-            let page = self.lsm.scan_page(&from, end, at, keys)?;
+            let page = self.tree.scan_page(&from, end, at, keys)?;
             if max.is_some_and(|m| out.len() + page.keys.len() > m) {
                 return Ok(None);
             }
@@ -800,7 +824,7 @@ impl Database {
         let mut more = false;
         loop {
             let page = self
-                .lsm
+                .tree
                 .scan_page(&from, end.as_deref(), at, n.saturating_add(1).min(PAGE_KEYS))?;
             keys.extend(page.keys);
             if keys.len() > n {
@@ -834,7 +858,7 @@ impl Database {
         let tag: Vec<u8> = if cols.iter().enumerate().all(|(i, c)| i == *c) {
             rel_tag.to_vec()
         } else {
-            if self.lsm.applied()? != Some(at) {
+            if self.tree.applied()? != Some(at) {
                 return Err(
                     blossom_base::internal_error!("an index probe as of version {at}, not the newest applied").into(),
                 );
@@ -871,7 +895,7 @@ impl Database {
                     key_cols.push(col);
                 }
                 // An index answers only as of the version it was built at or after: probes read the newest.
-                if self.lsm.applied()? != Some(at) {
+                if self.tree.applied()? != Some(at) {
                     return Err(blossom_base::internal_error!(
                         "an index probe as of version {at}, not the newest applied"
                     )
@@ -907,7 +931,7 @@ fn storage(e: NodeError) -> blossom_ir::tick::EvalError {
 
 impl blossom_engine::ColdTables for Database {
     fn version(&self) -> Result<Option<u64>, blossom_ir::tick::EvalError> {
-        self.lsm.applied().map_err(|e| storage(e.into()))
+        self.tree.applied().map_err(|e| storage(e.into()))
     }
 
     fn tables(&self) -> Vec<RelId> {
@@ -919,7 +943,7 @@ impl blossom_engine::ColdTables for Database {
         let tag = self.tag_of(&codec, rel).map_err(storage)?;
         let all: Vec<usize> = (0..row.len()).collect();
         let key = codec.tagged_key(&tag, rel, &all, row).map_err(storage)?;
-        self.lsm.get(&key, at).map_err(|e| storage(e.into()))
+        self.tree.get(&key, at).map_err(|e| storage(e.into()))
     }
 
     fn support(&self, rel: RelId, row: &Row, at: u64) -> Result<u64, blossom_ir::tick::EvalError> {

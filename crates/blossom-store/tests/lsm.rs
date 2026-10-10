@@ -366,3 +366,22 @@ fn verify_finds_a_damaged_block() {
     let reopened = Lsm::open(fs, dir, opts()).unwrap();
     assert!(reopened.verify().is_err());
 }
+
+#[test]
+fn the_lsm_and_the_memory_tree_hold_to_the_tree_model() {
+    use blossom_store::tree::{KeyTree, MemTree, tree_suite};
+    use std::sync::Arc;
+    blossom_store::tree::tree_suite(&MemTree::new(1), None).unwrap();
+    let fs: Arc<dyn blossom_store::Vfs> = Arc::new(blossom_store::SimFs::default());
+    let dir = std::path::Path::new("/tree");
+    let opts = blossom_store::lsm::LsmOptions {
+        format: 1,
+        memtable_bytes: 64,
+        ..Default::default()
+    };
+    let lsm = blossom_store::lsm::Lsm::open(fs.clone(), dir, opts).unwrap();
+    let reopen = || -> Result<Box<dyn KeyTree>, blossom_store::StoreError> {
+        Ok(Box::new(blossom_store::lsm::Lsm::open(fs.clone(), dir, opts)?))
+    };
+    tree_suite(&lsm, Some(&reopen)).unwrap();
+}
