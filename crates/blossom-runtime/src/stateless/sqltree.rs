@@ -43,8 +43,13 @@ pub struct TableMap {
     program: ValidatedProgram,
     schema: DurableSchema,
     names: Arc<[Arc<str>]>,
+    /// The deployment the tables are of (a store holds one deployment's).
+    deployment: String,
     by_tag: BTreeMap<[u8; 8], RelTable>,
     defs: Vec<TableDef>,
+    /// The durable views' tables, by the view's definition: made when a node first opens the view (its keyspace's
+    /// tag is the database's, not the program's).
+    views: Mutex<BTreeMap<[u8; 32], RelTable>>,
 }
 
 /// An identifier from a Blossom name: ASCII letters, digits and `_`, every other byte `_`, not first a digit.
@@ -78,7 +83,7 @@ fn sql_type(types: &TypeTable, ty: TypeId) -> SqlType {
 
 impl TableMap {
     /// The tables of `program`'s durable relations, for a deployment whose node names are `names`.
-    pub fn of(program: &ValidatedProgram, names: Arc<[Arc<str>]>) -> Result<TableMap, RuntimeError> {
+    pub fn of(program: &ValidatedProgram, names: Arc<[Arc<str>]>, deployment: &str) -> Result<TableMap, RuntimeError> {
         let p = program.get();
         let schema = DurableSchema::of(p);
         let codec = DurableCodec::new(p, &schema, names.clone());
@@ -112,45 +117,68 @@ impl TableMap {
                 view = format!("{}_{}", view.chars().take(44).collect::<String>(), hex(&tag));
                 views.insert(view.clone());
             }
-            let mut columns: Vec<(String, SqlType)> = Vec::new();
-            let mut types = Vec::new();
-            let mut sql = Vec::new();
-            for (i, col) in decl.schema.cols.iter().enumerate() {
-                let mut c = ident(&col.name.to_string());
-                while SYSTEM_COLUMNS.contains(&c.as_str()) || columns.iter().any(|(n, _)| *n == c) {
-                    c.push('_');
-                }
-                if c.len() > 63 {
-                    c = format!("c{i}");
-                }
-                let t = sql_type(&p.types, col.ty);
-                columns.push((c, t));
-                types.push(col.ty);
-                sql.push(t);
-            }
-            defs.push(TableDef {
-                name: name.clone(),
-                view: Some(view),
-                columns,
-            });
-            by_tag.insert(
-                tag,
-                RelTable {
-                    rel: *rel,
-                    name,
-                    types,
-                    sql,
-                },
-            );
+            let (def, table) = typed_table(p, *rel, name, view)?;
+            defs.push(def);
+            by_tag.insert(tag, table);
         }
         drop(codec);
         Ok(TableMap {
             program: program.clone(),
             schema,
             names,
+            deployment: deployment.to_owned(),
             by_tag,
             defs,
+            views: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// The deployment the tables are of.
+    pub fn deployment(&self) -> &str {
+        &self.deployment
+    }
+
+    /// The table of the durable view `rel` of definition `def`, made in `store` the first time (one table per
+    /// definition, shared by every object and generation; its current-rows view takes the view's name).
+    fn view_table(
+        &self,
+        store: &dyn blossom_statestore::TableStore,
+        rel: RelId,
+        def: &[u8; 32],
+    ) -> Result<RelTable, RuntimeError> {
+        let mut views = self
+            .views
+            .lock()
+            .map_err(|_| RuntimeError::Config("the view tables' lock is poisoned".into()))?;
+        if let Some(t) = views.get(def) {
+            return Ok(t.clone());
+        }
+        let p = self.program.get();
+        let decl = p
+            .rels
+            .get(rel)
+            .ok_or_else(|| blossom_base::internal_error!("no relation {rel:?}"))?;
+        let base = ident(&decl.name.to_string());
+        let short: String = base.chars().take(40).collect();
+        let name = format!("v_{short}_{}", hex(def.get(..8).unwrap_or_default()));
+        let mut view = if base.starts_with("blossom_") {
+            format!("rel_{base}")
+        } else {
+            base
+        };
+        if view.len() > 63 || self.defs.iter().any(|d| d.view.as_deref() == Some(view.as_str())) {
+            view = format!(
+                "{}_{}",
+                view.chars().take(44).collect::<String>(),
+                hex(def.get(..8).unwrap_or_default())
+            );
+        }
+        let (tdef, table) = typed_table(p, rel, name, view)?;
+        store
+            .ensure_tables(&self.deployment, std::slice::from_ref(&tdef))
+            .map_err(|e| RuntimeError::Config(format!("creating the table of a durable view: {e}")))?;
+        views.insert(*def, table.clone());
+        Ok(table)
     }
 
     /// The tables, to create.
@@ -162,10 +190,6 @@ impl TableMap {
     fn route(&self, key: &[u8]) -> Option<&RelTable> {
         let tag: [u8; 8] = key.get(..8)?.try_into().ok()?;
         self.by_tag.get(&tag)
-    }
-
-    fn table_of(&self, key: &[u8]) -> &str {
-        self.route(key).map_or(KEYS_TABLE, |t| t.name.as_str())
     }
 
     /// The tables a key range may hold keys of: one relation's, when the range is within its tag; else every table
@@ -196,13 +220,53 @@ impl TableMap {
     fn values(&self, t: &RelTable, key: &[u8]) -> Result<Vec<SqlValue>, RuntimeError> {
         let p = self.program.get();
         let codec = DurableCodec::new(p, &self.schema, self.names.clone());
-        let row = codec.key_row(t.rel, key)?;
+        let tag = key
+            .get(..8)
+            .ok_or_else(|| blossom_base::internal_error!("a key shorter than its tag"))?;
+        let row = codec.tagged_row(tag, t.rel, key)?;
         let node = |n: blossom_value::time::NodeId| blossom_ir::printer::node_text(n, &self.names);
         row.iter()
             .zip(t.types.iter().zip(&t.sql))
             .map(|(v, (ty, sql))| sql_value(p, v, *ty, *sql, &node))
             .collect()
     }
+}
+
+/// A relation's (or a durable view's) table: its typed columns from its column types, named for SQL.
+fn typed_table(
+    p: &blossom_ir::core::Program,
+    rel: RelId,
+    name: String,
+    view: String,
+) -> Result<(TableDef, RelTable), RuntimeError> {
+    let decl = p
+        .rels
+        .get(rel)
+        .ok_or_else(|| blossom_base::internal_error!("no relation {rel:?}"))?;
+    let mut columns: Vec<(String, SqlType)> = Vec::new();
+    let mut types = Vec::new();
+    let mut sql = Vec::new();
+    for (i, col) in decl.schema.cols.iter().enumerate() {
+        let mut c = ident(&col.name.to_string());
+        while SYSTEM_COLUMNS.contains(&c.as_str()) || columns.iter().any(|(n, _)| *n == c) {
+            c.push('_');
+        }
+        if c.len() > 63 {
+            c = format!("c{i}");
+        }
+        let t = sql_type(&p.types, col.ty);
+        columns.push((c, t));
+        types.push(col.ty);
+        sql.push(t);
+    }
+    Ok((
+        TableDef {
+            name: name.clone(),
+            view: Some(view),
+            columns,
+        },
+        RelTable { rel, name, types, sql },
+    ))
 }
 
 /// A value as its column holds it (§3). A value of another shape than its column's type is a bug (the type
@@ -385,6 +449,8 @@ pub struct TreeMeta {
     pub floor: u64,
     /// The floor the last prune went to.
     pub pruned: u64,
+    /// Each durable view's table, and the tag of the generation of its rows there (older generations' rows closed).
+    pub views: BTreeMap<String, [u8; 8]>,
 }
 
 /// The entry an object keeps its tree's meta in.
@@ -399,6 +465,8 @@ struct TreeState {
     format: Option<u32>,
     /// The request's changes, not committed: key → version → present.
     pending: BTreeMap<Vec<u8>, BTreeMap<u64, bool>>,
+    /// The durable views' keyspaces the database opened in this load: tag → table.
+    views: BTreeMap<[u8; 8], RelTable>,
 }
 
 /// One object's tree over a state store's tables (see the module's documentation). Clones share it: the host keeps
@@ -435,6 +503,7 @@ impl SqlTree {
             format: meta.format,
             committed: meta,
             pending: BTreeMap::new(),
+            views: BTreeMap::new(),
         };
         SqlTree {
             inner: Arc::new(TreeInner {
@@ -450,6 +519,51 @@ impl SqlTree {
     /// Whose rows it holds.
     pub fn owner(&self) -> &Owner {
         &self.inner.owner
+    }
+
+    /// The table a key goes to: its relation's or durable view's, else the internal one's (`None`).
+    fn route(&self, s: &TreeState, key: &[u8]) -> Option<RelTable> {
+        let tag: [u8; 8] = key.get(..8)?.try_into().ok()?;
+        s.views
+            .get(&tag)
+            .cloned()
+            .or_else(|| self.inner.map.route(key).cloned())
+    }
+
+    fn table_of(&self, s: &TreeState, key: &[u8]) -> String {
+        self.route(s, key).map_or_else(|| KEYS_TABLE.to_owned(), |t| t.name)
+    }
+
+    /// The tables a key range may hold keys of (the map's, and the durable views' this load opened).
+    fn tables_for(&self, s: &TreeState, start: &[u8], end: Option<&[u8]>) -> Vec<String> {
+        if let Some(tag) = start.get(..8).and_then(|t| <[u8; 8]>::try_from(t).ok())
+            && let Some(t) = s.views.get(&tag)
+        {
+            let tag_end = blossom_node::keycode::successor(&tag);
+            if let (Some(e), Some(te)) = (end, tag_end.as_deref())
+                && e <= te
+            {
+                return vec![t.name.clone()];
+            }
+        }
+        let mut out: Vec<String> = self
+            .inner
+            .map
+            .tables_for(start, end)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        if out.len() > 1 || out.first().is_some_and(|t| t == KEYS_TABLE) {
+            for (tag, t) in &s.views {
+                let tag_end = blossom_node::keycode::successor(tag);
+                let before_end = end.is_none_or(|e| tag.as_slice() < e);
+                let after_start = tag_end.as_deref().is_none_or(|te| start < te);
+                if before_end && after_start && !out.contains(&t.name) {
+                    out.push(t.name.clone());
+                }
+            }
+        }
+        out
     }
 
     fn state(&self) -> Result<MutexGuard<'_, TreeState>, StoreError> {
@@ -471,7 +585,7 @@ impl SqlTree {
         let tables = self.tables()?;
         let mut rows = Vec::new();
         for (key, ops) in &s.pending {
-            let table = self.inner.map.table_of(key).to_owned();
+            let table = self.table_of(&s, key);
             let mut present = match base {
                 Some(b) => tables.has_key(&table, &self.inner.owner, key, b).map_err(store_err)?,
                 None => false,
@@ -482,8 +596,8 @@ impl SqlTree {
                 }
                 present = *put;
                 if *put {
-                    let values = match self.inner.map.route(key) {
-                        Some(t) => self.inner.map.values(t, key)?,
+                    let values = match self.route(&s, key) {
+                        Some(t) => self.inner.map.values(&t, key)?,
                         None => Vec::new(),
                     };
                     rows.push(RowChange::Open {
@@ -501,6 +615,29 @@ impl SqlTree {
                 }
             }
         }
+        // A durable view in a new generation: the object's rows of older ones end now (the database reads them no
+        // more), so the view's table shows only the current generation's.
+        let mut views = s.committed.views.clone();
+        for (tag, t) in &s.views {
+            if views.get(&t.name) == Some(tag) {
+                continue;
+            }
+            if let (Some(b), Some((at, _))) = (base, s.applied) {
+                for key in tables
+                    .scan_keys(&t.name, &self.inner.owner, b"", None, b, usize::MAX)
+                    .map_err(store_err)?
+                {
+                    if !key.starts_with(tag) {
+                        rows.push(RowChange::Close {
+                            table: t.name.clone(),
+                            key,
+                            at,
+                        });
+                    }
+                }
+            }
+            views.insert(t.name.clone(), *tag);
+        }
         let prune = (s.floor >= s.committed.pruned.saturating_add(PRUNE_STEP)).then_some(s.floor);
         let meta = TreeMeta {
             format: s.format,
@@ -508,6 +645,7 @@ impl SqlTree {
             flushed: (s.flushed.version(), s.flushed.mark()),
             floor: s.floor,
             pruned: prune.unwrap_or(s.committed.pruned),
+            views,
         };
         Ok((rows, prune, meta))
     }
@@ -627,7 +765,7 @@ impl KeyTree for SqlTree {
         match Self::read_at(&s, as_of) {
             Some(at) => self
                 .tables()?
-                .has_key(self.inner.map.table_of(key), &self.inner.owner, key, at)
+                .has_key(&self.table_of(&s, key), &self.inner.owner, key, at)
                 .map_err(store_err),
             None => Ok(false),
         }
@@ -643,9 +781,9 @@ impl KeyTree for SqlTree {
         let mut bound: Option<Vec<u8>> = None;
         if let Some(at) = Self::read_at(&s, as_of) {
             let tables = self.tables()?;
-            for table in self.inner.map.tables_for(start, end) {
+            for table in self.tables_for(&s, start, end) {
                 let got = tables
-                    .scan_keys(table, &self.inner.owner, start, end, at, n)
+                    .scan_keys(&table, &self.inner.owner, start, end, at, n)
                     .map_err(store_err)?;
                 if got.len() == n
                     && let Some(last) = got.last()
@@ -688,6 +826,16 @@ impl KeyTree for SqlTree {
             b
         });
         Ok(Page { keys: all, next })
+    }
+
+    fn view_keyspace(&self, rel: RelId, def: &[u8; 32], _generation: u64, rows_tag: [u8; 8]) -> Result<(), StoreError> {
+        let table = self
+            .inner
+            .map
+            .view_table(self.tables()?, rel, def)
+            .map_err(|e| StoreError::Invalid(format!("a durable view's table: {e}")))?;
+        self.state()?.views.insert(rows_tag, table);
+        Ok(())
     }
 
     fn info(&self) -> Result<TreeInfo, StoreError> {

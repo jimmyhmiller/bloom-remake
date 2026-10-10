@@ -8,6 +8,7 @@
 //! - `H/s/CONN`: a session ([`Session`]): the secret its id carries, and when its presence is checked next;
 //! - `H/n`: the node's state between requests ([`blossom_node::Hibernation`], docs/design/STATELESS.md §5a): a load
 //!   resumes the node from it, so its volatile tables, timers and clock carry on as if it had never stopped;
+//! - `H/p`: the digest of the program it last ran (a load under another restarts the node);
 //! - `H/w`: the object's next wake (milliseconds since the epoch), the truth the store's wake hints point at;
 //! - `H/xn`, `H/x/SEQ`: the outbox: messages to other objects, numbered, until they are delivered;
 //! - `H/r/SENDER`: the highest outbox number taken from each sender;
@@ -41,6 +42,8 @@ const FLUSHES_PER_REQUEST: usize = 64;
 
 const WAKE_KEY: &str = "H/w";
 const HIBERNATION_KEY: &str = "H/n";
+/// The digest of the program the object last ran: a load under another program restarts the node (§5a).
+const PROGRAM_KEY: &str = "H/p";
 const OUTBOX_NEXT_KEY: &str = "H/xn";
 const SERIAL_KEY: &str = "H/t";
 
@@ -282,7 +285,6 @@ impl Objects {
         if let Some(m) = held.as_ref() {
             return Ok(Some(m.clone()));
         }
-        let map = Arc::new(TableMap::of(&self.deploy.artifact.program, self.deploy.spec.names())?);
         let id: String = self
             .deploy
             .spec
@@ -290,6 +292,11 @@ impl Objects {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
+        let map = Arc::new(TableMap::of(
+            &self.deploy.artifact.program,
+            self.deploy.spec.names(),
+            &id,
+        )?);
         tables.ensure_tables(&id, map.defs())?;
         *held = Some(map.clone());
         Ok(Some(map))
@@ -369,6 +376,23 @@ impl Objects {
                         meta,
                         blossom_node::database::KEY_FORMAT,
                     ));
+                }
+                // Under another program (an upgrade), the hibernation's relations and the links' channels are not this
+                // program's: the node restarts from its store, as a process would, and its pages link again.
+                let digest = self.deploy.artifact.program.digest().0;
+                let same_program = kv.get(PROGRAM_KEY)?.is_some_and(|d| d.as_slice() == digest.as_slice());
+                if !same_program {
+                    for prefix in ["L/p/", "L/c/", "H/s/"] {
+                        for k in kv.list(prefix)? {
+                            kv.delete(&k)?;
+                        }
+                    }
+                    kv.delete(HIBERNATION_KEY)?;
+                    s.links = LinkState {
+                        next_conn: s.links.next_conn,
+                        ..LinkState::default()
+                    };
+                    s.sessions.clear();
                 }
                 let hibernation = match kv.get(HIBERNATION_KEY)? {
                     Some(b) => Some(postcard::from_bytes(&b).map_err(|e| pe("a node's hibernation", e))?),
@@ -562,6 +586,10 @@ impl Objects {
             let h = postcard::to_allocvec(&node.hibernate()?).map_err(|e| pe("a node's hibernation", e))?;
             if kv.get(HIBERNATION_KEY)?.as_deref() != Some(h.as_slice()) {
                 kv.put(HIBERNATION_KEY, &h)?;
+            }
+            let digest = self.deploy.artifact.program.digest().0;
+            if kv.get(PROGRAM_KEY)?.as_deref() != Some(digest.as_slice()) {
+                kv.put(PROGRAM_KEY, &digest)?;
             }
             for (k, v) in node.export_links()? {
                 match v {

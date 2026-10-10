@@ -59,6 +59,19 @@ pub trait KeyTree: Send + Sync {
     fn scan_page(&self, start: &[u8], end: Option<&[u8]>, as_of: u64, keys: usize) -> Result<Page, StoreError>;
     /// What it holds, for tools.
     fn info(&self) -> Result<TreeInfo, StoreError>;
+    /// The database opened the keyspace of a durable view (docs/design/DATABASE.md §8): `rel`'s rows, for its
+    /// definition `def` in generation `generation`, are the keys under `rows_tag` from now on (an older generation's
+    /// are not read again). A tree that keeps keyspaces apart learns them here; most need not.
+    fn view_keyspace(
+        &self,
+        rel: blossom_base::RelId,
+        def: &[u8; 32],
+        generation: u64,
+        rows_tag: [u8; 8],
+    ) -> Result<(), StoreError> {
+        let _ = (rel, def, generation, rows_tag);
+        Ok(())
+    }
 }
 
 /// A [`KeyTree`] in memory: every version of every key, kept; durable as far as a flush says (for tests).

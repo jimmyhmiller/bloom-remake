@@ -23,7 +23,22 @@ use blossom_web::{App, ClientDeployment, Event, Patch};
 
 #[cfg(test)]
 fn deployment() -> Arc<Deployment> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/web/keyed_chat.deploy.toml");
+    deployment_of("keyed_chat", "rooms")
+}
+
+/// The deployment of examples/web/APP.deploy.toml, its pages served by `node`.
+#[cfg(test)]
+fn deployment_of(app: &str, node: &str) -> Arc<Deployment> {
+    deployment_at(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../examples/web/{app}.deploy.toml")),
+        node,
+    )
+}
+
+/// The deployment `path` names, its pages served by `node`.
+#[cfg(test)]
+fn deployment_at(path: &Path, node: &str) -> Arc<Deployment> {
+    let path = path.to_path_buf();
     let text = std::fs::read_to_string(&path).unwrap();
     let spec = DeploymentSpec::parse(&text, path.parent().unwrap()).unwrap();
     let nodes: Vec<NodeSpec> = spec
@@ -42,7 +57,7 @@ fn deployment() -> Arc<Deployment> {
             artifact,
             blossom_value::Seed([9; 16]),
             Arc::new(blossom_std_host::registry().unwrap()),
-            "rooms",
+            node,
             Transport::Http,
         )
         .unwrap(),
@@ -240,6 +255,18 @@ impl Tab {
                 },
                 now,
             )
+            .unwrap();
+        self.apply(&patches);
+        self.send(hosts);
+    }
+
+    fn click(&mut self, hosts: &mut Hosts, id: &str) {
+        let now = self.tick();
+        let patches = self
+            .app
+            .as_mut()
+            .expect("the tab's app runs before it clicks")
+            .dispatch(&Event::Click { id: id.into() }, now)
             .unwrap();
         self.apply(&patches);
         self.send(hosts);
@@ -514,4 +541,135 @@ fn an_instance_keeps_at_most_its_cache_of_objects_and_loads_the_others_again() {
     assert_eq!(tabs[3].lines(), ["line from tab 0", "line from tab 3"]);
     assert_eq!(tabs[1].lines(), ["line from tab 1"]);
     assert_eq!(tabs[2].lines(), ["line from tab 2"]);
+}
+
+/// Durable views as tables (docs/design/SQL-TABLES.md §2): the tic-tac-toe rooms (examples/web/rooms.bls), whose
+/// room keeps views over its moves (`mark`, `outcome`, …) in its database; two tabs play X to a win, and the views'
+/// tables hold the marks and the outcome, as SQL reads them.
+#[test]
+fn durable_views_are_tables_too() {
+    let deploy = deployment_of("rooms", "s");
+    let store = MemStore::new();
+    let shared: Arc<dyn StateStore> = Arc::new(store.clone());
+    let mut hosts = Hosts {
+        hosts: (0..2).map(|_| Objects::new(deploy.clone(), shared.clone())).collect(),
+        rng: Rng(17),
+    };
+    let mut tabs = vec![tab(&mut hosts, &deploy, "lunch"), tab(&mut hosts, &deploy, "lunch")];
+    pump(&mut hosts, &mut tabs);
+    tabs[0].click(&mut hosts, "sit");
+    pump(&mut hosts, &mut tabs);
+    tabs[1].click(&mut hosts, "sit");
+    pump(&mut hosts, &mut tabs);
+    for (who, cell) in [(0, 0), (1, 3), (0, 1), (1, 4), (0, 2)] {
+        tabs[who].click(&mut hosts, &format!("sq-{cell}"));
+        pump(&mut hosts, &mut tabs);
+    }
+    let owner = blossom_statestore::Owner {
+        node: "s".into(),
+        member: "lunch".into(),
+    };
+    let defs = store.table_defs().unwrap();
+    let table = |view: &str| {
+        defs.iter()
+            .find(|d| d.view.as_deref() == Some(view))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no table whose view is {view}: {:?}",
+                    defs.iter().map(|d| d.view.clone()).collect::<Vec<_>>()
+                )
+            })
+            .clone()
+    };
+    let text = |v: &blossom_statestore::SqlValue| match v {
+        blossom_statestore::SqlValue::Text(t) => t.clone(),
+        other => panic!("a text column holding {other:?}"),
+    };
+    let mark = table("Room_mark");
+    assert!(mark.name.starts_with("v_"), "a durable view's table: {}", mark.name);
+    let mut marks: Vec<String> = store
+        .open_rows(&mark.name, &owner)
+        .unwrap()
+        .into_iter()
+        .map(|(_, v)| format!("{:?}={}", v[0], text(&v[1])))
+        .collect();
+    marks.sort();
+    assert_eq!(marks.len(), 5, "five marks: {marks:?}");
+    let outcome = table("Room_outcome");
+    let won: Vec<String> = store
+        .open_rows(&outcome.name, &owner)
+        .unwrap()
+        .into_iter()
+        .map(|(_, v)| text(&v[0]))
+        .collect();
+    assert_eq!(won, ["X"]);
+}
+
+/// An upgrade (docs/design/STATELESS.md §5a, SQL-TABLES.md §2): the room runs under a program that adds a durable
+/// view. It restarts (its old pages' sessions end), its views start a new generation, and the views' tables show the
+/// new generation's rows only: the marks once, not twice; the new view's table filled from the moves.
+#[test]
+fn an_upgraded_program_restarts_its_objects_and_their_views_start_again() {
+    let before = deployment_of("rooms", "s");
+    let store = MemStore::new();
+    let shared: Arc<dyn StateStore> = Arc::new(store.clone());
+    let mut hosts = Hosts {
+        hosts: vec![Objects::new(before.clone(), shared.clone())],
+        rng: Rng(23),
+    };
+    let mut tabs = vec![tab(&mut hosts, &before, "lunch"), tab(&mut hosts, &before, "lunch")];
+    pump(&mut hosts, &mut tabs);
+    tabs[0].click(&mut hosts, "sit");
+    pump(&mut hosts, &mut tabs);
+    tabs[1].click(&mut hosts, "sit");
+    pump(&mut hosts, &mut tabs);
+    for (who, cell) in [(0, 0), (1, 3), (0, 1)] {
+        tabs[who].click(&mut hosts, &format!("sq-{cell}"));
+        pump(&mut hosts, &mut tabs);
+    }
+    // The same deployment, its program with one more durable view.
+    let dir = std::env::temp_dir().join(format!("blossom-upgrade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/web");
+    for f in ["rooms.deploy.toml", "rooms.css", "ui.bls", "events.bls"] {
+        std::fs::copy(web.join(f), dir.join(f)).unwrap();
+    }
+    let program = std::fs::read_to_string(web.join("rooms.bls")).unwrap().replacen(
+        "at Room {\n",
+        "at Room {\n    view taken(cell) = moves(_, cell);\n",
+        1,
+    );
+    std::fs::write(dir.join("rooms.bls"), program).unwrap();
+    let after = deployment_at(&dir.join("rooms.deploy.toml"), "s");
+    let upgraded = Objects::new(after, shared.clone());
+    upgraded.wake("member/Room/lunch").unwrap();
+    // The old pages' sessions ended with the restart.
+    let (conn, secret, at) = tabs[0].session.unwrap();
+    match upgraded.receive("member/Room/lunch", conn, &secret, at, Duration::ZERO) {
+        Err(ServeError::Gone(_)) => {}
+        other => panic!(
+            "a session from before the upgrade still answers: {:?}",
+            other.map(|(f, _)| f.len())
+        ),
+    }
+    let owner = blossom_statestore::Owner {
+        node: "s".into(),
+        member: "lunch".into(),
+    };
+    let defs = store.table_defs().unwrap();
+    let open = |view: &str| {
+        let t = defs
+            .iter()
+            .find(|d| d.view.as_deref() == Some(view))
+            .unwrap_or_else(|| panic!("no table whose view is {view}"));
+        store.open_rows(&t.name, &owner).unwrap().len()
+    };
+    assert_eq!(
+        open("Room_mark"),
+        3,
+        "the marks once: the older generation's rows closed"
+    );
+    assert_eq!(open("taken"), 3, "the new view, from the moves");
+    let _ = std::fs::remove_dir_all(&dir);
 }
