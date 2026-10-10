@@ -204,6 +204,33 @@ test.describe("keyed chat as a Vercel function", () => {
     }
   });
 
+  test("the app is never drawn before its stylesheet", async ({ page }) => {
+    const c = deployed ? null : await local();
+    const base = deployed ?? c.base;
+    try {
+      // Whether the app's stylesheet had loaded when the app first drew anything.
+      await page.addInitScript(() => {
+        new MutationObserver((_, seen) => {
+          const app = document.getElementById("app");
+          if (app && app.childElementCount > 0) {
+            window.styledAtFirstDraw = document.getElementById("app-css").sheet !== null;
+            seen.disconnect();
+          }
+        }).observe(document, { childList: true, subtree: true });
+      });
+      // A slow stylesheet (a cold function serves it) makes a flash plain, if there is one.
+      await page.route("**/blossom/style.css", async (route) => {
+        await new Promise((done) => setTimeout(done, 1500));
+        await route.continue();
+      });
+      await open(page, base, `styled${randomBytes(4).toString("hex")}`);
+      await expect(bid(page, "title")).toBeVisible();
+      expect(await page.evaluate(() => window.styledAtFirstDraw)).toBe(true);
+    } finally {
+      if (c) await c.remove();
+    }
+  });
+
   test("the function answers only page requests", async ({ request }) => {
     const c = deployed ? null : await local();
     const base = deployed ?? c.base;

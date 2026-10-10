@@ -1066,11 +1066,25 @@ function editorEvents() {
 
 // ---------------------------------------------------------------- start
 
+/** Points the app's stylesheet link at `href` and resolves once it loaded (or failed: the app shows anyway), so the
+ * app is never drawn before its styles. */
+function useStyle(css, href) {
+  if (!href) return Promise.resolve();
+  return new Promise((done) => {
+    css.addEventListener("load", done, { once: true });
+    css.addEventListener("error", done, { once: true });
+    css.href = href;
+  });
+}
+
 async function main() {
   const css = document.getElementById("app-css");
   const appText = await served();
+  // The stylesheet loads while the engine does; the app is drawn only after both.
+  const styled = useStyle(css, appText !== null ? JSON.parse(appText).style || STYLES[appName] : STYLES[appName]);
   wasm = await import(appText !== null ? "./pkg-member/blossom_web.js" : "./pkg/blossom_web.js");
   await wasm.default();
+  await styled;
   if (appText !== null) {
     listen();
     inspectEvents();
@@ -1081,14 +1095,10 @@ async function main() {
       show(null);
     });
     await runMember(appText);
-    const style = JSON.parse(appText).style;
-    if (style) css.href = style;
-    else if (STYLES[appName]) css.href = STYLES[appName];
     requestAnimationFrame(frame);
     document.body.dataset.blossom = "ready";
     return;
   }
-  if (STYLES[appName]) css.href = STYLES[appName];
   const original = { "ui.bls": await fetchSource("ui.bls"), [root]: await fetchSource(root) };
   let files = { ...original };
   const edited = bench === null ? localStorage.getItem(sourceKey) : null;
