@@ -53,6 +53,12 @@ pub const BACKUP_POLL: Duration = Duration::from_secs(1);
 const FORMAT: i64 = 1;
 /// Connections kept for reuse.
 const POOL: usize = 8;
+/// How long a pooled connection may sit unused before it is checked (an empty query) when taken again: a server, or
+/// the network, may have closed it meanwhile without the client hearing (a database that suspends when idle, an
+/// instance a function platform froze), and only a use would find out, failing the request that made it.
+const CHECK_AFTER_IDLE: Duration = Duration::from_secs(10);
+/// How long that check may take.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the listener waits for a notification before checking whether it should stop.
 const LISTEN_SLICE: Duration = Duration::from_millis(250);
 
@@ -160,7 +166,10 @@ pub struct PostgresStore {
     schema: String,
     channel: String,
     sql: Sql,
-    idle: Mutex<Vec<Client>>,
+    /// Pooled connections, each with when it was last given back.
+    idle: Mutex<Vec<(Client, Elapsed)>>,
+    /// How long a pooled connection sits unused before it is checked when taken ([`CHECK_AFTER_IDLE`]).
+    idle_check: Duration,
     /// The tables' definitions this handle knows (from its `ensure_tables`, or read from the catalog).
     defs: Mutex<BTreeMap<String, TableDef>>,
     listen: Arc<Listen>,
@@ -251,6 +260,7 @@ impl PostgresStore {
             schema,
             connect,
             idle: Mutex::new(Vec::new()),
+            idle_check: CHECK_AFTER_IDLE,
             defs: Mutex::new(BTreeMap::new()),
             listen: Arc::new(Listen {
                 heard: Mutex::new(Heard::default()),
@@ -310,23 +320,43 @@ impl PostgresStore {
         tx.commit().map_err(unavailable)
     }
 
+    /// This store, checking a pooled connection that sat unused for `idle` (rather than [`CHECK_AFTER_IDLE`]) when it
+    /// is taken again (tests).
+    pub fn with_idle_check(mut self, idle: Duration) -> PostgresStore {
+        self.idle_check = idle;
+        self
+    }
+
+    /// A pooled connection that still works, or a new one. One that sat unused for [`CHECK_AFTER_IDLE`] is checked
+    /// first; a closed one is dropped.
+    fn take_client(&self) -> Result<Client, StateError> {
+        loop {
+            let pooled = self
+                .idle
+                .lock()
+                .map_err(|_| StateError::Unavailable("the Postgres pool's lock is poisoned".into()))?
+                .pop();
+            let Some((mut c, since)) = pooled else {
+                return self.connect.client();
+            };
+            if c.is_closed() {
+                continue;
+            }
+            if since.elapsed() < self.idle_check || c.is_valid(CHECK_TIMEOUT).is_ok() {
+                return Ok(c);
+            }
+        }
+    }
+
     /// Runs `f` on a pooled connection (or a new one), then pools it again unless it closed.
     fn with_client<R>(&self, f: impl FnOnce(&mut Client) -> Result<R, StateError>) -> Result<R, StateError> {
-        let pooled = self
-            .idle
-            .lock()
-            .map_err(|_| StateError::Unavailable("the Postgres pool's lock is poisoned".into()))?
-            .pop();
-        let mut client = match pooled {
-            Some(c) if !c.is_closed() => c,
-            _ => self.connect.client()?,
-        };
+        let mut client = self.take_client()?;
         let r = f(&mut client);
         if !client.is_closed()
             && let Ok(mut idle) = self.idle.lock()
             && idle.len() < POOL
         {
-            idle.push(client);
+            idle.push((client, Elapsed::start()));
         }
         r
     }

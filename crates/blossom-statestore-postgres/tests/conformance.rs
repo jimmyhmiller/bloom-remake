@@ -243,3 +243,101 @@ fn the_view_shows_current_rows_typed() {
     assert_eq!(r.get::<_, String>(5), "x");
     assert!(r.get::<_, bool>(6));
 }
+
+/// A TCP proxy before the server whose connections can be cut silently: after [`Cutter::cut`], the server's side is
+/// closed and the client hears nothing until it next sends, when its connection is closed. That is a connection a
+/// database dropped while the client's instance was frozen (a function platform), or while it was idle.
+#[cfg(test)]
+struct Cutter {
+    addr: std::net::SocketAddr,
+    cut: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    upstreams: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+}
+
+#[cfg(test)]
+impl Cutter {
+    fn start(server: std::net::SocketAddr) -> Cutter {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cut = Arc::new(AtomicBool::new(false));
+        let upstreams: Arc<Mutex<Vec<std::net::TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+        let (c, ups) = (cut.clone(), upstreams.clone());
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(client) = client else { continue };
+                let Ok(up) = std::net::TcpStream::connect(server) else {
+                    continue;
+                };
+                ups.lock().unwrap().push(up.try_clone().unwrap());
+                // A connection made after the cut is a new one, and works.
+                let was_cut = c.load(Ordering::Relaxed);
+                let (mut from_client, mut to_up) = (client.try_clone().unwrap(), up.try_clone().unwrap());
+                let cut = c.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 16384];
+                    loop {
+                        let n = match from_client.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        if cut.load(Ordering::Relaxed) && !was_cut {
+                            let _ = from_client.shutdown(std::net::Shutdown::Both);
+                            return;
+                        }
+                        if to_up.write_all(&buf[..n]).is_err() {
+                            return;
+                        }
+                    }
+                });
+                let (mut from_up, mut to_client) = (up, client);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 16384];
+                    // The server's close is not passed on: the client must not hear it.
+                    while let Ok(n) = from_up.read(&mut buf) {
+                        if n == 0 || to_client.write_all(&buf[..n]).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Cutter { addr, cut, upstreams }
+    }
+
+    /// Closes the server's side of every connection made so far, telling their clients nothing.
+    fn cut(&self) {
+        self.cut.store(true, Ordering::Relaxed);
+        for up in self.upstreams.lock().unwrap().drain(..) {
+            let _ = up.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+/// A pooled connection the server closed without the client hearing is found out when it is taken after sitting
+/// unused, and replaced: the request that takes it does not fail.
+#[test]
+#[ignore = "needs Postgres: scripts/test-services.sh"]
+fn a_connection_closed_unheard_is_replaced_not_failed() {
+    use std::time::Duration;
+    let url = base("BLOSSOM_TEST_POSTGRES").unwrap();
+    let (scheme, rest) = url.split_once("://").unwrap();
+    let (auth, rest) = rest.split_once('@').unwrap();
+    let (hostport, path) = rest.split_once('/').unwrap();
+    let server: std::net::SocketAddr = hostport.replace("localhost", "127.0.0.1").parse().unwrap();
+    let cutter = Cutter::start(server);
+    let through = format!("{scheme}://{auth}@{}/{path}", cutter.addr);
+    let h = fresh("BLOSSOM_TEST_POSTGRES");
+    let store = PostgresStore::from_url(&with_schema(&through, &h.schema))
+        .unwrap()
+        .with_idle_check(Duration::from_millis(100));
+    store.commit("cut/o", 0, &[]).unwrap();
+    assert_eq!(store.version("cut/o").unwrap(), 1);
+    cutter.cut();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(store.version("cut/o").unwrap(), 1, "the request after the cut");
+    store.commit("cut/o", 1, &[]).unwrap();
+    assert_eq!(store.version("cut/o").unwrap(), 2);
+}
