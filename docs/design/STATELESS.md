@@ -286,8 +286,9 @@ An object's next wake is the earliest of its node's next timer, its sessions' de
 (§6.4, §8): an entry of the object, with a hint scheduled before each commit that changes it. Each `blossom serve`
 instance runs a sweeper (every 250 ms by default): `due`, then a wake request on each object due (which commits the
 object's next wake, if it moved), then `unschedule` of the hint it handled; and `maintain` now and then. Several sweepers may wake one object at once; the
-version check makes that harmless. A platform that freezes idle instances (a function) calls `POST /blossom/wake`
-from a scheduler instead (`--sweep off`), which runs one sweep and answers what it woke.
+version check makes that harmless. A platform that freezes idle instances (a function) calls `/blossom/wake`
+from a scheduler instead (`--sweep off`, or as well), which runs one sweep and answers what it woke; only for a caller
+with the host's wake secret (DEPLOY.md §2).
 
 ## 10. Testing
 
@@ -311,8 +312,10 @@ BLOSSOM_SEED=$(openssl rand -hex 16) \
 ```
 
 It compiles the deployment's program once at start, then serves the page (`--web-root`), `app.json`, the client
-parts, `/blossom/token`, the link both ways (`/blossom/http/…`, `/blossom/link`), and `/blossom/wake`. Its options:
-`--store`, `--web`, `--web-root`, `--sweep MS|off`, `--cache N` (nodes kept per instance). The deployment's nodes
+parts, `/blossom/token`, the link both ways (`/blossom/http/…`, `/blossom/link`), `/blossom/wake` and
+`/blossom/health`. Its options: `--store` (or `BLOSSOM_STORE`), `--web` (or `PORT`), `--web-root`, `--sweep MS|off`,
+`--cache N` (nodes kept per instance), and those of DEPLOY.md §2 for the open internet (`--wake-secret-env`,
+`--tokens-per-minute`, `--client-ip-header`, `--max-connections`, `--drain`). The deployment's nodes
 need no addresses: their objects are reached through the store. A program whose nodes use streams or answer external
 sessions is refused at start, naming what an object cannot do yet.
 

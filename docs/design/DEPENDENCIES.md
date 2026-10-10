@@ -87,3 +87,4 @@ Appended at each milestone gate from the `## New dependencies` sections of `docs
 | webpki-roots | 1.0.9 | CDLA-Permissive-2.0 | blossom-statestore-postgres, -s3 (via ureq) | the web's root certificates when no `sslrootcert` is given | stateless |
 | ureq (rustls) | 3.4.2 | MIT OR Apache-2.0 | blossom-statestore-s3 | the S3 store's HTTP client (STATELESS.md §4.3) | stateless |
 | hmac, sha2 | 0.12.1, 0.10.9 | MIT OR Apache-2.0 | blossom-statestore-s3 | AWS Signature Version 4, manifest and blob checksums | stateless |
+| signal-hook | 0.4.4 | MIT OR Apache-2.0 | blossom-cli | `blossom serve` drains on SIGTERM, as function and container platforms stop instances (DEPLOY.md §2); 0.4.5 was days old | deploy |
