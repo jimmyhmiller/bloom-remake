@@ -57,8 +57,12 @@ create view R as select node, member, c1, c2, … from r_R_T where to_tick is nu
 
 A client role's durable tables live in its pages, never at a node: they have no table. A typed column named like a
 system column (`node`, `member`, `key`, `from_tick`, `to_tick`) is renamed with a trailing `_` (`key_`); a name
-that is not an identifier has its other characters as `_` (`Server.votes` is `Server_votes`). Durable views
-(DATABASE.md §8) are derived: their rows stay in the internal keyspace table, with the indexes.
+that is not an identifier has its other characters as `_` (`Server.votes` is `Server_votes`). A **durable view** (DATABASE.md §8: a view
+the engine keeps in the database) has a table too, `v_NAME_D` (`D` from its definition's hash), and its current-rows
+view: the database tells the tree its keyspace when it opens it (`KeyTree::view_keyspace`). The view's support counts
+stay internal. A view whose definition changes gets a new table, as a relation whose schema changes does; a view the
+database starts again in a new generation (a program that added a durable view) keeps its table, and the object's rows
+of the older generation are closed in the same commit, so the table shows the current generation's rows only.
 
 `T` (16 hex digits of the relation's tag) changes with the relation's schema, as its keyspace does in the LSM: a
 relation whose schema changed starts as a new, empty table (DATABASE.md), and the view `R` follows the deployed

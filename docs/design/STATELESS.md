@@ -205,6 +205,11 @@ view: its commits are atomic, so a host that dies mid-request loses only an atte
 The cost is the volatile state's size on every commit that changes it; a program whose volatile tables are large pays
 for it per request.
 
+**A new program is a restart.** An object records the digest of the program it ran (`H/p`). Loaded under another (an
+upgrade of the deployment), its hibernation's relations and its links' channel numbers are not the program's: the
+node starts from its store as a restarted process does (`boot` and `recovered` hold), and its pages' links and sessions
+end, so each page links again and its `HELLO` agrees the new program's channels.
+
 ## 6. Links without a connection
 
 On `blossom run` and on Durable Objects, a page's link lives in the node's memory: the numbering, the replay buffer of

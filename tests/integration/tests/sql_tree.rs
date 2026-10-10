@@ -29,7 +29,7 @@ fn map() -> Arc<TableMap> {
         .collect();
     let (compiled, _) = compile_deployed(&spec.source.to_string_lossy(), &nodes, &Default::default());
     let artifact = compiled.unwrap().0;
-    Arc::new(TableMap::of(&artifact.program, spec.names()).unwrap())
+    Arc::new(TableMap::of(&artifact.program, spec.names(), "tree-test").unwrap())
 }
 
 /// The suite on a fresh tree over `store`; opening it again commits what it has and starts from its meta.

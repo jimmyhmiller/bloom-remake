@@ -757,6 +757,7 @@ impl Database {
                 fresh
             };
             let tags = view_tags(def, generation);
+            self.tree.view_keyspace(*rel, def, generation, tags.0)?;
             if let Some(cols) = d.orphan_indexes.remove(&tags.0) {
                 d.indexes.entry(*rel).or_default().extend(cols);
             }
