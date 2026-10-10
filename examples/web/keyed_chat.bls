@@ -171,11 +171,7 @@ at Browser {
             h1[id: "title"] { name }
             p[id: "status"](class: "status") { s }
             ul[id: "rooms"](class: "rooms") {
-                for listed(r) {
-                    li[id: f"room-{r}"] {
-                        a[id: f"go-{r}"](href: f"?member={r}") { r }
-                    }
-                }
+                for listed(r) { li[id: f"room-{r}"] { a[id: f"go-{r}"](href: f"?member={r}") { r } } }
             }
             ul[id: "lines"](class: "lines") {
                 for lines(w, k, at, t) {
