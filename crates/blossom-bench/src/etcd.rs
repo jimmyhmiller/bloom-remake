@@ -53,7 +53,9 @@ impl EtcdStore {
         };
         for addr in &self.endpoints {
             let Ok(mut s) = self.open(addr) else { continue };
-            let Ok(status) = s.post("/v3/maintenance/status", "{}") else { continue };
+            let Ok(status) = s.post("/v3/maintenance/status", "{}") else {
+                continue;
+            };
             let member = status.get("header").and_then(|h| h.get("member_id")).and_then(id);
             let leader = status.get("leader").and_then(id);
             if member.is_some() && member == leader {

@@ -276,7 +276,7 @@ fn a_recovered_node_reads_its_blobs_and_collects_the_unreferenced_ones() {
         let mut d = k.boot(&fs);
         const LATER: i64 = 1_000_000_000_000;
         d.run_until_quiescent(Instant(LATER)).unwrap();
-        let store = BlobStore::open(Arc::new(fs.clone()), &k.dir).unwrap();
+        let store = d.blob_store().clone();
         assert_eq!(store.list().unwrap().len(), 7, "engine {engine}");
         // Forget three chunks, checkpoint: their blobs go, and so does the orphan; the others stay.
         let forget = k.artifact.rel_named("forget").unwrap();
@@ -506,12 +506,12 @@ fn logged_blobs_are_synced_before_the_wal_that_logs_them_is_truncated() {
     }
 }
 
-/// From the HD review: a tick logs a new blob and stops before its record syncs; another blob's put then syncs the
-/// blob directory (as a large blob's put, the checkpointer or a collection can, while a runtime batch is unsynced);
-/// then power fails, keeping the logged blob's directory entry and losing its bytes. The record is lost, so recovery
-/// must not hold the blob (its provisional file goes), and the same bytes sent again are stored and read whole.
+/// From the HD review: a tick logs a new blob and stops before its record syncs; another blob's put then syncs (as a
+/// large blob's put or a flush's can, while a runtime batch is unsynced); then power fails. The record is lost: the
+/// store holds the blob only if its bytes survived whole (a pack entry checks itself), held by no row, and the same
+/// bytes sent again are stored and read whole.
 #[test]
-fn a_logged_blob_whose_record_is_lost_is_not_trusted_after_a_power_loss() {
+fn a_logged_blob_whose_record_is_lost_is_never_read_torn_after_a_power_loss() {
     for engine in [false, true] {
         let k = Store::new(engine);
         let fs = SimFs::default();
@@ -539,16 +539,9 @@ fn a_logged_blob_whose_record_is_lost_is_not_trusted_after_a_power_loss() {
         let mut d = k.boot(&image);
         assert!(k.stored(&d).is_empty(), "engine {engine}: the lost record's row");
         let b = BlobRef::of(&chunk);
-        let leftovers: Vec<_> = image
-            .list(&k.dir.join("blobs"))
-            .unwrap()
-            .into_iter()
-            .filter(|p| p.to_string_lossy().contains(&b.hex()))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "engine {engine}: the blob is still held: {leftovers:?}"
-        );
+        if let Some(bytes) = d.blob_store().read(&b).unwrap() {
+            assert_eq!(&bytes[..], &chunk[..], "engine {engine}");
+        }
         // The same bytes again: stored, and read back whole.
         const LATER: i64 = 1_000_000_000_000;
         d.run_until_quiescent(Instant(LATER)).unwrap();

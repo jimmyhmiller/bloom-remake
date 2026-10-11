@@ -94,6 +94,9 @@ mod tests {
         assert_ne!(a, BlobRef::of(b"hellp"));
         assert_eq!(a.len, 5);
         // BLAKE3("hello"), the reference implementation's answer.
-        assert_eq!(a.hex(), "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f");
+        assert_eq!(
+            a.hex(),
+            "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"
+        );
     }
 }

@@ -135,6 +135,8 @@ pub struct Stats {
     pub blob_promote_nanos: AtomicU64,
     pub blob_promote_max_nanos: AtomicU64,
     pub blobs_promoted: AtomicU64,
+    /// Blob packs compacted (their live blobs copied out, the pack removed).
+    pub blob_packs_compacted: AtomicU64,
     /// How long messages from peers, and clients' stream data, waited between their reader queueing them and the
     /// engine taking them: at most, and how many waited over 4 ms.
     pub peer_wait_max_nanos: AtomicU64,
@@ -210,6 +212,7 @@ impl Stats {
             ("blob_promote_nanos", r(&self.blob_promote_nanos)),
             ("blob_promote_max_nanos", r(&self.blob_promote_max_nanos)),
             ("blobs_promoted", r(&self.blobs_promoted)),
+            ("blob_packs_compacted", r(&self.blob_packs_compacted)),
             ("peer_wait_max_nanos", r(&self.peer_wait_max_nanos)),
             ("peer_waits_over_4ms", r(&self.peer_waits_over_4ms)),
             ("stream_wait_max_nanos", r(&self.stream_wait_max_nanos)),
@@ -1054,8 +1057,9 @@ fn committer(
     }
 }
 
-/// Makes durable the blobs logged in the records each database flush covers (a sync of each blob's file), then hands
-/// the flush back to the committer to truncate the WAL behind it. Ends when the committer does.
+/// Makes durable the blobs logged in the records each database flush covers (a sync of each pack holding them), hands
+/// the flush back to the committer to truncate the WAL behind it, then compacts a blob pack the collections after
+/// earlier flushes left mostly dead. Ends when the committer does.
 fn promoter(
     blob_store: &blossom_store::BlobStore,
     rx: Receiver<Promotion>,
@@ -1079,6 +1083,13 @@ fn promoter(
         stats.blob_promote_max_nanos.fetch_max(took, Ordering::Relaxed);
         if done.send(p.flushed).is_err() {
             return;
+        }
+        match blob_store.compact() {
+            Ok(n) => bump(&stats.blob_packs_compacted, n as u64),
+            Err(e) => {
+                let _ = tx.send(Control::WalFailed(format!("blob compaction failed: {e}")));
+                return;
+            }
         }
     }
 }

@@ -464,7 +464,11 @@ mod tests {
         let right = zstd_raw(0x20, &[data.len() as u8], data, None);
         let wrong = zstd_raw(0x20, &[data.len() as u8 + 2], data, None);
         assert_eq!(zstd_decompress(&right, 1024).as_deref(), Some(&data[..]));
-        assert_eq!(zstd_decompress(&wrong, 1024), None, "a content size other than the content");
+        assert_eq!(
+            zstd_decompress(&wrong, 1024),
+            None,
+            "a content size other than the content"
+        );
         // A declared size over the bound is refused before decoding.
         assert_eq!(zstd_decompress(&right, data.len() as u64 - 1), None);
         // The checksum ruzstd computes for `data`, read back from a decode with a placeholder checksum.
@@ -497,12 +501,25 @@ mod tests {
             let two = [ca.clone(), cb.clone()].concat();
             assert_eq!(decompress(&two, 1 << 20).as_ref(), Some(&whole), "{name}: two frames");
             let skipping = [skip_frame(5), ca.clone(), skip_frame(0), cb.clone()].concat();
-            assert_eq!(decompress(&skipping, 1 << 20).as_ref(), Some(&whole), "{name}: skippable frames");
-            for tail in [&[0u8, 0, 0, 0][..], &[0x04, 0x22, 0x4D, 0x18][..], &[1, 2, 3, 4, 5, 6, 7][..], &cb[..cb.len() - 1]] {
+            assert_eq!(
+                decompress(&skipping, 1 << 20).as_ref(),
+                Some(&whole),
+                "{name}: skippable frames"
+            );
+            for tail in [
+                &[0u8, 0, 0, 0][..],
+                &[0x04, 0x22, 0x4D, 0x18][..],
+                &[1, 2, 3, 4, 5, 6, 7][..],
+                &cb[..cb.len() - 1],
+            ] {
                 let trailing = [ca.clone(), tail.to_vec()].concat();
                 assert_eq!(decompress(&trailing, 1 << 20), None, "{name}: trailing {tail:02x?}");
             }
-            assert_eq!(decompress(&skip_frame(3)[..10], 1 << 20), None, "{name}: a cut skippable frame");
+            assert_eq!(
+                decompress(&skip_frame(3)[..10], 1 << 20),
+                None,
+                "{name}: a cut skippable frame"
+            );
         }
         // The LZ4 legacy format is a different format.
         let legacy = [0x184C_2102u32.to_le_bytes().to_vec(), vec![0; 8]].concat();

@@ -1034,6 +1034,10 @@ fn a_drop_names_the_dragged_element_and_the_target() {
         target,
     };
     dom.apply(&a.dispatch(&drop, T0).unwrap());
-    assert!(dom.children.get("left").is_none_or(|c| c.is_empty()), "{:?}", dom.children);
+    assert!(
+        dom.children.get("left").is_none_or(|c| c.is_empty()),
+        "{:?}",
+        dom.children
+    );
     assert_eq!(dom.children["right"].last().map(String::as_str), Some("apple"));
 }

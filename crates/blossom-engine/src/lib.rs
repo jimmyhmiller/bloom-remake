@@ -11,13 +11,12 @@
 
 mod cold;
 mod engine;
-mod purity;
 mod expr;
 mod func;
+mod purity;
 mod rule;
 mod store;
 mod strata;
 
 pub use cold::{ColRange, ColdTables, Resume};
 pub use engine::{Engine, EngineConfig};
-

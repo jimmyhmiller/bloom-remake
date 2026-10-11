@@ -82,3 +82,36 @@ show it (fewer, fuller batches: fewer blobs).
 - Ack p99 at a fixed 1000 records/s is 1-3 s even with 6 partitions (S10 measured p99 14 ms at 2000 records/s):
   probably the same sync stalls (flushes come every few seconds under load).
 - The soak's Blossom smoke run: RSS grew to 3.4 GB under the collapse (queues behind stalled links?).
+
+## How others do it, and the choice
+
+Nobody makes small values durable with a file and an fsync each. Kafka and Redpanda append to per-partition segment
+files (Kafka leaves flushing to the OS by default; Redpanda folds many appends into one fdatasync per segment);
+WiscKey, Badger and TiKV Titan keep large values in an append-only value log with one sync per batch and a garbage
+collector; RocksDB's integrated BlobDB writes values into blob files during flushes and compactions, one sync per
+file; Bitcask has append-only data files and hint files for a fast boot. On liveness, etcd documents slow fdatasync
+causing elections (dedicated disk, WAL fsync p99 under 10 ms); Raft lets a leader replicate while its own write is in
+flight; etcd's raft has AsyncStorageWrites; Redpanda/Scylla and CockroachDB give background I/O lower priority. A
+follower's acknowledgement of entries waits for their sync; heartbeats wait for nothing (in Blossom every message of
+a tick waits for its WAL sync).
+
+User choice (question tool): **BlobDB-style packs**; storage first, then measure again before touching output commit or
+I/O priority.
+
+## Fix 2: pack files
+
+- `<store>/blobs/p<seq:016x>.pack`: append-only; an entry is a header (magic `BLPK`, length `u64` LE, hash 32 bytes)
+  and the bytes, so each entry checks itself. A pack is sealed past `pack_bytes` (64 MiB) and never appended again.
+- Logged blobs (`write_logged`, `restore_logged`) are appended without a sync and are pending. `sync_logged_below`
+  syncs every pack with unsynced bytes (one `fdatasync` each) and the directory if a pack is new, and then every entry
+  those syncs cover is durable; a sealed pack synced whole gets `p<seq>.idx` (its live entries and a hash of them),
+  so opening it needs no scan. `put_all` appends and syncs the same way.
+- `delete` only drops index entries; a sealed pack with no live entry goes (and its `.idx`). `compact` (the promoter,
+  after each promotion) copies the live entries of a sealed, indexed pack at least half dead into the active pack,
+  syncs, points the index at the copies, and removes the old pack; reads that race it look the blob up again.
+- Opening: `.idx` files are trusted (written after their pack synced whole); a pack without one is scanned, its
+  entries checked against their hashes, cut at the first bad one (a torn tail), synced and indexed. So every entry
+  found is durable, and a blob only some lost record logged is kept (unreferenced, it is collected after the next
+  flush, as recovery already makes every stored blob no row holds a candidate). `drop_unrestored` goes. Stores from
+  before: blob files `<hash>-<len>` are adopted as loose blobs (read, deleted, never written again); provisional
+  `.log` files are removed (their surviving records log them again).

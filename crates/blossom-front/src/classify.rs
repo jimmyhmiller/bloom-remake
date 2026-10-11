@@ -92,7 +92,9 @@ fn empty_aggregates(hir: &Hir, h: &HHandler, diags: &mut Diagnostics) -> Result<
             continue;
         };
         let ungrouped = cols.iter().all(|c| matches!(c, HViewAggCol::Agg(_)));
-        let bare = cols.iter().any(|c| matches!(c, HViewAggCol::Agg(g) if g.default.is_none()));
+        let bare = cols
+            .iter()
+            .any(|c| matches!(c, HViewAggCol::Agg(g) if g.default.is_none()));
         if ungrouped && bare {
             let name = &hir.rel(a.rel)?.name;
             diags.push(

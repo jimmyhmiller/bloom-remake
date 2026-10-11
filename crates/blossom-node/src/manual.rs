@@ -166,6 +166,11 @@ impl<E: Executor> ManualDriver<E> {
         Ok(())
     }
 
+    /// The node's blob store.
+    pub fn blob_store(&self) -> &std::sync::Arc<blossom_store::BlobStore> {
+        &self.opened.blobs
+    }
+
     /// Flushes the database (every released tick is in it: this driver releases each tick before the next runs),
     /// truncates the WAL behind it, and deletes the blobs no recovery from it can reach and the node no longer needs.
     pub fn flush(&mut self) -> Result<(), NodeError> {
@@ -174,8 +179,8 @@ impl<E: Executor> ManualDriver<E> {
         }
         let outside = self.node.collection_candidates();
         let flushed = self.opened.database.flush()?;
-        // The blobs logged in the records the tables now cover become files (the rows that hold them are in the
-        // tables), and the WAL segments the tables wholly cover go.
+        // The blobs logged in the records the tables now cover are made durable in their packs (the rows that hold
+        // them are in the tables), and the WAL segments the tables wholly cover go.
         if let Some(lsn) = self.opened.wal.covered(&flushed)? {
             self.opened.blobs.sync_logged_below(lsn)?;
         }
@@ -187,6 +192,8 @@ impl<E: Executor> ManualDriver<E> {
             let gone = self.node.blob_garbage(Tick(t), &outside);
             self.opened.blobs.delete(&gone)?;
         }
+        // A pack the deletes left mostly dead is compacted (as the runtime's promoter does after each flush).
+        self.opened.blobs.compact()?;
         Ok(())
     }
 }

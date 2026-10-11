@@ -22,7 +22,11 @@ pub(crate) fn rule_is_pure(p: &Program, rule: &Rule, memo: &mut BTreeMap<FnId, b
         },
     });
     // Head arguments are terms (an aggregate's tuple too).
-    lits && rule.head.args.iter().all(|a| matches!(a, HeadArg::Term(_) | HeadArg::Agg(_)))
+    lits && rule
+        .head
+        .args
+        .iter()
+        .all(|a| matches!(a, HeadArg::Term(_) | HeadArg::Agg(_)))
 }
 
 fn fn_is_pure(p: &Program, f: FnId, memo: &mut BTreeMap<FnId, bool>) -> bool {
@@ -63,9 +67,9 @@ fn expr_is_pure(p: &Program, e: &Expr, memo: &mut BTreeMap<FnId, bool>) -> bool 
         }
         Expr::Match { scrut, arms } => {
             expr_is_pure(p, scrut, memo)
-                && arms
-                    .iter()
-                    .all(|(_, guard, body)| guard.as_ref().is_none_or(|g| expr_is_pure(p, g, memo)) && expr_is_pure(p, body, memo))
+                && arms.iter().all(|(_, guard, body)| {
+                    guard.as_ref().is_none_or(|g| expr_is_pure(p, g, memo)) && expr_is_pure(p, body, memo)
+                })
         }
         Expr::Collection { elems, .. } => all(elems, memo),
         Expr::Lattice { args, .. } => all(args, memo),

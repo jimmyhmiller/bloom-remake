@@ -172,18 +172,66 @@ const U64: HostType = HostType::Int(IntTy::U64);
 /// The standard library's host functions. Decompression takes the largest output it may produce, and is `None`
 /// past it or on malformed input.
 pub const STD_EXTERNS: &[StdExtern] = &[
-    StdExtern { path: "blossom_std::checksum::crc32c", params: &[BYTES], ret: U32 },
-    StdExtern { path: "blossom_std::checksum::crc32", params: &[BYTES], ret: U32 },
-    StdExtern { path: "blossom_std::compress::gzip_compress", params: &[BYTES, U8], ret: BYTES },
-    StdExtern { path: "blossom_std::compress::gzip_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
-    StdExtern { path: "blossom_std::compress::snappy_compress", params: &[BYTES], ret: BYTES },
-    StdExtern { path: "blossom_std::compress::snappy_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
-    StdExtern { path: "blossom_std::compress::lz4_compress", params: &[BYTES], ret: BYTES },
-    StdExtern { path: "blossom_std::compress::lz4_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
-    StdExtern { path: "blossom_std::compress::zstd_compress", params: &[BYTES], ret: BYTES },
-    StdExtern { path: "blossom_std::compress::zstd_decompress", params: &[BYTES, U64], ret: OPT_BYTES },
-    StdExtern { path: "blossom_std::hash::sha256", params: &[BYTES], ret: BYTES },
-    StdExtern { path: "blossom_std::hash::blake3", params: &[BYTES], ret: BYTES },
+    StdExtern {
+        path: "blossom_std::checksum::crc32c",
+        params: &[BYTES],
+        ret: U32,
+    },
+    StdExtern {
+        path: "blossom_std::checksum::crc32",
+        params: &[BYTES],
+        ret: U32,
+    },
+    StdExtern {
+        path: "blossom_std::compress::gzip_compress",
+        params: &[BYTES, U8],
+        ret: BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::compress::gzip_decompress",
+        params: &[BYTES, U64],
+        ret: OPT_BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::compress::snappy_compress",
+        params: &[BYTES],
+        ret: BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::compress::snappy_decompress",
+        params: &[BYTES, U64],
+        ret: OPT_BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::compress::lz4_compress",
+        params: &[BYTES],
+        ret: BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::compress::lz4_decompress",
+        params: &[BYTES, U64],
+        ret: OPT_BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::compress::zstd_compress",
+        params: &[BYTES],
+        ret: BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::compress::zstd_decompress",
+        params: &[BYTES, U64],
+        ret: OPT_BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::hash::sha256",
+        params: &[BYTES],
+        ret: BYTES,
+    },
+    StdExtern {
+        path: "blossom_std::hash::blake3",
+        params: &[BYTES],
+        ret: BYTES,
+    },
 ];
 
 /// The standard host function at `path`.
@@ -450,7 +498,11 @@ mod m2_tests {
         )
         .unwrap();
         assert!(reg.bind("math::f", &types, &[a], &[ob], false).is_ok());
-        for (params, outputs, table) in [(vec![b], vec![ob], false), (vec![a], vec![b], false), (vec![a], vec![ob], true)] {
+        for (params, outputs, table) in [
+            (vec![b], vec![ob], false),
+            (vec![a], vec![b], false),
+            (vec![a], vec![ob], true),
+        ] {
             assert!(matches!(
                 reg.bind("math::f", &types, &params, &outputs, table),
                 Err(ValueError::ExternSignature { .. })
@@ -475,6 +527,9 @@ mod m2_tests {
         let n = paths.len();
         paths.dedup();
         assert_eq!(paths.len(), n);
-        assert_eq!(std_extern("blossom_std::checksum::crc32c").map(|e| e.ret), Some(HostType::Int(IntTy::U32)));
+        assert_eq!(
+            std_extern("blossom_std::checksum::crc32c").map(|e| e.ret),
+            Some(HostType::Int(IntTy::U32))
+        );
     }
 }

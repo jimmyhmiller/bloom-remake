@@ -361,15 +361,14 @@ pub fn open_with(
             remove_checkpoints(&*fs, dir)?;
         }
     }
-    // The blobs the recovered rows hold were made durable before their records synced (as files, or logged in a
-    // record and restored above): check it, so a store that lost one refuses to start rather than failing a later
-    // tick that reads it.
+    // The blobs the recovered rows hold were made durable before their records synced (put, or logged in a record
+    // and restored above): check it, so a store that lost one refuses to start rather than failing a later tick that
+    // reads it.
     let referenced = database.blob_counts()?;
-    // The provisional files of blobs no surviving record logs go (their bytes may have gone with their records).
-    blobs.drop_unrestored()?;
-    // Every blob the store holds is durable, or pending (logged in a surviving record, synced before its WAL goes);
-    // those no recovered row holds (a crash between a blob's write and its record's sync, or rows a replayed record
-    // deleted) are the node's first candidates for collection.
+    // Every blob the store holds is durable (what it found in its packs when it opened), or pending (logged in a
+    // surviving record, synced before its WAL goes); those no recovered row holds (a crash between a blob's write and
+    // its record's sync, rows a replayed record deleted, or a deleted blob a crash brought back) are the node's first
+    // candidates for collection.
     let stored: std::collections::BTreeSet<blossom_value::BlobRef> =
         blobs.list()?.into_iter().chain(blobs.pending_blobs()?).collect();
     if let Some(missing) = referenced.keys().find(|b| !stored.contains(b)) {
