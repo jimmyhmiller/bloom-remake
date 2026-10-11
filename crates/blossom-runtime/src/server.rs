@@ -39,8 +39,10 @@ use blossom_node::env::{Clock, Entropy};
 use blossom_node::recovery::{self, StoreSpec, tick_record};
 use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, NodeState, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
+use blossom_store::lsm::Flushed;
 use blossom_store::{
-    FileWal, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf, WalWriter,
+    FileWal, Lsn, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf,
+    WalWriter,
 };
 use blossom_value::Seed;
 use blossom_value::time::{Instant, NodeId, Tick};
@@ -128,6 +130,11 @@ pub struct Stats {
     pub wal_syncs_over_4ms: AtomicU64,
     pub wal_syncs_over_16ms: AtomicU64,
     pub wal_syncs_over_64ms: AtomicU64,
+    /// The time the promoter took making durable the blobs logged in the records each database flush covers (so the
+    /// WAL behind the flush can go), in total and at most, and how many blobs it made durable.
+    pub blob_promote_nanos: AtomicU64,
+    pub blob_promote_max_nanos: AtomicU64,
+    pub blobs_promoted: AtomicU64,
     /// How long messages from peers, and clients' stream data, waited between their reader queueing them and the
     /// engine taking them: at most, and how many waited over 4 ms.
     pub peer_wait_max_nanos: AtomicU64,
@@ -200,6 +207,9 @@ impl Stats {
             ("wal_syncs_over_4ms", r(&self.wal_syncs_over_4ms)),
             ("wal_syncs_over_16ms", r(&self.wal_syncs_over_16ms)),
             ("wal_syncs_over_64ms", r(&self.wal_syncs_over_64ms)),
+            ("blob_promote_nanos", r(&self.blob_promote_nanos)),
+            ("blob_promote_max_nanos", r(&self.blob_promote_max_nanos)),
+            ("blobs_promoted", r(&self.blobs_promoted)),
             ("peer_wait_max_nanos", r(&self.peer_wait_max_nanos)),
             ("peer_waits_over_4ms", r(&self.peer_waits_over_4ms)),
             ("stream_wait_max_nanos", r(&self.stream_wait_max_nanos)),
@@ -261,7 +271,7 @@ enum Control {
     Synced(SyncedTick),
     WalFailed(String),
     /// The database flushed: what its tables cover (the WAL may truncate behind it), or why it failed.
-    DatabaseFlushed(Result<blossom_store::lsm::Flushed, String>),
+    DatabaseFlushed(Result<Flushed, String>),
     /// Data was queued.
     Wake,
     Stop,
@@ -275,9 +285,20 @@ enum Commit {
         /// The blobs the record references that are not durable yet: made durable before the record syncs.
         blobs: Vec<(blossom_value::BlobRef, Arc<[u8]>)>,
     },
-    /// The database flushed: the WAL truncates the records its tables cover.
-    Truncate(blossom_store::lsm::Flushed),
+    /// The database flushed: the WAL truncates the records its tables cover, once the promoter has made the blobs
+    /// logged in them durable.
+    Truncate(Flushed),
 }
+
+/// A database flush handed to the promoter: the pending blobs logged in the records it covers (those before `below`)
+/// are made durable, and then the WAL behind it can be truncated.
+struct Promotion {
+    below: Option<Lsn>,
+    flushed: Flushed,
+}
+
+/// How long the committer waits for work before it looks for promotions that finished (their truncations).
+const TRUNCATE_POLL: Duration = Duration::from_millis(100);
 
 /// The bounded data queue between the readers and the engine.
 struct DataQueue {
@@ -656,10 +677,17 @@ impl Server {
         // flushes when the engine asks, and the committer truncates the WAL behind each flush.
         let db = database;
         {
+            let (promote_tx, promote_rx) = mpsc::channel::<Promotion>();
+            let (promoted_tx, promoted_rx) = mpsc::channel::<Flushed>();
+            let (tx, promoter_stats) = (ctl_tx.clone(), stats.clone());
+            let blobs = blob_store.clone();
+            threads.push(spawn("promoter", move || {
+                promoter(&blobs, promote_rx, promoted_tx, tx, promoter_stats)
+            })?);
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();
             threads.push(spawn("committer", move || {
-                committer(wal, &blobs, commit_rx, tx, stats)
+                committer(wal, &blobs, commit_rx, promote_tx, promoted_rx, tx, stats)
             })?);
         }
         let flush = {
@@ -903,17 +931,25 @@ pub(crate) fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<Joi
 
 /// The committer (Invariant B): append everything submitted as one batch, sync once, report; and truncate the WAL
 /// behind the database's flushes.
+/// Appends each released tick's record to the WAL and syncs them in batches (the engine releases a tick's messages
+/// once its record is synced). A database flush's truncation goes to the promoter first, so its blob syncs never
+/// hold a WAL sync back; the WAL segments the flush covers go once the promoter is done with it.
 fn committer(
     mut wal: FileWal,
     blob_store: &blossom_store::BlobStore,
     rx: Receiver<Commit>,
+    promote: Sender<Promotion>,
+    promoted: Receiver<Flushed>,
     tx: Sender<Control>,
     stats: Arc<Stats>,
 ) {
     let mut batch: u64 = 0;
-    let mut truncates: Vec<blossom_store::lsm::Flushed> = Vec::new();
-    while let Ok(first) = rx.recv() {
-        let mut work = vec![first];
+    loop {
+        let mut work = match rx.recv_timeout(TRUNCATE_POLL) {
+            Ok(first) => vec![first],
+            Err(RecvTimeoutError::Timeout) => Vec::new(),
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
         while let Ok(more) = rx.try_recv() {
             work.push(more);
         }
@@ -957,7 +993,18 @@ fn committer(
                     }
                     appended += 1;
                 }
-                Commit::Truncate(f) => truncates.push(f),
+                Commit::Truncate(f) => {
+                    let below = match wal.covered(&f) {
+                        Ok(below) => below,
+                        Err(e) => {
+                            let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
+                            return;
+                        }
+                    };
+                    if promote.send(Promotion { below, flushed: f }).is_err() {
+                        return;
+                    }
+                }
             }
         }
         if appended > 0 {
@@ -992,22 +1039,46 @@ fn committer(
                 }
             }
         }
-        // Truncation happens at a batch boundary, after the sync: the blobs logged in the records a flush covers become
-        // files, and the older segments it wholly covers go.
-        for f in truncates.drain(..) {
-            let truncated = (|| -> Result<(), blossom_store::StoreError> {
-                if let Some(lsn) = wal.covered(&f)? {
-                    blob_store.sync_logged_below(lsn)?;
-                }
-                match wal.truncation(&f)? {
-                    Some(token) => wal.truncate_through(token),
-                    None => Ok(()),
-                }
-            })();
+        // Truncation happens at a batch boundary, after the sync: for each flush whose blobs the promoter made
+        // durable, the older segments it wholly covers go.
+        while let Ok(f) = promoted.try_recv() {
+            let truncated = wal.truncation(&f).and_then(|token| match token {
+                Some(token) => wal.truncate_through(token),
+                None => Ok(()),
+            });
             if let Err(e) = truncated {
                 let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
                 return;
             }
+        }
+    }
+}
+
+/// Makes durable the blobs logged in the records each database flush covers (a sync of each blob's file), then hands
+/// the flush back to the committer to truncate the WAL behind it. Ends when the committer does.
+fn promoter(
+    blob_store: &blossom_store::BlobStore,
+    rx: Receiver<Promotion>,
+    done: Sender<Flushed>,
+    tx: Sender<Control>,
+    stats: Arc<Stats>,
+) {
+    while let Ok(p) = rx.recv() {
+        let clock = Stopwatch::start();
+        if let Some(below) = p.below {
+            match blob_store.sync_logged_below(below) {
+                Ok(n) => bump(&stats.blobs_promoted, n as u64),
+                Err(e) => {
+                    let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
+                    return;
+                }
+            }
+        }
+        let took = clock.nanos();
+        bump(&stats.blob_promote_nanos, took);
+        stats.blob_promote_max_nanos.fetch_max(took, Ordering::Relaxed);
+        if done.send(p.flushed).is_err() {
+            return;
         }
     }
 }

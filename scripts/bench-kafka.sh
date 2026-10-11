@@ -8,12 +8,14 @@
 #   scripts/bench-kafka.sh produce [ARGS…]    kafka-producer-perf-test against the running cluster
 #   scripts/bench-kafka.sh consume [ARGS…]    kafka-consumer-perf-test against the running cluster
 #   scripts/bench-kafka.sh e2e [N] [SIZE]     kafka-e2e-latency against the running cluster
-#   scripts/bench-kafka.sh suite SYSTEM…      the whole workload against each system in turn (results in $OUT)
+#   scripts/bench-kafka.sh kill N             kill -9 broker N (1-3) of the running cluster
+#   scripts/bench-kafka.sh restart N          start broker N again on its data (after `kill`)
 #
 # Environment: KAFKA_HOME (default: the repository's .tools/kafka_*), BENCH_DIR (scratch data, default
 # /tmp/bench-kafka), BLOSSOM (the blossom binary, default target/release/blossom), REDPANDA_IMAGE, OUT; for Blossom,
 # TAIL_CERT (strict | crc), TIERED (true | false: storage.tiered) and RECORD=1 (each broker records a trace into
-# $BENCH_DIR/blossom/traces).
+# $BENCH_DIR/blossom/traces). BROKER_CPUS pins the brokers of Blossom and Kafka: three `taskset -c` lists separated by
+# spaces, one per broker (e.g. "0-3,16-19 4-7,20-23 8-11,24-27"). PARTITIONS=0 creates no topic.
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 KAFKA_HOME=${KAFKA_HOME:-$(ls -d "$ROOT"/.tools/kafka_* 2>/dev/null | head -1)}
@@ -53,11 +55,25 @@ blossom_up() {
   } > "$d/deploy.toml"
   printf 'seed = "00112233445566778899aabbccddeeff"\n' > "$d/k.secrets"
   chmod 600 "$d/k.secrets"
-  for i in 1 2 3; do
-    nohup "$BLOSSOM" run --deploy "$d/deploy.toml" --node "b$i" --insecure-dev --init-fresh --stats "$d/b$i.stats" \
-      ${RECORD:+--record "$d/traces"} > "$d/b$i.log" 2>&1 &
-    echo $! >> "$BENCH_DIR/pids"
-  done
+  echo blossom > "$BENCH_DIR/system"
+  for i in 1 2 3; do blossom_start "$i" --init-fresh; done
+}
+
+# Broker $1 of the Blossom cluster; `--init-fresh` (for a new cluster) as $2, or nothing to recover from its store.
+blossom_start() {
+  local d=$BENCH_DIR/blossom i=$1
+  nohup $(pin "$i") "$BLOSSOM" run --deploy "$d/deploy.toml" --node "b$i" --insecure-dev ${2:-} \
+    --stats "$d/b$i.stats" ${RECORD:+--record "$d/traces"} >> "$d/b$i.log" 2>&1 &
+  echo $! > "$BENCH_DIR/pid.$i"
+}
+
+# `taskset -c LIST` for broker $1 when BROKER_CPUS is set.
+pin() {
+  [ -n "${BROKER_CPUS:-}" ] || return 0
+  local cpus
+  read -ra cpus <<< "$BROKER_CPUS"
+  [ "${#cpus[@]}" = 3 ] || die "BROKER_CPUS needs three CPU lists"
+  echo "taskset -c ${cpus[$(($1 - 1))]}"
 }
 
 # ---- Apache Kafka: three KRaft nodes, each broker and controller (a static quorum). `log.flush.interval.messages=1`:
@@ -87,10 +103,14 @@ P
     fi
     "$K/kafka-storage.sh" format -t "$id" -c "$d/k$i.properties" > /dev/null
   done
-  for i in 1 2 3; do
-    LOG_DIR=$d/logs$i nohup "$K/kafka-server-start.sh" "$d/k$i.properties" > "$d/k$i.out" 2>&1 &
-    echo $! >> "$BENCH_DIR/pids"
-  done
+  echo kafka > "$BENCH_DIR/system"
+  for i in 1 2 3; do kafka_start "$i"; done
+}
+
+kafka_start() {
+  local d=$BENCH_DIR/kafka i=$1
+  LOG_DIR=$d/logs$i nohup $(pin "$i") "$K/kafka-server-start.sh" "$d/k$i.properties" >> "$d/k$i.out" 2>&1 &
+  echo $! > "$BENCH_DIR/pid.$i"
 }
 
 # ---- Redpanda: three containers on the host network, one core and 2 GiB each, production mode (fsync on; the
@@ -140,14 +160,13 @@ Y
 wait_ready() {
   local i pid
   for i in $(seq 1 60); do
-    if [ -f "$BENCH_DIR/pids" ]; then
-      while read -r pid; do
-        if ! kill -0 "$pid" 2> /dev/null; then
-          tail -n 20 "$BENCH_DIR"/*/b1.log "$BENCH_DIR"/*/k1.out 2> /dev/null >&2
-          die "a broker exited while starting"
-        fi
-      done < "$BENCH_DIR/pids"
-    fi
+    for f in "$BENCH_DIR"/pid.*; do
+      [ -f "$f" ] || continue
+      if ! kill -0 "$(cat "$f")" 2> /dev/null; then
+        tail -n 20 "$BENCH_DIR"/*/b1.log "$BENCH_DIR"/*/k1.out 2> /dev/null >&2
+        die "a broker exited while starting"
+      fi
+    done
     if timeout 10 "$K/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --list > /dev/null 2>&1; then
       return 0
     fi
@@ -157,15 +176,18 @@ wait_ready() {
 }
 
 create_topic() {
+  [ "$PARTITIONS" != 0 ] || return 0
   timeout 60 "$K/kafka-topics.sh" --bootstrap-server "$BOOTSTRAP" --create --topic "$TOPIC" \
     --partitions "$PARTITIONS" --replication-factor 3 > /dev/null
 }
 
 down() {
-  if [ -f "$BENCH_DIR/pids" ]; then
-    xargs -r kill < "$BENCH_DIR/pids" 2> /dev/null || true
-    rm -f "$BENCH_DIR/pids"
-  fi
+  local f
+  for f in "$BENCH_DIR"/pid.*; do
+    [ -f "$f" ] || continue
+    kill "$(cat "$f")" 2> /dev/null || true
+    rm -f "$f"
+  done
   if command -v podman > /dev/null; then
     for i in 1 2 3; do podman rm -f "bench-rp$i" > /dev/null 2>&1 || true; done
   fi
@@ -199,6 +221,20 @@ case "$cmd" in
     # One record at a time, produced with acks=all and consumed: the time from send to receipt.
     # Arguments: the number of records and their size.
     "$K/kafka-e2e-latency.sh" "$BOOTSTRAP" "$TOPIC" "${1:-2000}" all "${2:-1024}"
+    ;;
+  kill)
+    [ -f "$BENCH_DIR/pid.${1:-}" ] || die "kill: no broker ${1:-} running"
+    kill -9 "$(cat "$BENCH_DIR/pid.$1")"
+    rm -f "$BENCH_DIR/pid.$1"
+    ;;
+  restart)
+    case "${1:-}" in 1 | 2 | 3) ;; *) die "restart: a broker, 1-3" ;; esac
+    [ ! -f "$BENCH_DIR/pid.$1" ] || die "restart: broker $1 is running"
+    case "$(cat "$BENCH_DIR/system")" in
+      blossom) blossom_start "$1" ;;
+      kafka) kafka_start "$1" ;;
+      *) die "restart: only Blossom and Kafka brokers" ;;
+    esac
     ;;
   *) sed -n '2,15p' "$0" >&2; exit 2 ;;
 esac

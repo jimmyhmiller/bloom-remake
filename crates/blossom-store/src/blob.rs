@@ -13,6 +13,11 @@
 //! So a blob's name only ever holds synced bytes (a power loss can keep a provisional name and lose its bytes, after a
 //! directory sync of something else); a provisional file is never trusted; and reading either checks the hash.
 //!
+//! `sync_logged_below` runs on its own thread while the committer goes on logging (one sync a blob would otherwise
+//! hold back every record behind them). So a pending blob's provisional file is never written again (logged anew,
+//! its bytes are already in the earlier record, which outlives the file's sync), and promotions take turns
+//! (`promoting`): a blob is synced and renamed once, by whichever promotion finds it still pending first.
+//!
 //! The bytes of the blobs written or read most recently are also kept in memory (`CACHE_BYTES`): a node reads a blob
 //! back soon after writing it (a Raft entry replicated or applied in the next tick), and a blob's bytes are its name.
 
@@ -38,6 +43,9 @@ pub struct BlobStore {
     dir: PathBuf,
     known: Mutex<Known>,
     cache: Mutex<Cache>,
+    /// Held while a pending blob is promoted (synced and renamed to its name), so two promotions of one blob (a
+    /// truncation's and a put's) never interleave.
+    promoting: Mutex<()>,
 }
 
 /// How many bytes of recently written or read blobs the store keeps in memory.
@@ -133,6 +141,7 @@ impl BlobStore {
             dir,
             known: Mutex::new(Known::default()),
             cache: Mutex::new(Cache::default()),
+            promoting: Mutex::new(()),
         })
     }
 
@@ -144,6 +153,12 @@ impl BlobStore {
         self.cache
             .lock()
             .map_err(|_| invalid("the blob store's cache lock is poisoned"))
+    }
+
+    fn promoting(&self) -> Result<std::sync::MutexGuard<'_, ()>, StoreError> {
+        self.promoting
+            .lock()
+            .map_err(|_| invalid("the blob store's promotion lock is poisoned"))
     }
 
     fn known(&self) -> Result<std::sync::MutexGuard<'_, Known>, StoreError> {
@@ -198,7 +213,8 @@ impl BlobStore {
     }
 
     /// Syncs a pending blob's provisional file and renames it to its name (its directory entry still to be synced).
-    /// `Ok(false)` if the provisional file is gone.
+    /// `Ok(false)` if the provisional file is gone (a delete may remove it at any point). The caller holds
+    /// `promoting`.
     fn promote(&self, b: &BlobRef) -> Result<bool, StoreError> {
         let logged = self.logged_path(b);
         match self.fs.open(&logged, OpenOpts::default()) {
@@ -206,8 +222,11 @@ impl BlobStore {
             Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e),
         }
-        self.fs.rename(&logged, &self.path(b))?;
-        Ok(true)
+        match self.fs.rename(&logged, &self.path(b)) {
+            Ok(()) => Ok(true),
+            Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Whether the file at `path` holds `b`'s bytes: `None` if there is no such file.
@@ -234,18 +253,20 @@ impl BlobStore {
 
     /// Records that `blobs` are logged in the WAL record at `at` (appended, so durable once it syncs) and writes
     /// their provisional files without a sync, so they can be read at once. They stay pending until
-    /// `sync_logged_below`.
+    /// `sync_logged_below`. A blob already pending keeps its file and its earlier record (which a promotion may be
+    /// syncing and renaming right now).
     pub fn write_logged(&self, blobs: &[BlobBytes], at: Lsn) -> Result<(), StoreError> {
         for (b, bytes) in blobs {
             Self::check(b, bytes)?;
             self.cache()?.insert(*b, bytes.clone());
-            if self.known()?.durable.contains(b) {
-                continue;
+            {
+                let known = self.known()?;
+                if known.durable.contains(b) || known.pending.contains_key(b) {
+                    continue;
+                }
             }
             self.write_logged_file(b, bytes)?;
-            let mut known = self.known()?;
-            let e = known.pending.entry(*b).or_insert(at);
-            *e = (*e).min(at);
+            self.known()?.pending.insert(*b, at);
         }
         Ok(())
     }
@@ -313,7 +334,7 @@ impl BlobStore {
     /// one's provisional file and renames it to its name, then syncs the directory once. A blob deleted meanwhile is
     /// skipped; one logged again meanwhile (deleted and written anew) stays pending under its new position. A pending
     /// blob whose file is gone otherwise is an error: the WAL that logs it must not go. Returns how many it made
-    /// durable. Holds no lock while it syncs, so the committer keeps logging.
+    /// durable. Holds `known` only between syncs, so the committer keeps logging.
     pub fn sync_logged_below(&self, lsn: Lsn) -> Result<usize, StoreError> {
         let due: Vec<(BlobRef, Lsn)> = self
             .known()?
@@ -324,6 +345,11 @@ impl BlobStore {
             .collect();
         let mut synced = Vec::new();
         for (b, at) in due {
+            let _turn = self.promoting()?;
+            if self.known()?.pending.get(&b) != Some(&at) {
+                // Deleted, or made durable by a put, meanwhile.
+                continue;
+            }
             if !self.promote(&b)? {
                 if self.known()?.pending.get(&b) == Some(&at) {
                     return Err(invalid(format!(
@@ -375,8 +401,13 @@ impl BlobStore {
             if durable.contains(b) || wrote.contains(b) {
                 continue;
             }
-            // A pending blob's provisional file is synced and renamed; otherwise (or if it is gone) written anew.
-            if !(pending.contains(b) && self.promote(b)?) {
+            // A pending blob's provisional file is synced and renamed; otherwise (or if it is gone: a truncation's
+            // promotion may have renamed it, its directory entry not yet synced) written anew.
+            let promoted = pending.contains(b) && {
+                let _turn = self.promoting()?;
+                self.promote(b)?
+            };
+            if !promoted {
                 self.write_synced(b, bytes)?;
             }
             wrote.push(*b);
@@ -490,6 +521,7 @@ impl blossom_value::BlobSource for BlobStore {
 mod tests {
     use super::*;
     use crate::SimFs;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn blobs_round_trip_and_names_parse() {
@@ -587,6 +619,80 @@ mod tests {
         store.write_logged(&[(rx, x.clone())], Lsn(3)).unwrap();
         fs.remove(&store.logged_path(&rx)).unwrap();
         assert!(store.sync_logged_below(Lsn(4)).is_err());
+    }
+
+    /// A blob logged again while pending keeps its provisional file (a promotion may be syncing and renaming it) and
+    /// its earlier record: the second write touches no file.
+    #[test]
+    fn a_pending_blob_logged_again_keeps_its_file_and_its_first_record() {
+        let fs = SimFs::default();
+        let store = BlobStore::open(Arc::new(fs.clone()), Path::new("/n")).unwrap();
+        let x: Arc<[u8]> = Arc::from(&b"logged twice"[..]);
+        let rx = BlobRef::of(&x);
+        store.write_logged(&[(rx, x.clone())], Lsn(5)).unwrap();
+        fs.remove(&store.logged_path(&rx)).unwrap();
+        store.write_logged(&[(rx, x.clone())], Lsn(9)).unwrap();
+        // Not written again: its first record's truncation finds the file gone (and so refuses).
+        assert!(store.sync_logged_below(Lsn(6)).is_err());
+
+        let fs = SimFs::default();
+        let store = BlobStore::open(Arc::new(fs.clone()), Path::new("/n")).unwrap();
+        store.write_logged(&[(rx, x.clone())], Lsn(5)).unwrap();
+        store.write_logged(&[(rx, x.clone())], Lsn(9)).unwrap();
+        assert_eq!(store.sync_logged_below(Lsn(6)).unwrap(), 1);
+        let (_, recovered) = crashed(&fs);
+        assert_eq!(recovered.read(&rx).unwrap().as_deref(), Some(&x[..]));
+    }
+
+    /// The committer logs (and logs again) while the promoter makes earlier records' blobs durable and puts sync some
+    /// of the same blobs: nothing fails, and after a power loss every blob made durable reads back whole.
+    #[test]
+    fn promotions_run_beside_logging_and_puts() {
+        for round in 0..20u64 {
+            let fs = SimFs::default();
+            let store = Arc::new(BlobStore::open(Arc::new(fs.clone()), Path::new("/n")).unwrap());
+            let blobs: Vec<BlobBytes> = (0..200u64)
+                .map(|i| {
+                    let bytes: Arc<[u8]> = Arc::from(format!("blob {i} of round {round}").into_bytes());
+                    (BlobRef::of(&bytes), bytes)
+                })
+                .collect();
+            let logged = Arc::new(AtomicU64::new(0));
+            let committer = {
+                let (store, blobs, logged) = (store.clone(), blobs.clone(), logged.clone());
+                std::thread::spawn(move || {
+                    for (i, b) in blobs.iter().enumerate() {
+                        let at = Lsn(2 * i as u64 + 1);
+                        store.write_logged(std::slice::from_ref(b), at).unwrap();
+                        // An earlier blob logged again, maybe while it is being promoted.
+                        let again = blobs.get(i / 2).unwrap();
+                        store.write_logged(std::slice::from_ref(again), Lsn(at.0 + 1)).unwrap();
+                        logged.store(at.0 + 2, Ordering::SeqCst);
+                    }
+                })
+            };
+            let putter = {
+                let (store, blobs) = (store.clone(), blobs.clone());
+                std::thread::spawn(move || {
+                    for b in blobs.iter().step_by(7) {
+                        store.put_all(std::slice::from_ref(b)).unwrap();
+                    }
+                })
+            };
+            let mut made = 0;
+            while !committer.is_finished() {
+                made += store.sync_logged_below(Lsn(logged.load(Ordering::SeqCst))).unwrap();
+            }
+            committer.join().unwrap();
+            putter.join().unwrap();
+            made += store.sync_logged_below(Lsn(u64::MAX)).unwrap();
+            assert!(made > 0);
+            assert_eq!(store.pending().unwrap(), 0);
+            let (_, recovered) = crashed(&fs);
+            for (b, bytes) in &blobs {
+                assert_eq!(recovered.read(b).unwrap().as_deref(), Some(&bytes[..]), "round {round}");
+            }
+        }
     }
 
     #[test]
