@@ -630,7 +630,10 @@ fn project_role_basic() {
     let valid = ValidatedProgram::validate(p).unwrap();
     let projection = valid.project(a).unwrap();
     assert_eq!(projection.get().rules.len(), 1);
-    assert_eq!(projection.get().rules.get(RuleId::from_raw(0)).unwrap().role, None);
+    // The rule keeps its guard: role A, in the projection's numbering.
+    let q = projection.get();
+    let kept = q.rules.get(RuleId::from_raw(0)).unwrap().role.unwrap();
+    assert_eq!(q.roles.get(kept).unwrap().name, name("A"));
 }
 
 #[test]
