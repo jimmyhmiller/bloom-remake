@@ -183,7 +183,7 @@ at Browser {
             ul[id: "lines"](class: "lines") {
                 for lines(w, k, at, t) {
                     li[id: f"line-{k}-{w}", pos: at.as_millis()](class: "line") {
-                        span[id: f"who-{k}-{w}"](class: "who") { w.to_string() }
+                        span[id: f"who-{k}-{w}"](class: "who") { (if w == self { "you" } else { w.to_string() }) }
                         span[id: f"text-{k}-{w}"](class: "text") { t }
                     }
                 }

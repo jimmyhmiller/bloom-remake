@@ -168,6 +168,9 @@ test.describe("keyed chat as a Vercel function", () => {
 
       await say(a, "hello from a");
       await expect(lines(b)).toHaveText(["hello from a"]);
+      // A tab's own lines are "you" to it, and its name to the others.
+      await expect(a.locator(".line:not(.pending) .who")).toHaveText(["you"]);
+      await expect(b.locator(".line .who")).toHaveText([/^Browser/]);
       await expect(bid(a, `go-${dinner}`)).toHaveText(dinner, { timeout: 30_000 });
       await expect(bid(d, `go-${lunch}`)).toHaveText(lunch, { timeout: 30_000 });
 
@@ -246,6 +249,7 @@ test.describe("keyed chat as a Vercel function", () => {
       await expect(page.locator(".line.pending .text")).toHaveText(["right away"], { timeout: 1000 });
       await expect(page.locator(".line.pending")).toHaveCount(0, { timeout: 15_000 });
       await expect(lines(page)).toHaveText(["right away"]);
+      await expect(page.locator(".line .who")).toHaveText(["you"]);
     } finally {
       if (c) await c.remove();
     }
