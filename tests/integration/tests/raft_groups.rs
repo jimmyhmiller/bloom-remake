@@ -433,6 +433,99 @@ fn a_leader_whose_ticks_are_slow_keeps_its_group() {
     }
 }
 
+/// A leader sends each follower each entry once, however late the follower's acknowledgements (examples/kafka/raft.bls,
+/// docs/plan/notes/SCALE.md): messages take 40-60 ms each way, so an acknowledgement comes back after the next
+/// heartbeat (50 ms), while the leader appends an entry every 30 ms. The leader pipelines new entries after what it sent; it once also sent everything
+/// after what a follower had acknowledged at every heartbeat and at every acknowledgement short of its log, so a
+/// follower slower than a heartbeat was sent its in-flight entries again and again (under load, the copies filled the
+/// followers' queues and kept them full after the load was gone).
+#[test]
+fn followers_slower_than_a_heartbeat_are_sent_each_entry_once() {
+    use blossom_value::time::NodeId;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let entries = artifact.rel_named("entries").unwrap();
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                latency: (40_000_000, 60_000_000),
+                record: blossom_integration_tests::sim_record(&format!("slow-followers-seed{seed}")),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        // How many times each follower was sent each index of `all`, by its leader.
+        let sent: Rc<RefCell<BTreeMap<(u32, u64), u64>>> = Rc::default();
+        {
+            let (sent, g) = (sent.clone(), d.g.clone());
+            d.c.tap_peers(Box::new(move |from, to, rel, row| {
+                if rel != entries || !row.iter().any(|v| *v == g) {
+                    return;
+                }
+                let Some(Value::Vec(es)) = row.last() else {
+                    panic!("an entries message without its entries: {row:?}")
+                };
+                for e in es.iter() {
+                    let Value::Tuple(fields) = e else {
+                        panic!("an entry that is not a tuple: {e:?}")
+                    };
+                    let Some(Value::Int(i)) = fields.first() else {
+                        panic!("an entry without its index: {e:?}")
+                    };
+                    let i = u64::try_from(i.to_i128().unwrap()).unwrap();
+                    *sent.borrow_mut().entry((from.0 * 16 + to.0, i)).or_default() += 1;
+                }
+            }));
+        }
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        d.wait(500_000_000);
+        let start = d.last(l).1;
+        d.wait(6_000_000_000);
+        for &n in &all {
+            d.c.input(n, d.hold, std::sync::Arc::from(vec![d.g.clone()])).unwrap();
+        }
+        d.wait(3_000_000_000);
+        assert_eq!(d.leads(l), Some(t), "seed {seed}: the leader lost its group");
+        let end = d.last(l).1;
+        assert!(
+            end > start + 100,
+            "seed {seed}: the leader appended only {} entries",
+            end - start
+        );
+        let sent = sent.borrow();
+        for &f in &all {
+            if f == l {
+                continue;
+            }
+            for i in start + 1..=end {
+                let n = sent.get(&(l.0 * 16 + f.0, i)).copied().unwrap_or(0);
+                assert_eq!(n, 1, "seed {seed}: b{} was sent entry {i} {n} times", f.0 + 1);
+            }
+        }
+    }
+}
+
 /// A directed run of the harness (CheckQuorum and PreVote on) with every group held at every broker, once each has
 /// a leader: no group proposes, so every one goes idle.
 #[cfg(test)]

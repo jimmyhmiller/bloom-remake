@@ -658,6 +658,9 @@ at Broker {
         if rsent(g, f, m) {
             delete rsent(g, f, m);
         }
+        if repl_wait(g, f, at, w, b) {
+            delete repl_wait(g, f, at, w, b);
+        }
         if isr_term(g, t) {
             delete isr_term(g, t);
         }

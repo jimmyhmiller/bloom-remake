@@ -115,3 +115,50 @@ I/O priority.
   flush, as recovery already makes every stored blob no row holds a candidate). `drop_unrestored` goes. Stores from
   before: blob files `<hash>-<len>` are adopted as loose blobs (read, deleted, never written again); provisional
   `.log` files are removed (their surviving records log them again).
+
+## The full soak after packs: overload collapse (Raft resends)
+
+Kafka 4.0 full soak (fsync per append; `~/soak-results/kafka-1`): max phase ~19.6k records/s (4 x 4.9k, ack p50
+5.5 s: unthrottled producers queue); fixed 2000/s for 30 min with a broker killed: ack p50 202 ms, p99 2.5 s, p99.9
+11 s (the kill: KRaft's 9 s session timeout); 9 637 669 acknowledged, verify OK (none lost, misplaced or duplicated);
+brokers ~16% CPU, ~1.3 GB RSS; 29 GB on disk.
+
+Blossom with packs (`~/soak-results/blossom-1`, stopped): under the unthrottled max phase acks fell from ~5k/s to 0
+within 100 s, peers' messages waited up to 15.8 s in the engine's queue, RSS reached 8.5 GB, ~272k records failed; 14
+minutes after the load stopped every broker was still at 100% CPU and the consumers had not moved.
+
+Recorded (`~/soak-rec.sh 30 60`: 30 s of overload, then 60 s with no client), read with `blossom trace`:
+- `out_from` + `rsent` histories on b2 over 5 s of load: 960 of 1920 batch sends started below what the leader had
+  already sent (resends of 4-8 entries in flight). Two rules did it: at every heartbeat the leader sent each non-idle
+  group's followers everything after what they had acknowledged, and every acknowledgement short of the log sent
+  again from it, although pipelined sends after `rsent` already carried those entries.
+- `trace profile` of b2 10-20 s after the load stopped: 114 ticks in 10 s, 60 976 incoming entries stored, nearly all
+  copies the follower already held (each hashed, written, logged): with acknowledgements seconds late, every heartbeat
+  re-sent every group's in-flight entries, and the queues never drained.
+
+## Fix 3: Raft replication without resends of in-flight entries (examples/kafka/raft.bls)
+
+As etcd's raft: the leader pipelines new entries after `rsent` while fewer than `RAFT_INFLIGHT` (256) are sent past
+what the follower holds (what it acknowledged, or `base`: the leader's last index when it began leading or tracking
+it, since `match_idx` is 0 then). It goes back to what a follower acknowledged (`go_back`, `go_back_missed`):
+- at once when a heartbeat finds the follower short of what the leader had sent before it (`beat` carries `upto`; a
+  connection delivers in order, so the follower lost a batch and says `missed`);
+- when the follower has acknowledged nothing new for `RAFT_RESEND` (500 ms, doubled each time in a row up to
+  `RAFT_RESEND_MAX`, 8 s) and is heard alive: a lost acknowledgement, or a conflicting suffix the heartbeat cannot see.
+A follower skips a batch whose last entry it holds with the same term (Log Matching: it holds all of it) and entries
+it holds, and acknowledges them all the same.
+
+Found on the way, by the suites: `initial_lead` (every Kafka partition's first leader) set `rsent`/`match_idx` but no
+`repl_wait`, so its window never opened (kafka_groups' Calm scenario: a group never settled); a timer alone (500 ms)
+recovered from lost batches too slowly under kafka_topics' faults (only 32 requests answered; the old code went back
+at every 50 ms heartbeat), hence `missed`; an empty batch made `batch_held` underflow (`BLSR004`).
+
+Test: `raft_groups::followers_slower_than_a_heartbeat_are_sent_each_entry_once` (40-60 ms latency each way, a tap on
+the simulator's peer messages, `Cluster::tap_peers`): every entry goes to each follower exactly once; the old rules
+sent entry 19 to b2 43 times. Suites: raft_groups, raft_kv, kafka_sim, kafka_groups, kafka_topics, kafka_ldfi (fast
+tier), kafka_retention, node_blobs, node_database pass.
+
+Same overload experiment after (30 s of 4 unthrottled producers, 60 s quiet): ~210k records acknowledged in 30 s
+(~7k/s, ~96k before), the four producers now even (46-63k each); peers' longest wait 157-235 ms (was 4.0-13.5 s);
+10-12% busy after the load (it recovers). Left: WAL syncs up to 1.8 s on the shared disk under this load, ticks up to
+317 ms, so leaders still step down (~6300 NOT_LEADER in 30 s): every message of a tick waits for its WAL sync.

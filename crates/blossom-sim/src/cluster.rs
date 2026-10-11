@@ -315,6 +315,8 @@ pub struct Cluster<'p> {
     run: ClusterRun,
     protocol: Box<dyn ClientProtocol + 'p>,
     observers: Vec<Box<dyn Observer + 'p>>,
+    /// Each sees every message a node sends a peer (before the network loses it or not).
+    taps: Vec<PeerTap<'p>>,
     /// Whether clients hold off starting new operations (operations in flight continue).
     clients_paused: bool,
     nemesis_at: i64,
@@ -325,6 +327,9 @@ pub struct Cluster<'p> {
 }
 
 const EPOCH: i64 = 1_000_000_000_000_000_000;
+
+/// A test's view of the messages between nodes: the sender, the receiver, the channel and the row.
+pub type PeerTap<'p> = Box<dyn FnMut(NodeId, NodeId, RelId, &Row) + 'p>;
 
 fn node_id(i: usize) -> Result<NodeId, SimError> {
     u32::try_from(i)
@@ -392,6 +397,7 @@ impl<'p> Cluster<'p> {
             run: ClusterRun::default(),
             protocol,
             observers: Vec::new(),
+            taps: Vec::new(),
             clients_paused: false,
             nemesis_at: i64::MAX,
             pipes: Vec::new(),
@@ -528,6 +534,11 @@ impl<'p> Cluster<'p> {
     /// Adds an invariant checked after every step.
     pub fn observe(&mut self, o: Box<dyn Observer + 'p>) {
         self.observers.push(o);
+    }
+
+    /// Adds a tap that sees every message a node sends a peer, as it leaves the node.
+    pub fn tap_peers(&mut self, tap: PeerTap<'p>) {
+        self.taps.push(tap);
     }
 
     /// Runs the workload, with the nemesis if configured, to the end of the configured duration.
@@ -943,6 +954,9 @@ impl<'p> Cluster<'p> {
                         row: s.row,
                     });
                     continue;
+                }
+                for tap in &mut self.taps {
+                    tap(n, s.to, s.rel, &s.row);
                 }
                 if self.blocked.contains(&(n, s.to)) || self.rng.chance_ppm(self.cfg.loss_ppm) {
                     self.run.dropped += 1;

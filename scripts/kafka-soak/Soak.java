@@ -10,6 +10,11 @@
 //            group has read N records or nothing came for --idle seconds.
 //   verify   reads every partition of the topics from its start to its end and checks that each acknowledged record in
 //            --out is at the offset its acknowledgement gave, and that no record appears twice.
+//   report   per phase of a soak (from --events, the soak's events.log), the throughput and the exact latency percentiles
+//            of every client in --dir together, from their histogram logs.
+//
+// `produce` and `consume` with --hlog FILE also write each second's latency histogram to FILE (HdrHistogram's log
+// format, timestamps in seconds since the epoch), which `report` merges over any window.
 //
 // A record's value starts with a header: MAGIC, the producer's id, its sequence number and the time it was meant to be
 // sent (microseconds since the epoch). Paced, that is the time of its slot, not of the send() call, so a stalled client
@@ -28,6 +33,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.concurrent.locks.LockSupport;
 import org.HdrHistogram.Histogram;
+import org.HdrHistogram.HistogramLogReader;
+import org.HdrHistogram.HistogramLogWriter;
 import org.HdrHistogram.Recorder;
 import org.apache.kafka.clients.consumer.*;
 import org.apache.kafka.clients.producer.*;
@@ -47,6 +54,7 @@ public class Soak {
             case "produce" -> System.exit(produce(o));
             case "consume" -> System.exit(consume(o));
             case "verify" -> System.exit(verify(o));
+            case "report" -> System.exit(report(o));
             default -> usage("unknown mode " + args[0]);
         }
     }
@@ -83,6 +91,7 @@ public class Soak {
         Map<String, Short> topicIndex = new HashMap<>();
         for (short i = 0; i < topics.size(); i++) topicIndex.put(topics.get(i), i);
 
+        HistogramLogWriter hlog = histogramLog(o);
         System.out.println("t,sent,acked,failed,ack_p50_ms,ack_p99_ms,ack_p999_ms,ack_max_ms");
         long start = System.nanoTime();
         long wallStart = nowMicros();
@@ -91,6 +100,7 @@ public class Soak {
         ticker.scheduleAtFixedRate(() -> {
             Histogram h = ackLatency.getIntervalHistogram();
             synchronized (total) { total.add(h); }
+            logInterval(hlog, h);
             System.out.printf("%d,%d,%d,%d,%s,%s,%s,%s%n", (System.nanoTime() - start) / 1_000_000_000L,
                 sent.get(), acked.get(), failed.get(), ms(h, 50), ms(h, 99), ms(h, 99.9), ms(h, 100));
         }, 1, 1, TimeUnit.SECONDS);
@@ -137,7 +147,10 @@ public class Soak {
         ticker.shutdown();
         ticker.awaitTermination(5, TimeUnit.SECONDS);
         synchronized (ackLog) { ackLog.close(); }
-        synchronized (total) { total.add(ackLatency.getIntervalHistogram()); }
+        Histogram last = ackLatency.getIntervalHistogram();
+        synchronized (total) { total.add(last); }
+        logInterval(hlog, last);
+        if (hlog != null) hlog.close();
         double elapsed = (System.nanoTime() - start) / 1e9;
         System.out.printf("# produce id=%d sent=%d acked=%d failed=%d seconds=%.1f acked_per_s=%.0f ack_p50_ms=%s "
                 + "ack_p99_ms=%s ack_p999_ms=%s ack_max_ms=%s errors=%s%n", id, sent.get(), acked.get(), failed.get(),
@@ -169,6 +182,7 @@ public class Soak {
         Recorder e2e = new Recorder(3);
         Histogram total = new Histogram(3);
         long read = 0, foreign = 0, rebalances = 0;
+        HistogramLogWriter hlog = histogramLog(o);
         System.out.println("t,read,e2e_p50_ms,e2e_p99_ms,e2e_p999_ms,e2e_max_ms");
         long start = System.nanoTime();
         long nextReport = start + 1_000_000_000L;
@@ -195,6 +209,7 @@ public class Soak {
                 if (t >= nextReport) {
                     Histogram h = e2e.getIntervalHistogram();
                     total.add(h);
+                    logInterval(hlog, h);
                     System.out.printf("%d,%d,%s,%s,%s,%s%n", (t - start) / 1_000_000_000L, read, ms(h, 50), ms(h, 99),
                         ms(h, 99.9), ms(h, 100));
                     nextReport += 1_000_000_000L;
@@ -204,7 +219,10 @@ public class Soak {
             }
             consumer.commitSync(Duration.ofSeconds(60));
         }
-        total.add(e2e.getIntervalHistogram());
+        Histogram last = e2e.getIntervalHistogram();
+        total.add(last);
+        logInterval(hlog, last);
+        if (hlog != null) hlog.close();
         double elapsed = (System.nanoTime() - start) / 1e9;
         double reading = (lastRecord - start) / 1e9;
         System.out.printf("# consume id=%s read=%d foreign=%d assignments=%d seconds=%.1f read_per_s=%.0f e2e_p50_ms=%s "
@@ -322,7 +340,84 @@ public class Soak {
         return ok ? 0 : 1;
     }
 
+    // ---- report
+
+    /// A phase of the soak: a name and its window, in seconds since the epoch.
+    record Window(String name, double from, double to) {}
+
+    static int report(Map<String, String> o) throws Exception {
+        Path dir = Path.of(need(o, "dir"));
+        // events.log: "<seconds since the soak began> <seconds since the epoch> <what>".
+        Map<String, Double> at = new LinkedHashMap<>();
+        for (String line : Files.readAllLines(Path.of(need(o, "events")))) {
+            String[] f = line.split(" ", 3);
+            if (f.length < 3) continue;
+            double t = Double.parseDouble(f[1]);
+            for (String key : List.of("max:", "max done", "fixed:", "killed broker", "restarted broker", "fixed done")) {
+                if (f[2].startsWith(key)) at.putIfAbsent(key, t);
+            }
+        }
+        List<Window> windows = new ArrayList<>();
+        if (at.containsKey("max:") && at.containsKey("max done")) {
+            windows.add(new Window("max", at.get("max:"), at.get("max done")));
+        }
+        if (at.containsKey("fixed:") && at.containsKey("killed broker")) {
+            windows.add(new Window("fixed, steady", at.get("fixed:") + 30, at.get("killed broker")));
+        }
+        if (at.containsKey("killed broker") && at.containsKey("restarted broker")) {
+            windows.add(new Window("fixed, broker down and back (60 s after)", at.get("killed broker"),
+                at.get("restarted broker") + 60));
+        }
+        if (at.containsKey("restarted broker") && at.containsKey("fixed done")) {
+            windows.add(new Window("fixed, after recovery", at.get("restarted broker") + 60, at.get("fixed done")));
+        }
+        System.out.println("phase,seconds,produce_acked_per_s,ack_p50_ms,ack_p99_ms,ack_p999_ms,ack_max_ms,"
+            + "consumed_per_s,e2e_p50_ms,e2e_p99_ms,e2e_p999_ms,e2e_max_ms");
+        for (Window w : windows) {
+            String producers = w.name().equals("max") ? "producer-max-" : "producer-fixed-";
+            Histogram ack = merged(dir, producers, w);
+            Histogram e2e = merged(dir, "consumer-live-", w);
+            double secs = w.to() - w.from();
+            System.out.printf("%s,%.0f,%.0f,%s,%s,%s,%s,%.0f,%s,%s,%s,%s%n", w.name(), secs, ack.getTotalCount() / secs,
+                ms(ack, 50), ms(ack, 99), ms(ack, 99.9), ms(ack, 100), e2e.getTotalCount() / secs, ms(e2e, 50),
+                ms(e2e, 99), ms(e2e, 99.9), ms(e2e, 100));
+        }
+        return 0;
+    }
+
+    /// The intervals of every histogram log in `dir` named `prefix…` that end inside `w`, added together.
+    static Histogram merged(Path dir, String prefix, Window w) throws IOException {
+        Histogram sum = new Histogram(3);
+        try (DirectoryStream<Path> logs = Files.newDirectoryStream(dir, prefix + "*.hlog")) {
+            for (Path log : logs) {
+                HistogramLogReader r = new HistogramLogReader(log.toFile());
+                while (r.hasNext()) {
+                    Histogram h = (Histogram) r.nextIntervalHistogram();
+                    if (h == null) break;
+                    double end = h.getEndTimeStamp() / 1000.0;
+                    if (end > w.from() && end <= w.to()) sum.add(h);
+                }
+            }
+        }
+        return sum;
+    }
+
     // ---- helpers
+
+    /// The histogram log --hlog names, if any: each interval with its start and end, in seconds since the epoch.
+    static HistogramLogWriter histogramLog(Map<String, String> o) throws IOException {
+        if (!o.containsKey("hlog")) return null;
+        HistogramLogWriter w = new HistogramLogWriter(new File(o.get("hlog")));
+        w.outputLogFormatVersion();
+        w.outputStartTime(System.currentTimeMillis());
+        w.outputLegend();
+        return w;
+    }
+
+    static void logInterval(HistogramLogWriter w, Histogram h) {
+        if (w == null) return;
+        synchronized (w) { w.outputIntervalHistogram(h); }
+    }
 
     static long pack(int producer, long seq) { return ((long) producer << 40) | seq; }
 

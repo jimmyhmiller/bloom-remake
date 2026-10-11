@@ -37,12 +37,20 @@
 //! leader's view of its followers are volatile: a restarted broker relearns them.
 //!
 //! Replication (AppendEntries, §5.3): the leader sends each follower its new entries in the tick after it appends
-//! them, and at every heartbeat it sends each follower its entries from the last index that follower acknowledged,
-//! with a `beat` carrying its commit index; a message carries the entries after a given index and that index's term,
-//! at most `RAFT_BATCH` of them and `RAFT_BATCH_BYTES` of their bytes (always at least one: an entry alone fits a
-//! message, `RAFT_ENTRY_MAX`). A follower takes a batch whose predecessor matches its log whole, so the network may
-//! reorder messages without slowing it down: it removes a conflicting suffix, stores the batch, and acknowledges the
-//! batch's last index. A new leader's first entry is a NOOP of its term, so the entries it inherited commit without waiting
+//! them, after what it last sent that follower (pipelined: it does not wait for acknowledgements), while no more than
+//! `RAFT_INFLIGHT` entries are sent and not acknowledged; at every heartbeat it sends a `beat` carrying its commit
+//! index. A message carries the entries after a given index and that index's term, at most `RAFT_BATCH` of them and
+//! `RAFT_BATCH_BYTES` of their bytes (always at least one: an entry alone fits a message, `RAFT_ENTRY_MAX`). A
+//! follower takes a batch whose predecessor matches its log whole, so the network may reorder messages without
+//! slowing it down: it removes a conflicting suffix, stores the entries it lacks, and acknowledges the batch's last
+//! index. A message lost (dropped by a full queue, or with a broken connection) leaves the follower ignoring the
+//! batches after it. A heartbeat carries how far the leader had sent: a connection delivers in order, so a follower
+//! whose log falls short of it lost a batch and says so (`missed`), and the leader goes back to what it acknowledged
+//! and sends from there at once (etcd's raft does the same on a rejection: optimistic pipelining, and a probe back).
+//! A follower that has acknowledged nothing new for a while (`RAFT_RESEND`, doubled for each time in a row, up to
+//! `RAFT_RESEND_MAX`) is gone back for too: an acknowledgement may be what was lost. Entries are never sent again only because
+//! their acknowledgement is late: a slow follower's queue would otherwise fill with copies of what it already has,
+//! and stay full after the load that slowed it is gone. A new leader's first entry is a NOOP of its term, so the entries it inherited commit without waiting
 //! for a client's (§5.4.2, §8).
 
 /// A replication group: a topic id and a partition (the controller is the metadata topic's partition 0).
@@ -56,6 +64,13 @@ param RAFT_BATCH: u64 = 64;
 /// The most bytes of entries a message carries when it carries more than one (as Kafka bounds a replica fetch by
 /// `replica.fetch.max.bytes`, never by a count of batches).
 param RAFT_BATCH_BYTES: u64 = 4194304;
+/// The most entries a leader sends a follower beyond what it acknowledged (etcd's raft bounds in-flight messages the
+/// same way): a follower that falls behind holds back its leader's sends, not its own queue.
+param RAFT_INFLIGHT: u64 = 256;
+/// How long a leader waits for a follower to acknowledge anything new before it sends again from what the follower
+/// acknowledged (each time in a row twice as long, up to `RAFT_RESEND_MAX`).
+param RAFT_RESEND: Duration = 500ms;
+param RAFT_RESEND_MAX: Duration = 8s;
 /// The most bytes one entry holds: a message carrying it alone must fit a frame between nodes (16 MiB, with room for
 /// the message's other fields), or it would be dropped every time it is sent and the follower would never catch up.
 const RAFT_ENTRY_MAX: u64 = 15728640;
@@ -190,7 +205,12 @@ fn log_bytes(data: Blob) -> Bytes {
 }
 /// A heartbeat: the leader's log holds `(prev_idx, prev_term)`, and its commit index is `commit`; `sent` is when the
 /// leader sent it (by its clock), which the follower's answer echoes.
-channel beat(g: Group, term: u64, prev_idx: u64, prev_term: u64, commit: u64, sent: Instant): Broker -> Broker;
+/// `upto` is the last index the leader had sent the follower when it sent the heartbeat: a connection delivers in
+/// order, so a follower whose log does not reach it by then lost a batch (`missed`).
+channel beat(g: Group, term: u64, prev_idx: u64, prev_term: u64, commit: u64, sent: Instant, upto: u64): Broker -> Broker;
+/// A follower's word that a heartbeat (sent at `sent`) found its log short of what its leader had sent it before:
+/// a batch was lost, and the leader goes back to what the follower acknowledged at once.
+channel missed(g: Group, term: u64, sent: Instant): Broker -> Broker;
 /// A follower's answer: its log agrees with the leader's up to `idx`; `sent` is the answered heartbeat's (none for an
 /// answer to entries or a snapshot).
 channel ack(g: Group, term: u64, idx: u64, sent: Option<Instant>): Broker -> Broker;
@@ -231,6 +251,11 @@ at Broker {
     /// Leader state per follower: the highest index it acknowledged, and the highest index sent to it.
     table match_idx(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
     table rsent(g: Group, f: Node<Broker>, i: u64) key(g, f) resolve choose_most(i);
+    /// When the leader last took a follower's acknowledgement of something new, or last went back for it, and how
+    /// long it waits from then for the next before it goes back (again); and `base`, where it takes the follower's
+    /// log to end until it acknowledges more: its own last index when it began leading or tracking the follower
+    /// (`match_idx` is 0 then, which says nothing), or what the follower acknowledged when it went back.
+    table repl_wait(g: Group, f: Node<Broker>, at: Instant, wait: Duration, base: u64) key(g, f);
     /// Checks election deadlines, only while one is armed for a group this broker does not lead (`timed_out`). The
     /// guard reads the recorded term and wins (carried state; a term a message raises is recorded, which stages a
     /// tick that checks the guard again).
@@ -301,6 +326,7 @@ at Broker {
         for members(g, f) where f != self {
             next match_idx(g, f, 0);
             next rsent(g, f, 0);
+            next repl_wait(g, f, now(), RAFT_RESEND, 0);
         }
     }
 
@@ -476,6 +502,7 @@ at Broker {
         for members(g, p) where p != self {
             next match_idx(g, p, 0);
             next rsent(g, p, li);
+            next repl_wait(g, p, now(), RAFT_RESEND, li);
         }
     }
     /// What an earlier leadership recorded goes: under `choose_most` a larger stale acknowledgement would otherwise
@@ -485,6 +512,9 @@ at Broker {
     }
     forget_sent: while elected(g, _), rsent(g, p, s) {
         delete rsent(g, p, s);
+    }
+    forget_repl_wait: while elected(g, _), repl_wait(g, p, at, w, b) {
+        delete repl_wait(g, p, at, w, b);
     }
     /// The votes of terms that are over.
     forget_voters: while voters(g, t, v), eff(g, e) where t < e {
@@ -518,16 +548,46 @@ at Broker {
     }
     /// Whether a follower's next entries are compacted away here: it gets the snapshot point instead.
     view behind_snapshot(g, from) = out_from(g, _f, from), rsnap(g, s, _, _, _) where from < s;
-    /// Where each follower's batches start this tick: after what was last sent to it, for entries appended since (in
-    /// the tick after their append), and at every heartbeat after what it last acknowledged (so lost or refused
-    /// batches go again).
-    /// A follower that acknowledged a batch short of the log gets the next one at once, so one catching up takes a
-    /// batch per round trip. A follower whose broker is not heard alive gets nothing again at a heartbeat: a down
-    /// broker would otherwise cost its leader a batch read and encoded at every heartbeat, for nothing.
-    view out_from(g, f, from) {
-        leader(g, _), rsent(g, f, from), last_log(g, li, _) where li > from;
-        raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, from), peer_alive(f);
-        ack(g, t, from, _) from f, leader(g, t), members(g, f), last_log(g, li, _) where from < li;
+    /// Whether a follower may be sent more: fewer than `RAFT_INFLIGHT` entries sent to it are past what it holds (what
+    /// it acknowledged, or the leader's `base` for it if that is further).
+    view window_open(g, f) = rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, _at, _w, b),
+            let held = if m > b { m } else { b } where s < held + RAFT_INFLIGHT;
+    /// A follower that acknowledged something new this tick.
+    view acked_new(g, f) = ack(g, t, m, _) from f, leader(g, t), match_idx(g, f, cur) where m > cur;
+    /// A follower that reports a batch lost, by a heartbeat sent after the leader last went back for it.
+    view missed_now(g, f) = missed(g, t, sent) from f, leader(g, t), rsent(g, f, s), match_idx(g, f, m),
+            repl_wait(g, f, at, _w, _b), not acked_new(g, f) where sent > at && m < s;
+    /// A follower sent entries it has acknowledged nothing new of for its wait: a batch (or its acknowledgement) may
+    /// have been lost, and the batches sent after it were then refused.
+    view stalled(g, f) = leader(g, _), rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, at, w, _b),
+            not acked_new(g, f), not missed_now(g, f)
+            where m < s && now() >= at + w;
+    /// A follower the leader goes back for this tick.
+    view going_back(g, f) {
+        missed_now(g, f);
+        stalled(g, f);
+    }
+    /// Where each follower's batch starts this tick: after what was last sent to it, for entries appended since (in
+    /// the tick after their append), while its window is open (so a follower catching up takes a window per round
+    /// trip). None goes to a stalled follower this tick: its leader goes back first (`go_back`).
+    view out_from(g, f, from) = leader(g, _), rsent(g, f, from), last_log(g, li, _), window_open(g, f),
+            not going_back(g, f) where li > from;
+    /// A stalled follower whose broker is heard alive is sent its entries again from what it acknowledged, from the
+    /// next tick: the leader takes what it sent as not sent, and waits twice as long before it goes back again. (A
+    /// down broker gets nothing: it would cost its leader batches read and encoded for nothing.)
+    go_back: on raft_heartbeat, stalled(g, f), peer_alive(f), rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, at, w, b),
+            let w2 = if w * 2 > RAFT_RESEND_MAX { RAFT_RESEND_MAX } else { w * 2 } {
+        delete rsent(g, f, s);
+        next rsent(g, f, m);
+        delete repl_wait(g, f, at, w, b);
+        next repl_wait(g, f, now(), w2, m);
+    }
+    /// A follower that lost a batch is sent its entries again from what it acknowledged, from the next tick.
+    go_back_missed: on missed_now(g, f), rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, at, w, b) {
+        delete rsent(g, f, s);
+        next rsent(g, f, m);
+        delete repl_wait(g, f, at, w, b);
+        next repl_wait(g, f, now(), RAFT_RESEND, m);
     }
     /// A batch's candidate entries, by index and size: the next `RAFT_BATCH` of the log (a range, found by index, not
     /// by scanning it), their bytes not read.
@@ -560,11 +620,16 @@ at Broker {
     /// An idle group's leader sends no heartbeat (at the heartbeat it goes quiet it sends `quiesce` alone, so the
     /// followers do not see it with a heartbeat and take the group as active).
     beat_followers: on raft_heartbeat, leader(g, t), not idle(g, t), match_idx(g, f, m), term_at(g, m, mt),
-            commit_of(g, c) {
-        send beat(g, t, m, mt, c, now()) to f;
+            commit_of(g, c), rsent(g, f, s) {
+        send beat(g, t, m, mt, c, now(), s) to f;
     }
     on_ack: on ack(g, t, m, _sent) from f, leader(g, t), members(g, f) {
         next match_idx(g, f, m);
+    }
+    /// A follower that acknowledged something new is waited for afresh.
+    note_repl_wait: on acked_new(g, f), members(g, f), repl_wait(g, f, at, w, b) {
+        delete repl_wait(g, f, at, w, b);
+        next repl_wait(g, f, now(), RAFT_RESEND, b);
     }
     /// Leadership confirmations for reads (Raft's ReadIndex, §6.4), for the groups the includer reads (`confirms`):
     /// when each follower last answered a heartbeat, by the heartbeat's send time. A read that arrived at `t` may be
@@ -584,9 +649,13 @@ at Broker {
     track: while leader(g, _), members(g, f), last_log(g, li, _), not tracked(g, f) where f != self {
         next rsent(g, f, li);
         next match_idx(g, f, 0);
+        next repl_wait(g, f, now(), RAFT_RESEND, li);
     }
     untrack_sent: while rsent(g, f, s), not members(g, f) {
         delete rsent(g, f, s);
+    }
+    untrack_repl_wait: while repl_wait(g, f, at, w, b), not members(g, f) {
+        delete repl_wait(g, f, at, w, b);
     }
     untrack_match: while match_idx(g, f, m), not members(g, f) {
         delete match_idx(g, f, m);
@@ -799,9 +868,15 @@ at Broker {
         rsnap(g, s, _, _, _);
         takes(g), not rsnap(g, _, _, _, _), let s = 0u64;
     }
-    view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), snap_at(g, s),
-            e in chained(p, ppt, es), let i = e.0, let et = e.1, let pt = e.2, let k = e.3, let pos = e.4, let b = e.5
-            where i > s;
+    /// A batch taken whose last entry this broker holds, with the same term: by the Log Matching Property (§5.3) it
+    /// holds the whole batch (a copy sent again), which is acknowledged but not stored again.
+    view batch_held(g, p, es) = batch_taken(g, _l, _t, p, _pt, es), let n = es.len(), let last = p + n,
+            let last_term = if n == 0 { 0u64 } else { term_in(es, n - 1) }, rlog(g: g, idx: last, term: lt, ..)
+            where n > 0 && lt == last_term;
+    /// The entries of the batches taken that this broker does not hold.
+    view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), not batch_held(g, p, es),
+            snap_at(g, s), e in chained(p, ppt, es), let i = e.0, let et = e.1, let pt = e.2, let k = e.3,
+            let pos = e.4, let b = e.5, not rlog(g: g, idx: i, term: et, ..) where i > s;
     /// A stored entry that conflicts with an incoming one (same index, another term): it and all after it go.
     view conflict(g, c = min!(i)) = incoming(g, i, et, _, _, _, _), rlog(g: g, idx: i, term: lt, ..) where lt != et;
     truncate: on conflict(g, c), rlog(g, j, jt, jp, k, pos, data) where j >= c {
@@ -818,9 +893,9 @@ at Broker {
     }
     /// A heartbeat whose `prev` matches confirms our log up to it and tells us the commit index.
     view beat_ok(g, l, t, p, c, sent) {
-        beat(g, t, p, pt, c, sent) from l, eff(g, t), takes(g), rlog(g: g, idx: p, term: pt, ..);
-        beat(g, t, p, pt, c, sent) from l, eff(g, t), takes(g) where p == 0;
-        beat(g, t, p, _pt, c, sent) from l, eff(g, t), takes(g), rsnap(g, s, _, _, _) where p <= s;
+        beat(g, t, p, pt, c, sent, _u) from l, eff(g, t), takes(g), rlog(g: g, idx: p, term: pt, ..);
+        beat(g, t, p, pt, c, sent, _u) from l, eff(g, t), takes(g) where p == 0;
+        beat(g, t, p, _pt, c, sent, _u) from l, eff(g, t), takes(g), rsnap(g, s, _, _, _) where p <= s;
     }
     /// A snapshot point past this broker's log: it drops its log and takes the point (Fig. 13). One that its log
     /// already reaches (it holds that entry, or has compacted past it) changes nothing but is acknowledged.
@@ -850,6 +925,15 @@ at Broker {
     }
     lagging: on beat(g: g, term: t, ..) from l, eff(g, t), takes(g), not beat_ok(g, l, t, _, _, _) {
         emit leader_of(g, t, l);
+    }
+    /// How far this broker's log reaches this tick: its last entry, or the end of a batch it takes now.
+    view reach(g, e = max!(x)) {
+        last_log(g, x, _);
+        matched(g, _, _, x);
+    }
+    /// A heartbeat whose leader had sent further than this broker's log reaches: a batch was lost on the way.
+    tell_missed: on beat(g: g, term: t, sent: s, upto: u, ..) from l, eff(g, t), takes(g), reach(g, e) where e < u {
+        send missed(g, t, s) to l;
     }
     hear_commit: on beat(g: g, term: t, commit: c, ..), eff(g, t), takes(g) {
         next heard_commit(g, c);

@@ -45,7 +45,8 @@ command -v taskset > /dev/null || die "taskset not found"
 mkdir -p "$OUT"
 T0=$(date +%s)
 since() { echo $(($(date +%s) - T0)); }
-event() { echo "$(since) $*" | tee -a "$OUT/events.log"; }
+# events.log: seconds since the soak began, seconds since the epoch, what happened.
+event() { echo "$(since) $(date +%s.%N) $*" | tee -a "$OUT/events.log"; }
 
 topic_list=$(seq -s, -f "soak-%g" 0 $((TOPICS - 1)))
 classes=$BENCH_DIR/soak-classes
@@ -108,7 +109,8 @@ children+=($!)
 # ---- the group reading throughout
 for c in $(seq 1 "$CONSUMERS"); do
   soak consume --bootstrap "$BOOTSTRAP" --topics "$topic_list" --group soak-live --id "live$c" \
-    --stop "$OUT/stop-live" > "$OUT/consumer-live-$c.csv" 2> "$OUT/consumer-live-$c.err" &
+    --stop "$OUT/stop-live" --hlog "$OUT/consumer-live-$c.hlog" > "$OUT/consumer-live-$c.csv" \
+    2> "$OUT/consumer-live-$c.err" &
   children+=($!)
 done
 live=("${children[@]: -$CONSUMERS}")
@@ -143,7 +145,8 @@ produce_phase() {
   prod=()
   for p in $(seq 1 "$PRODUCERS"); do
     soak produce --bootstrap "$BOOTSTRAP" --topics "$topic_list" --id "$(($2 + p))" --rate "$3" --seconds "$4" \
-      --size "$SIZE" --out "$OUT" > "$OUT/producer-$1-$p.csv" 2> "$OUT/producer-$1-$p.err" &
+      --size "$SIZE" --out "$OUT" --hlog "$OUT/producer-$1-$p.hlog" > "$OUT/producer-$1-$p.csv" \
+      2> "$OUT/producer-$1-$p.err" &
     prod+=($!)
     children+=($!)
   done
@@ -221,11 +224,14 @@ tail -n 1 "$OUT/verify.txt" | tee -a "$OUT/events.log"
 echo "$(since),$(du -sm "$BENCH_DIR/$SYSTEM" | cut -f1)" >> "$OUT/disk.csv"
 
 # ---- summary
+taskset -c "$CLIENT_CPUS" java -cp "$classes:$KAFKA_HOME/libs/*" Soak report --events "$OUT/events.log" --dir "$OUT" \
+  > "$OUT/report.csv" 2>&1 || true
 {
   echo "system=$SYSTEM topics=$TOPICS partitions=$PARTS producers=$PRODUCERS consumers=$CONSUMERS size=$SIZE"
   echo "max_seconds=$MAX_SECONDS rate=$RATE fixed_seconds=$FIXED_SECONDS kill_at=$KILL_AT down=$DOWN_SECONDS"
   echo "broker_cpus=$BROKER_CPUS client_cpus=$CLIENT_CPUS"
   cat "$OUT/events.log"
+  cat "$OUT/report.csv"
   for f in "$OUT"/producer-*.csv "$OUT"/consumer-*.csv; do
     echo "$(basename "$f" .csv): $(grep '^#' "$f" | tail -n 1)"
   done
