@@ -172,6 +172,9 @@ at Browser {
         not up(_), let s = "offline: lines wait until the room is back";
     }
     view mine(w, k) = lines(w, k, _, _) where w == self;
+    /// The room's time of the latest line heard, in milliseconds: a line not yet confirmed goes after it, since its
+    /// own time is this tab's clock, not the room's.
+    view last_heard(m = max!(ms default 0i64)) = lines(_, _, at, _), let ms = at.as_millis();
 
     page: while title(name), status(s), typed_now(d) {
         emit html div[id: "chat"](class: "chat") {
@@ -187,8 +190,8 @@ at Browser {
                         span[id: f"text-{k}-{w}"](class: "text") { t }
                     }
                 }
-                for unconfirmed(k, at, t) {
-                    li[id: f"pending-{k}", pos: at.as_millis()](class: "line pending") {
+                for unconfirmed(k, _, t), last_heard(m) {
+                    li[id: f"pending-{k}", pos: m + 1i64 + k as i64](class: "line pending") {
                         span[id: f"pending-who-{k}"](class: "who") { "you" }
                         span[id: f"pending-text-{k}"](class: "text") { t }
                     }

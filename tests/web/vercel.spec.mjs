@@ -255,6 +255,54 @@ test.describe("keyed chat as a Vercel function", () => {
     }
   });
 
+  test("lines keep the order they were sent in while the room confirms them, whatever the tab's clock", async ({
+    context,
+  }) => {
+    const c = deployed ? null : await local();
+    const base = deployed ?? c.base;
+    try {
+      const room = `order${randomBytes(4).toString("hex")}`;
+      const a = await context.newPage();
+      const b = await context.newPage();
+      // a's clock is a minute behind the room's: its lines' own times would put them before lines the room has.
+      await a.addInitScript(() => {
+        const now = performance.now.bind(performance);
+        performance.now = () => now() - 60_000;
+      });
+      await open(a, base, room);
+      await open(b, base, room);
+      await expect(bid(a, "status")).toHaveText("online, 2 here", { timeout: 30_000 });
+      await say(a, "before");
+      await expect(lines(b)).toHaveText(["before"]);
+      await expect(a.locator(".line.pending")).toHaveCount(0, { timeout: 15_000 });
+
+      // a's sends take 2 s to reach the room; b's line gets there first.
+      await a.route("**/blossom/http/**/send", async (route) => {
+        await new Promise((done) => setTimeout(done, 2000));
+        await route.continue();
+      });
+      for (const t of ["one", "two", "three"]) await say(a, t);
+      await say(b, "from b");
+      const want = ["before", "from b", "one", "two", "three"];
+      // b's line is in before any of a's three is confirmed: a's go after it, as pending.
+      await expect(a.locator(".lines .text", { hasText: "from b" })).toBeVisible();
+      expect(await a.locator(".line.pending").count()).toBe(3);
+      expect(await lines(a).allTextContents()).toEqual(want);
+      // Every look while they are confirmed, and after, has them in that order.
+      const until = Date.now() + 8_000;
+      while (Date.now() < until) {
+        const seen = await lines(a).allTextContents();
+        expect(seen).toEqual(want);
+        await a.waitForTimeout(100);
+      }
+      await expect(a.locator(".line.pending")).toHaveCount(0, { timeout: 15_000 });
+      expect(await lines(a).allTextContents()).toEqual(want);
+      await expect(lines(b)).toHaveText(want);
+    } finally {
+      if (c) await c.remove();
+    }
+  });
+
   test("the function answers only page requests", async ({ request }) => {
     const c = deployed ? null : await local();
     const base = deployed ?? c.base;
