@@ -479,7 +479,7 @@ fn followers_slower_than_a_heartbeat_are_sent_each_entry_once() {
         {
             let (sent, g) = (sent.clone(), d.g.clone());
             d.c.tap_peers(Box::new(move |from, to, rel, row| {
-                if rel != entries || !row.iter().any(|v| *v == g) {
+                if rel != entries || !row.contains(&g) {
                     return;
                 }
                 let Some(Value::Vec(es)) = row.last() else {
