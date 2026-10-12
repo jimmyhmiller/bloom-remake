@@ -91,6 +91,36 @@ pub fn scaled(total: usize, all: &std::ops::RangeInclusive<u64>) -> usize {
     total * run / every
 }
 
+/// Four counters a run of seeds adds up.
+pub type Counts = (usize, usize, usize, usize);
+
+/// Runs `run` on `all`'s seeds one at a time, adding up its counters: every seed in the full tier; in the fast tier,
+/// from the first until `bitten` holds of the totals, so a check that the faults landed (a request left unanswered
+/// by a crash) has a seed where they did, whatever shifts which seed that is. Returns the totals and how many seeds
+/// ran (for [`scaled_to`]).
+pub fn run_until_bitten(
+    all: std::ops::RangeInclusive<u64>,
+    mut run: impl FnMut(std::ops::RangeInclusive<u64>) -> Counts,
+    bitten: impl Fn(&Counts) -> bool,
+) -> (Counts, usize) {
+    let mut total: Counts = (0, 0, 0, 0);
+    let mut ran = 0;
+    for s in all {
+        let c = run(s..=s);
+        total = (total.0 + c.0, total.1 + c.1, total.2 + c.2, total.3 + c.3);
+        ran += 1;
+        if !full_tier() && bitten(&total) {
+            break;
+        }
+    }
+    (total, ran)
+}
+
+/// `total`, a count expected over every seed of `all`, scaled to the `ran` seeds that ran.
+pub fn scaled_to(total: usize, all: &std::ops::RangeInclusive<u64>, ran: usize) -> usize {
+    total * ran / all.clone().count().max(1)
+}
+
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::RelId;
 use blossom_ir::tick::Row;

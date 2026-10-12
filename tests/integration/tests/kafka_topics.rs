@@ -1101,22 +1101,29 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
 /// unanswered one happened or did not.
 #[test]
 fn admin_requests_are_linearizable_across_crashes() {
-    let (answered, unanswered, _, _) = check_runs(&Setup {
-        seeds: seeds(1..=8),
-        crashes: true,
-        stream_drops: true,
-        latency: ClusterConfig::default().latency,
-        clients: 3,
-        requests: 20,
-        grid: None,
-        names: &NAMES,
-        brokers: 1,
-        partitions: false,
-        params: &[],
-        down: None,
-    });
+    let all = 1..=8;
+    let ((answered, unanswered, _, _), ran) = blossom_integration_tests::run_until_bitten(
+        all.clone(),
+        |seeds| {
+            check_runs(&Setup {
+                seeds,
+                crashes: true,
+                stream_drops: true,
+                latency: ClusterConfig::default().latency,
+                clients: 3,
+                requests: 20,
+                grid: None,
+                names: &NAMES,
+                brokers: 1,
+                partitions: false,
+                params: &[],
+                down: None,
+            })
+        },
+        |c| c.1 > 0,
+    );
     assert!(
-        answered > scaled(300, &(1..=8)),
+        answered > blossom_integration_tests::scaled_to(300, &all, ran),
         "only {answered} requests were answered"
     );
     assert!(

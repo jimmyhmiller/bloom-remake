@@ -680,18 +680,25 @@ fn check_runs(setup: &Setup) -> (usize, usize, usize, usize) {
 /// Produces in flight across broker crashes and dropped connections.
 #[test]
 fn acknowledged_produces_are_durable_at_their_offsets() {
-    let (acked, unanswered, refused, _) = check_runs(&Setup {
-        seeds: seeds(1..=8),
-        crashes: true,
-        latency: ClusterConfig::default().latency,
-        clients: 3,
-        requests: 40,
-        grid: None,
-        idempotent: false,
-        nemesis: 150_000_000,
-    });
+    let all = 1..=8;
+    let ((acked, unanswered, refused, _), ran) = blossom_integration_tests::run_until_bitten(
+        all.clone(),
+        |seeds| {
+            check_runs(&Setup {
+                seeds,
+                crashes: true,
+                latency: ClusterConfig::default().latency,
+                clients: 3,
+                requests: 40,
+                grid: None,
+                idempotent: false,
+                nemesis: 150_000_000,
+            })
+        },
+        |c| c.1 > 0,
+    );
     assert!(
-        acked > scaled(300, &(1..=8)),
+        acked > blossom_integration_tests::scaled_to(300, &all, ran),
         "only {acked} partition entries were acknowledged"
     );
     assert!(
@@ -699,7 +706,7 @@ fn acknowledged_produces_are_durable_at_their_offsets() {
         "no produce was left unanswered: the faults did not bite"
     );
     assert!(
-        refused > scaled(10, &(1..=8)),
+        refused > blossom_integration_tests::scaled_to(10, &all, ran),
         "only {refused} partition entries were refused"
     );
 }
