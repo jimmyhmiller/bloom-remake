@@ -195,3 +195,23 @@ sync, queues behind data, and is noticed at the receiver's next tick), so its se
   engine makes progress (a live process with a wedged engine must not keep its leaderships);
 - the engine sees each peer's liveness as an input of its ticks (recorded in traces, replayed; the simulator models
   the heartbeats deterministically), read by programs as a built-in relation; raft.bls reads it in place of `alive`.
+
+### Fix 4 as built (1654e29d): runtime liveness
+
+- Language: `R.up(n: Node<R>, incarnation: u64)` / `R.down(n: Node<R>)` (HRelKind::Peer, EventSource::Peer), read at
+  a cluster role (BLS0404 elsewhere), written only by the runtime (BLS0400); LANGUAGE §7.15, ARCHITECTURE §5.13.
+- Runtime (`blossom-runtime::liveness`): an `ALIVE` frame (0x06) on a liveness connection per peer, sent every
+  `[liveness] period_ms` (50) while the engine is not inside one tick for longer than the session
+  (`EngineProgress`); `PeerViews` stamps arrivals and a checker takes a peer down after `session_ms` (500); changes go
+  to the engine as `Control::Peer`, offered as inputs (recorded). A node reports itself up at its first tick, so a
+  program learns its incarnation (the store's restart count, 1 at the first boot).
+- Simulators: `Cluster` (heard while running, the link uncut and no tick longer than `liveness_session`; up one
+  latency after, down a session after); the synchronous rounds (up at the first/restart round, down in the crash
+  round, incarnation 1 then 2); LDFI's hazards (`Origin::Peer`: a crash raises `down`, a restart `up`).
+- raft.bls reads `Broker.up/down` (`peer_up`, `my_boot`); the `alive` channel and `RAFT_SESSION` went; cluster.bls's
+  re-telling of restarted brokers compares runtime incarnations.
+- A simulator bug found by raft_groups/kafka_groups: a due change for an observer that was down kept the next
+  instant in the past, so the simulation crept forward a nanosecond at a time; `liveness_next` skips down observers.
+- Tests: `blossom-cli` `liveness` (three processes through proxies: kill -9 -> down after >= 300 ms, back in
+  incarnation 2; SIGSTOP -> down, SIGCONT -> back; a one-way cut -> down at the far end only), `raft_groups`
+  `a_loaded_cluster_keeps_its_leaders`, front-end diagnostics, liveness unit tests.
