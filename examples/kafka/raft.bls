@@ -58,6 +58,10 @@ pub type Group = (Bytes, i32);
 
 param RAFT_ELECTION_MIN: Duration = 300ms;
 param RAFT_ELECTION_MAX: Duration = 600ms;
+/// The longest a pre-vote or an election round stays open waiting for answers (below, `round_open`): a round ends when
+/// it is decided (won, or refused by enough members that it cannot be), else after this (an answer lost, or a member
+/// down).
+param RAFT_ROUND_MAX: Duration = 2s;
 param RAFT_HEARTBEAT: Duration = 50ms;
 param RAFT_POLL: Duration = 20ms;
 param RAFT_BATCH: u64 = 64;
@@ -424,7 +428,7 @@ at Broker {
         deadline(g, d0), last_heard(g, _), not election_span(g, _), let d = d0;
     }
     view timed_out(g, t) = raft_poll, eff(g, t), mine(g), election_due(g, d), not leader(g, t), not granted_now(g),
-            not heard_leader(g), not leader_alive(g)
+            not heard_leader(g), not leader_alive(g), not round_open(g)
             where now() >= d;
     /// What re-arms a group's election timeout: a vote granted, or an election that timed out (a leader heard moves
     /// `election_due` through `heard_at` instead).
@@ -432,8 +436,33 @@ at Broker {
         granted_now(g);
         timed_out(g, _);
     }
-    rearm: on reset_timer(g), eff(g, t),
-            let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX, ("election", g, t)) {
+    /// Elections that timed out in a row with no leader heard since (`misses`): each widens the next timeout's random
+    /// range (twice as wide, up to 16 times), as Ethernet backs off after collisions. Raft separates candidates by
+    /// timeouts much longer than a round trip; on brokers whose ticks run long under load a round trip is longer than
+    /// the base range, so candidates kept colliding (split votes) until the range outgrew it. Each draw is fresh (the
+    /// count is in its seed): drawn per term alone, a member's every retry in a term waited exactly as long, and two
+    /// whose waits collided went on colliding.
+    table misses(g: Group, n: u64) key(g);
+    note_miss: on timed_out(g, _) {
+        if misses(g, n) {
+            upsert misses(g, n + 1);
+        }
+        if not misses(g, _) {
+            upsert misses(g, 1);
+        }
+    }
+    forget_misses: on heard_leader(g), misses(g, n) {
+        delete misses(g, n);
+    }
+    forget_misses_led: while misses(g, n), leader(g, _) {
+        delete misses(g, n);
+    }
+    view widening(g, n, w) {
+        misses(g, n), let w = if n >= 4 { 16u64 } else if n == 3 { 8u64 } else if n == 2 { 4u64 } else { 2u64 };
+        mine(g), not misses(g, _), let n = 0u64, let w = 1u64;
+    }
+    rearm: on reset_timer(g), eff(g, t), widening(g, n, w),
+            let span = rand_range(RAFT_ELECTION_MIN, RAFT_ELECTION_MAX * w, ("election", g, t, n)) {
         upsert deadline(g, now() + span);
         upsert election_span(g, span);
     }
@@ -446,6 +475,7 @@ at Broker {
     /// term above its own. Each attempt (`round`, when it began) counts only its own answers.
     table prevoting(g: Group, term: u64, round: Instant) key(g);
     table prevoters(g: Group, term: u64, round: Instant, v: Node<Broker>);
+    table prerefusers(g: Group, term: u64, round: Instant, v: Node<Broker>);
     start_prevote: on timed_out(g, t), last_log(g, li, lt), let nt = t + 1, let round = now() where RAFT_PRE_VOTE {
         upsert prevoting(g, nt, round);
         next prevoters(g, nt, round, self);
@@ -465,6 +495,9 @@ at Broker {
     count_prevote: on pre_vote_reply(g, nt, round, true, _current) from v, prevoting(g, nt, round), members(g, v) {
         emit prevoters(g, nt, round, v);
     }
+    count_prerefusal: on pre_vote_reply(g, nt, round, false, _current) from v, prevoting(g, nt, round), members(g, v) {
+        emit prerefusers(g, nt, round, v);
+    }
     view pre_tally(g, nt, round, n = count!(v)) = prevoters(g, nt, round, v);
     view prevote_won(g, nt) = prevoting(g, nt, round), pre_tally(g, nt, round, n), group_size(g, k), eff(g, t)
             where n * 2 > k && nt == t + 1;
@@ -472,6 +505,7 @@ at Broker {
         next rterm(g, nt);
         next rvote(g, nt, self);
         next voters(g, nt, self);
+        upsert campaign(g, nt, now());
         delete prevoting(g, nt, round);
         for members(g, p) where p != self {
             send request_vote(g, nt, li, lt) to p;
@@ -482,6 +516,7 @@ at Broker {
         next rterm(g, nt);
         next rvote(g, nt, self);
         next voters(g, nt, self);
+        upsert campaign(g, nt, now());
         for members(g, p) where p != self {
             send request_vote(g, nt, li, lt) to p;
         }
@@ -491,6 +526,58 @@ at Broker {
     }
     forget_prevoters: while prevoters(g, nt, round, v), not prevoting(g, nt, round) {
         delete prevoters(g, nt, round, v);
+    }
+    forget_prerefusers: while prerefusers(g, nt, round, v), not prevoting(g, nt, round) {
+        delete prerefusers(g, nt, round, v);
+    }
+
+    // ---- rounds wait for their answers
+    /// A pre-vote or an election round stays open until it is decided, or for `RAFT_ROUND_MAX`; meanwhile the member's
+    /// election timeout does not start another. (A round abandoned at each timeout counts only the answers that came
+    /// within one: on brokers whose ticks run long under load, answers come later than that, so every round was
+    /// abandoned before its answers came, and no one was elected while a dead leader's partitions waited.)
+    table campaign(g: Group, t: u64, at: Instant) key(g);
+    table refusers(g: Group, term: u64, v: Node<Broker>);
+    count_refusal: on vote(g, t, false) from v, members(g, v), campaign(g, t, _) {
+        emit refusers(g, t, v);
+    }
+    /// A round can still be won while the grants it has, with the members up (`peer_alive`) that have not answered
+    /// yet, make a majority: a member that is down will not answer, so a round two live candidates split is decided at
+    /// once, and they back off and try again.
+    view pre_waiting(g, nt, round, p) = prevoting(g, nt, round), members(g, p), peer_alive(p),
+            not prevoters(g, nt, round, p), not prerefusers(g, nt, round, p) where p != self;
+    view pre_waiting_n(g, nt, round, o = count!(p)) = pre_waiting(g, nt, round, p);
+    view prevote_hopeful(g) {
+        prevoting(g, nt, round), pre_tally(g, nt, round, n), pre_waiting_n(g, nt, round, o), group_size(g, k)
+                where (n + o) * 2 > k;
+        prevoting(g, nt, round), pre_tally(g, nt, round, n), not pre_waiting(g, nt, round, _), group_size(g, k)
+                where n * 2 > k;
+        prevoting(g, nt, round), not pre_tally(g, nt, round, _);
+    }
+    view vote_waiting(g, t, p) = candidate(g, t), members(g, p), peer_alive(p), not voters(g, t, p),
+            not refusers(g, t, p) where p != self;
+    view vote_waiting_n(g, t, o = count!(p)) = vote_waiting(g, t, p);
+    view vote_hopeful(g, t) {
+        candidate(g, t), tally(g, t, n), vote_waiting_n(g, t, o), group_size(g, k) where (n + o) * 2 > k;
+        candidate(g, t), tally(g, t, n), not vote_waiting(g, t, _), group_size(g, k) where n * 2 > k;
+        candidate(g, t), not tally(g, t, _);
+    }
+    /// (The cap widens with the timeouts' backoff, `widening`: a round as slow as the answers on loaded brokers is not
+    /// cut short.)
+    view round_open(g) {
+        prevoting(g, nt, round), eff(g, t), prevote_hopeful(g), widening(g, _n, w)
+                where nt == t + 1 && now() < round + RAFT_ROUND_MAX * w;
+        candidate(g, t), campaign(g, t, at), vote_hopeful(g, t), widening(g, _n, w)
+                where now() < at + RAFT_ROUND_MAX * w;
+    }
+    forget_campaign: while campaign(g, t, at), eff(g, e) where e > t {
+        delete campaign(g, t, at);
+    }
+    forget_campaign_won: while campaign(g, t, at), won(g, t) {
+        delete campaign(g, t, at);
+    }
+    forget_refusers: while refusers(g, t, v), eff(g, e) where t < e {
+        delete refusers(g, t, v);
     }
     count_vote: on vote(g, t, true) from v, members(g, v) {
         emit voters(g, t, v);

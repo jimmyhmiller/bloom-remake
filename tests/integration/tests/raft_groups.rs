@@ -600,6 +600,56 @@ fn a_loaded_cluster_keeps_its_leaders() {
     }
 }
 
+/// A loaded cluster's crashed leader is replaced: every broker takes 100 ms a tick and the groups keep appending; the
+/// leader of `all` crashes; its followers' brokers hear it go down (500 ms) and elect another, which then commits.
+/// Each election round takes about a second here, and the three live members of `all` must all agree: candidates
+/// that collide (split votes) back off (`misses`) until one wins, and no round is cut short before its answers come
+/// (`round_open`). Elections that restarted at every 300-600 ms timeout once never converged here.
+#[test]
+fn a_loaded_clusters_crashed_leader_is_replaced() {
+    use blossom_value::time::NodeId;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                record: blossom_integration_tests::sim_record(&format!("loaded-crash-seed{seed}")),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        for &n in &all {
+            d.c.set_tick_cost(n, 100_000_000).unwrap();
+        }
+        d.wait(2_000_000_000);
+        d.c.crash(l, blossom_sim::cluster::CrashWrites::Random).unwrap();
+        let rest: Vec<NodeId> = all.iter().copied().filter(|n| *n != l).collect();
+        let (nl, _) = d.await_leader(&rest, t, 10_000_000_000);
+        let before = d.last(nl).1;
+        d.await_until(3_000_000_000, "the new leader appends", |d| d.last(nl).1 > before + 5);
+    }
+}
+
 /// A directed run of the harness (CheckQuorum and PreVote on) with every group held at every broker, once each has
 /// a leader: no group proposes, so every one goes idle.
 #[cfg(test)]
