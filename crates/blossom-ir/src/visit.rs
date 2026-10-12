@@ -557,6 +557,10 @@ impl Remap for EventSource {
                 peer: peer.remap(m),
                 up: *up,
             },
+            Self::Peer { peer, up } => Self::Peer {
+                peer: peer.remap(m),
+                up: *up,
+            },
         }
     }
 }

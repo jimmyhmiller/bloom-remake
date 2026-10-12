@@ -661,6 +661,9 @@ at Broker {
         if repl_wait(g, f, at, w, b) {
             delete repl_wait(g, f, at, w, b);
         }
+        if led_by(g, t, l, boot) {
+            delete led_by(g, t, l, boot);
+        }
         if isr_term(g, t) {
             delete isr_term(g, t);
         }
@@ -855,7 +858,7 @@ at Broker {
     /// confirms each (`leads_taken`): a change at the next heartbeat, and again at each heartbeat to a broker that has
     /// not confirmed it (a broker takes only partitions its metadata names, so one whose metadata lags gets them
     /// again until it can). A confirmation holds for the incarnation that gave it: a broker that restarted forgot its
-    /// views, and is told everything again once it is heard alive in another (`alive_at`).
+    /// views, and is told everything again once the runtime reports it up in another (`peer_up`).
     table told(b: Node<Broker>, g: Group, t: u64, isr: Vec<i32>, boot: u64);
     view current_lead(g, t, isr) = leader(g, t), not is_controller(g), isr_of(g, isr);
     view untold(b, g, t, isr) = current_lead(g, t, isr), broker(b, _, _, _), not told(b, g, t, isr, _) where b != self;
@@ -868,7 +871,7 @@ at Broker {
     }
     view told_ends(b, g, t, isr, boot) {
         told(b, g, t, isr, boot), not current_lead(g, t, isr);
-        told(b, g, t, isr, boot), alive_at(b, now_boot, _) where now_boot != boot;
+        told(b, g, t, isr, boot), peer_up(b, now_boot) where now_boot != boot;
     }
     forget_told: while told_ends(b, g, t, isr, boot) {
         delete told(b, g, t, isr, boot);

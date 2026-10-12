@@ -15,6 +15,7 @@ pub mod deploy;
 pub mod hosting;
 pub mod http_link;
 pub mod keyed;
+pub mod liveness;
 pub mod members;
 pub mod net;
 pub mod object;

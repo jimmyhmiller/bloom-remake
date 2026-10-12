@@ -367,6 +367,13 @@ pub enum HRelKind {
         peer: HRoleId,
         up: bool,
     },
+    /// `R.up(n: Node<R>, incarnation: u64)` (`up`) or `R.down(n: Node<R>)`: the runtime's view of whether node `n` of
+    /// cluster role `R` is alive (its liveness heartbeats arrive, its engine making progress), read at a cluster role
+    /// (ARCHITECTURE §5.13).
+    Peer {
+        peer: HRoleId,
+        up: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

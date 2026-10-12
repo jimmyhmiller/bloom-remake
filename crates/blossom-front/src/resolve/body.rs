@@ -907,6 +907,23 @@ impl<'t> Resolver<'t, '_> {
         ok
     }
 
+    fn peer_readable(&mut self, cx: &RuleCx, peer: HRoleId, span: Span) -> bool {
+        let here = cx.placement.map(|r| self.role_of(r).kind);
+        let ok = here == Some(RoleKind::Cluster) && self.role_of(peer).kind == RoleKind::Cluster;
+        if !ok {
+            let name = self.role_of(peer).name.clone();
+            self.error(
+                code!("BLS0404"),
+                span,
+                format!(
+                    "`{name}.up` and `{name}.down` are a cluster role's view of its peers: read at a cluster role, of a \
+                     cluster role's node"
+                ),
+            );
+        }
+        ok
+    }
+
     /// Whether `role`'s members are known when the program is compiled; a client role's and a keyed role's are not
     /// (BLS0404).
     fn static_members(&mut self, role: HRoleId, span: Span, what: &str) -> bool {
@@ -1350,6 +1367,12 @@ impl<'t> Resolver<'t, '_> {
         // A link event is read only across a client link (CLIENTS.md §1).
         if let HRelKind::Link { peer, .. } = self.rel_of(rel).kind
             && !self.link_readable(cx, peer, a.span)
+        {
+            return None;
+        }
+        // A peer's liveness is read at a cluster role, of a cluster role's node (ARCHITECTURE §5.13).
+        if let HRelKind::Peer { peer, .. } = self.rel_of(rel).kind
+            && !self.peer_readable(cx, peer, a.span)
         {
             return None;
         }
@@ -3428,7 +3451,8 @@ impl<'t> Resolver<'t, '_> {
                 | HRelKind::Recovered
                 | HRelKind::Members(_)
                 | HRelKind::NodeDir
-                | HRelKind::Link { .. },
+                | HRelKind::Link { .. }
+                | HRelKind::Peer { .. },
                 _,
             ) => Some((code!("BLS0400"), bad("this relation is fed by the runtime"))),
             (HRelKind::LocalTick, v) if v != Verb::Next => {

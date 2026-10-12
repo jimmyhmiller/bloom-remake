@@ -127,6 +127,7 @@ pub(crate) fn classify(hir: &Hir) -> Result<BTreeSet<HRelId>, InternalError> {
             | HRelKind::Boot
             | HRelKind::Recovered
             | HRelKind::Link { .. }
+            | HRelKind::Peer { .. }
             | HRelKind::Stream(crate::hir::HStreamRel::Event(_)) => {
                 events.insert(id);
             }

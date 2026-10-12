@@ -398,6 +398,7 @@ fn frames_round_trip() {
             detail: "put".into(),
         },
         Frame::GoAway { reason: 1 },
+        Frame::Alive,
         Frame::Batch(Batch {
             sid: 2,
             send_tick: 44,

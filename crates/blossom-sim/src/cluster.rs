@@ -19,7 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use blossom_artifact::bls::BlsArtifact;
-use blossom_base::{RelId, internal_error};
+use blossom_base::{RelId, RoleId, internal_error};
+use blossom_ir::core::{EventSource, RelClass};
 use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::DurableSchema;
 use blossom_node::manual::ManualDriver;
@@ -29,6 +30,7 @@ use blossom_oracle::{Delivery, Ingress, Instance, Row};
 use blossom_store::{OpenMode, SimFs, StoreIdentity, Vfs, WriteFate};
 use blossom_value::Value;
 use blossom_value::time::{Instant, NodeId};
+use blossom_value::value::IntValue;
 use blossom_value::value::SessionId;
 
 use crate::linearize::{KvInput, KvOutput, Operation};
@@ -114,6 +116,9 @@ pub struct ClusterConfig {
     pub stream_drops: bool,
     /// Each node records its trace (`blossom trace`) into this directory: `<node>-<incarnation>.blstrace`.
     pub record: Option<std::path::PathBuf>,
+    /// How long a node counts as alive at a peer after it stopped being heard (ARCHITECTURE §5.13: `R.down`), in
+    /// virtual nanoseconds; a node whose single tick runs longer stops being heard while it runs.
+    pub liveness_session: i64,
 }
 
 impl Default for ClusterConfig {
@@ -139,6 +144,7 @@ impl Default for ClusterConfig {
             chunk_max: 16,
             stream_drops: false,
             record: None,
+            liveness_session: 500_000_000,
         }
     }
 }
@@ -278,6 +284,19 @@ struct SimNode {
     /// While its last ticks are still running: until when. What arrives meanwhile waits for its next tick, as on a
     /// real node whose engine is busy.
     busy_until: i64,
+    /// When those ticks began.
+    busy_from: i64,
+}
+
+/// A node's view of a peer's liveness (ARCHITECTURE §5.13), as the runtime keeps it: what it last raised, and since
+/// when the peer has been heard (each of its periodic words arriving one latency after it was sent) or not.
+#[derive(Clone, Copy, Debug, Default)]
+struct PeerView {
+    /// The incarnation it last raised `R.up` for, while it has raised no `R.down` since.
+    seen: Option<u64>,
+    /// Since when the peer has been heard, in its current incarnation (or not heard).
+    live_since: Option<i64>,
+    dead_since: Option<i64>,
 }
 
 /// The protocol of a cluster without key-value clients (`clients = 0`), for runs driven by stream clients or a
@@ -317,6 +336,10 @@ pub struct Cluster<'p> {
     observers: Vec<Box<dyn Observer + 'p>>,
     /// Each sees every message a node sends a peer (before the network loses it or not).
     taps: Vec<PeerTap<'p>>,
+    /// Each node's views of its peers' liveness, by (observer, peer).
+    views: BTreeMap<(NodeId, NodeId), PeerView>,
+    /// The program's `R.up` and `R.down` relations, by role and whether up.
+    peer_rels: BTreeMap<(RoleId, bool), RelId>,
     /// Whether clients hold off starting new operations (operations in flight continue).
     clients_paused: bool,
     nemesis_at: i64,
@@ -398,6 +421,17 @@ impl<'p> Cluster<'p> {
             protocol,
             observers: Vec::new(),
             taps: Vec::new(),
+            views: BTreeMap::new(),
+            peer_rels: artifact
+                .program
+                .get()
+                .rels
+                .iter_enumerated()
+                .filter_map(|(id, r)| match &r.class {
+                    RelClass::Event(EventSource::Peer { peer, up }) => Some(((*peer, *up), id)),
+                    _ => None,
+                })
+                .collect(),
             clients_paused: false,
             nemesis_at: i64::MAX,
             pipes: Vec::new(),
@@ -420,6 +454,7 @@ impl<'p> Cluster<'p> {
                 down_until: None,
                 tick_cost: 0,
                 busy_until: 0,
+                busy_from: 0,
             });
             c.boot(node_id(i)?, true)?;
         }
@@ -732,6 +767,9 @@ impl<'p> Cluster<'p> {
             if let Some(w) = self.stream_wake() {
                 next = next.min(w);
             }
+            if let Some(t) = self.liveness_next() {
+                next = next.min(t);
+            }
             for n in &self.nodes {
                 if let Some(t) = n.down_until {
                     next = next.min(t);
@@ -771,12 +809,133 @@ impl<'p> Cluster<'p> {
                 self.nemesis()?;
                 self.nemesis_at = self.now + self.rng.range(self.cfg.nemesis / 2, self.cfg.nemesis);
             }
+            self.liveness_step()?;
             for c in 0..self.clients.len() {
                 self.client_step(c)?;
             }
             self.stream_clients_step()?;
         }
         Ok(())
+    }
+
+    /// Whether `peer` is heard at `observer` now: it runs, its words to `observer` get through, and its engine is not
+    /// inside one tick for longer than the session. A node hears itself while it runs.
+    fn heard(&self, observer: NodeId, peer: NodeId) -> bool {
+        let Some(s) = self.nodes.get(peer.0 as usize) else {
+            return false;
+        };
+        if observer == peer {
+            return s.driver.is_some();
+        }
+        let stuck = s.tick_cost > self.cfg.liveness_session
+            && s.busy_until > self.now
+            && self.now >= s.busy_from.saturating_add(self.cfg.liveness_session);
+        s.driver.is_some() && !self.blocked.contains(&(peer, observer)) && !stuck
+    }
+
+    /// The pairs (observer, peer) whose view the program reads: the peer's role has `R.up` or `R.down` (a node is its
+    /// own peer: it learns its incarnation so).
+    fn watched(&self) -> Vec<(NodeId, NodeId, RoleId)> {
+        if self.peer_rels.is_empty() {
+            return Vec::new();
+        }
+        let n = self.nodes.len() as u32;
+        let mut pairs = Vec::new();
+        for p in 0..n {
+            let Some(role) = self.artifact.roles.get(p as usize).copied().flatten() else {
+                continue;
+            };
+            if !self.peer_rels.contains_key(&(role, true)) && !self.peer_rels.contains_key(&(role, false)) {
+                continue;
+            }
+            for o in 0..n {
+                pairs.push((NodeId(o), NodeId(p), role));
+            }
+        }
+        pairs
+    }
+
+    /// Raises the liveness changes due now (ARCHITECTURE §5.13): `R.up(p, incarnation)` one latency after `p` is
+    /// heard, `R.down(p)` a session after it stops being heard; a node that is down forgets its views.
+    fn liveness_step(&mut self) -> Result<(), SimError> {
+        let session = self.cfg.liveness_session;
+        for (o, p, role) in self.watched() {
+            let delay = if o == p { 0 } else { self.cfg.latency.1 };
+            let heard = self.heard(o, p);
+            let incarnation = self.nodes.get(p.0 as usize).map(|s| s.restarts).unwrap_or(0);
+            let observer_up = self.nodes.get(o.0 as usize).is_some_and(|s| s.driver.is_some());
+            let now = self.now;
+            let v = self.views.entry((o, p)).or_default();
+            if heard {
+                v.dead_since = None;
+                v.live_since.get_or_insert(now);
+            } else {
+                v.live_since = None;
+                v.dead_since.get_or_insert(now);
+            }
+            if !observer_up {
+                v.seen = None;
+                continue;
+            }
+            let change = match (heard, v.seen, v.live_since, v.dead_since) {
+                (true, seen, Some(since), _) if seen != Some(incarnation) && now >= since.saturating_add(delay) => {
+                    v.seen = Some(incarnation);
+                    Some(true)
+                }
+                (false, Some(_), _, Some(since)) if now >= since.saturating_add(session) => {
+                    v.seen = None;
+                    Some(false)
+                }
+                _ => None,
+            };
+            let Some(up) = change else { continue };
+            let Some(&rel) = self.peer_rels.get(&(role, up)) else {
+                continue;
+            };
+            let row = if up {
+                Row::from(vec![Value::Node(p), Value::Int(IntValue::U64(incarnation))])
+            } else {
+                Row::from(vec![Value::Node(p)])
+            };
+            if let Some(d) = self.nodes.get_mut(o.0 as usize).and_then(|s| s.driver.as_mut()) {
+                d.node.offer_input(rel, row);
+            }
+        }
+        Ok(())
+    }
+
+    /// When the next liveness change falls due, if one will.
+    fn liveness_next(&self) -> Option<i64> {
+        let session = self.cfg.liveness_session;
+        let mut next: Option<i64> = None;
+        let mut at = |t: i64| next = Some(next.map_or(t, |n| n.min(t)));
+        for (o, p, _) in self.watched() {
+            // A node that is down raises nothing; it starts afresh when it restarts.
+            if self.nodes.get(o.0 as usize).is_none_or(|s| s.driver.is_none()) {
+                continue;
+            }
+            let delay = if o == p { 0 } else { self.cfg.latency.1 };
+            let v = self.views.get(&(o, p)).copied().unwrap_or_default();
+            let incarnation = self.nodes.get(p.0 as usize).map(|s| s.restarts).unwrap_or(0);
+            if let Some(since) = v.live_since
+                && v.seen != Some(incarnation)
+            {
+                at(since.saturating_add(delay));
+            }
+            if let Some(since) = v.dead_since
+                && v.seen.is_some()
+            {
+                at(since.saturating_add(session));
+            }
+            // A slow node's long tick stops its words a session after it began.
+            if let Some(s) = self.nodes.get(p.0 as usize)
+                && s.tick_cost > session
+                && s.busy_until > self.now
+            {
+                at(s.busy_from.saturating_add(session));
+            }
+        }
+        next.map(|t| t.max(self.now + 1))
     }
 
     fn check(&mut self) -> Result<(), SimError> {
@@ -940,6 +1099,7 @@ impl<'p> Cluster<'p> {
         let done = match self.nodes.get_mut(n.0 as usize) {
             Some(slot) if slot.tick_cost > 0 && ran > 0 => {
                 slot.busy_until = self.now.saturating_add(slot.tick_cost.saturating_mul(ran));
+                slot.busy_from = self.now;
                 slot.busy_until
             }
             _ => self.now,

@@ -479,6 +479,13 @@ impl Lowerer<'_> {
                 }),
                 None,
             ),
+            HRelKind::Peer { peer, up } => (
+                RelClass::Event(EventSource::Peer {
+                    peer: RoleId::from_raw(peer.0),
+                    up: *up,
+                }),
+                None,
+            ),
         };
         let placement = match &r.kind {
             HRelKind::Channel(_)
@@ -488,6 +495,7 @@ impl Lowerer<'_> {
             | HRelKind::Boot
             | HRelKind::Recovered
             | HRelKind::Link { .. }
+            | HRelKind::Peer { .. }
             | HRelKind::Halt => Placement::Shared,
             _ => Self::placement(r.role),
         };

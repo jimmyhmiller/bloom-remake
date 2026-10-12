@@ -901,6 +901,9 @@ enum From {
         guard: Option<RelId>,
     },
     Stream,
+    Peer {
+        up: bool,
+    },
     /// A spec copy of a relation without a protocol relation (reported when asked).
     NoProtocol,
 }
@@ -926,6 +929,7 @@ impl<'a> ArtifactRules<'a> {
                         From::Timer { guard: t.guard }
                     }
                     RelClass::Event(EventSource::Stream(_)) if space == Space::Protocol => From::Stream,
+                    RelClass::Event(EventSource::Peer { up, .. }) if space == Space::Protocol => From::Peer { up: *up },
                     _ => From::Input,
                 };
                 facts.push(RelFacts {
@@ -1072,6 +1076,7 @@ impl crate::hazard::Rules for ArtifactRules<'_> {
             From::Restart => Origin::Restart,
             From::Timer { guard } => Origin::Timer { guard },
             From::Stream => Origin::Stream,
+            From::Peer { up } => Origin::Peer { up },
             From::NoProtocol => {
                 return Err(internal_error!(
                     "a spec snapshot of a relation without a protocol relation"

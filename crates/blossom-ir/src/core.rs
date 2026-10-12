@@ -325,6 +325,12 @@ pub enum EventSource {
         peer: RoleId,
         up: bool,
     },
+    /// The runtime's view of a node of cluster role `peer`: alive (`(n, incarnation)`, its liveness heartbeats arriving
+    /// and its engine making progress) or not any more (`(n)`); raised when the view changes (ARCHITECTURE §5.13).
+    Peer {
+        peer: RoleId,
+        up: bool,
+    },
 }
 /// TimerDecl data in the Dedalus core IR: exactly one of `every d [times m]` (physical, `every`), `every n ticks
 /// [times m]` (logical, `ticks`), `once after d` (physical, `once_after`) and `once` (physical, `once`, no guard), with

@@ -22,15 +22,15 @@ use blossom_runtime::deploy::DeploymentSpec;
 use blossom_sim::linearize::{KvModel, Verdict, check_partitioned};
 
 #[cfg(test)]
-fn free_addr() -> SocketAddr {
+pub(crate) fn free_addr() -> SocketAddr {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
 }
 
 /// A TCP proxy for one directed link: forwards connections to `upstream` unless blocked. Blocking cuts the open
 /// connections and refuses new ones.
 #[cfg(test)]
-struct Proxy {
-    addr: SocketAddr,
+pub(crate) struct Proxy {
+    pub(crate) addr: SocketAddr,
     /// Whether the link is cut, and its open connections. One lock covers both, so a connection accepted as the
     /// link is cut is either refused or registered and shut down with the others.
     state: Arc<Mutex<(bool, Vec<TcpStream>)>>,
@@ -38,7 +38,7 @@ struct Proxy {
 
 #[cfg(test)]
 impl Proxy {
-    fn start(upstream: SocketAddr) -> Proxy {
+    pub(crate) fn start(upstream: SocketAddr) -> Proxy {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let state: Arc<Mutex<(bool, Vec<TcpStream>)>> = Arc::new(Mutex::new((false, Vec::new())));
@@ -84,7 +84,7 @@ impl Proxy {
         Proxy { addr, state }
     }
 
-    fn block(&self) {
+    pub(crate) fn block(&self) {
         let mut st = self.state.lock().unwrap();
         st.0 = true;
         for c in st.1.drain(..) {
@@ -92,7 +92,7 @@ impl Proxy {
         }
     }
 
-    fn heal(&self) {
+    pub(crate) fn heal(&self) {
         self.state.lock().unwrap().0 = false;
     }
 }

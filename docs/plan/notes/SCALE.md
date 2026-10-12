@@ -162,3 +162,36 @@ Same overload experiment after (30 s of 4 unthrottled producers, 60 s quiet): ~2
 (~7k/s, ~96k before), the four producers now even (46-63k each); peers' longest wait 157-235 ms (was 4.0-13.5 s);
 10-12% busy after the load (it recovers). Left: WAL syncs up to 1.8 s on the shared disk under this load, ticks up to
 317 ms, so leaders still step down (~6300 NOT_LEADER in 30 s): every message of a tick waits for its WAL sync.
+
+## Why leaders still stepped down: failure detection measured load
+
+Traced overload runs (bpftrace on fdatasync, jbd2 commit stats and block requests, 4 runs): the WAL's fdatasync took
+at most ~26 ms, journal commits never spent over 1 ms flushing ordered data or 16 ms logging, no device request took
+over 200 ms (the 0.3-1.8 s syncs seen before did not recur; the probes stay in the harness). A run without step-downs
+acknowledged ~12k records/s with no NOT_LEADER. The step-downs that remained (bursts: b3 40 groups, then b2 16, b1 3)
+were CheckQuorum false positives: with every engine near 100% CPU, ticks took 100-290 ms; b3's heartbeat to b1 left
+139 ms after the previous one, waited 285 ms for b1's tick, and b1's acknowledgement left after that tick's sync and
+reached b3 after its 300 ms check. Each group's failure detection was measuring tick latency, i.e. load.
+
+How others avoid it: Kafka's partitions detect no failures; brokers heartbeat the controller and a broker is fenced
+after its session (9 s); CockroachDB put store liveness (one heartbeat stream per node pair) under its ranges' Raft.
+Blossom's own quiet groups already count their leader's broker liveness (`alive`).
+
+## Fix 4 (in progress): leadership follows broker liveness
+
+Program side (examples/kafka/raft.bls, uncommitted): `led_by(g, t, l, boot)`: while the leader of a follower's term
+is alive in that incarnation, a member there and not `deposed`, no election starts and no vote is granted
+(`leader_alive`, `recently_led`, `timed_out`); CheckQuorum counts members whose brokers are alive; a leader's message
+of an older term is answered with the newer one (`newer_term`, §5.1), so a leader cut off from its group's new leader
+hears of it through a member both reach. Test: `raft_groups::a_loaded_cluster_keeps_its_leaders` (every broker 150 ms a
+tick: the leader keeps its group 6 s and commits; the previous rules lost it after 1 s).
+
+With `alive` sent by the program, liveness itself rides the loaded path (a tick makes it, it waits for the tick's WAL
+sync, queues behind data, and is noticed at the receiver's next tick), so its session had to be 2 s. User choice
+(question tool): runtime-level liveness instead, so the session can be ~500 ms:
+- each peer connection carries a runtime heartbeat frame, sent by the connection's writer thread (no tick, no WAL sync,
+  not behind queued frames' engine work), stamped on arrival by the reader thread;
+- it carries the sender's incarnation and when its engine last finished a tick: a broker counts as alive only while its
+  engine makes progress (a live process with a wedged engine must not keep its leaderships);
+- the engine sees each peer's liveness as an input of its ticks (recorded in traces, replayed; the simulator models
+  the heartbeats deterministically), read by programs as a built-in relation; raft.bls reads it in place of `alive`.

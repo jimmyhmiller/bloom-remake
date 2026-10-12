@@ -307,6 +307,21 @@ fn accept_on_a_role_free_channel() {
     assert_eq!(codes(src), vec!["BLS0404"]);
 }
 
+/// `R.up` / `R.down` (ARCHITECTURE §5.13): read at a cluster role, of a cluster role's node; fed by the runtime.
+#[test]
+fn peer_liveness_is_read_at_cluster_roles_and_written_by_the_runtime() {
+    let nodes = [("b1", Some("Broker")), ("b2", Some("Broker")), ("w", Some("Web"))];
+    let ok = "program p version 1;\nrole Broker: cluster;\nat Broker {\n    table up_at(b: Node<Broker>, i: u64) key(b);\n    \
+              u: on Broker.up(b, i) { upsert up_at(b, i); }\n    d: on Broker.down(b), up_at(b, i) { delete up_at(b, i); }\n}\n";
+    assert_eq!(codes_on(ok, &nodes[..2]), Vec::<String>::new());
+    let at_client = "program p version 1;\nrole Broker: cluster;\nrole Web: client;\nat Web {\n    \
+                     table seen(b: Node<Broker>) key(b);\n    u: on Broker.up(b, i) { upsert seen(b); }\n}\n";
+    assert_eq!(codes_on(at_client, &nodes), vec!["BLS0404"]);
+    let written = "program p version 1;\nrole Broker: cluster;\nchannel c(): Broker -> Broker;\nat Broker {\n    \
+                   w: on c() { emit Broker.down(self); }\n}\n";
+    assert_eq!(codes_on(written, &nodes[..2]), vec!["BLS0400"]);
+}
+
 #[test]
 fn unhandled_attributes_are_reported() {
     let has = |src: &'static str, code: &str, text: &str| {

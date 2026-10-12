@@ -11,6 +11,7 @@
 //! REJECT   0x03 := reason:u8 detail:str
 //! GOAWAY   0x04 := reason:u8
 //! WELCOME  0x05 := member:u32 token:bytes resumed:u8 floor:u64 seed:[16]  (to a client member, after HELLO_OK)
+//! ALIVE    0x06 :=                    (a node's liveness, on its liveness connection to a peer: ARCHITECTURE §5.13)
 //! BATCH    0x10 := sid:varint send_tick:varint kind:u8 count:varint tuple{count}
 //! MSG      0x11 := seq:varint BATCH-body                         (a batch on a member link, numbered)
 //! ACK      0x12 := seq:varint                                    (everything up to seq was taken)
@@ -33,6 +34,7 @@ const T_HELLO_OK: u8 = 0x02;
 const T_REJECT: u8 = 0x03;
 const T_GOAWAY: u8 = 0x04;
 const T_WELCOME: u8 = 0x05;
+const T_ALIVE: u8 = 0x06;
 const T_BATCH: u8 = 0x10;
 const T_MSG: u8 = 0x11;
 const T_ACK: u8 = 0x12;
@@ -136,6 +138,9 @@ pub enum Frame {
     GoAway {
         reason: u8,
     },
+    /// The sender is alive and its engine making progress (ARCHITECTURE §5.13): sent on a connection that carries
+    /// nothing else, so it never waits behind data.
+    Alive,
     Batch(Batch),
     /// The server's answer to a member's `HELLO` (after `HELLO_OK`): its identity, whether the link takes up where
     /// the last one left off, the last of the member's messages the server holds (the member resends the rest), and
@@ -294,6 +299,7 @@ impl Frame {
                 body.push(*reason);
                 T_GOAWAY
             }
+            Frame::Alive => T_ALIVE,
             Frame::Batch(b) => {
                 put_batch(&mut body, b);
                 T_BATCH
@@ -428,6 +434,7 @@ impl Frame {
                 *input = rest;
                 Frame::GoAway { reason }
             }
+            T_ALIVE => Frame::Alive,
             T_BATCH => Frame::Batch(get_batch(input, limits)?),
             T_WELCOME => {
                 let member = u32::from_le_bytes(le(input, "member")?);

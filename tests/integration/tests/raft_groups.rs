@@ -526,6 +526,80 @@ fn followers_slower_than_a_heartbeat_are_sent_each_entry_once() {
     }
 }
 
+/// A loaded cluster keeps its leaders (docs/plan/notes/SCALE.md): every broker takes 150 ms a tick, so a group's
+/// heartbeats and acknowledgements often come late by more than the election timeout and the CheckQuorum period
+/// (300 ms), as on brokers saturated by load. Leadership follows the brokers' liveness (`RAFT_SESSION`), which they
+/// keep showing: no leader is deposed and no election starts, and the groups go on appending and committing. (Groups
+/// once deposed their leaders here, moving leadership from one busy broker to another.)
+#[test]
+fn a_loaded_cluster_keeps_its_leaders() {
+    use blossom_value::time::NodeId;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let commit = artifact.rel_named("commit").unwrap();
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                record: blossom_integration_tests::sim_record(&format!("loaded-seed{seed}")),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        d.wait(500_000_000);
+        let committed = |d: &Directed<'_>| {
+            d.c.state(l)
+                .unwrap()
+                .and_then(|s| s.rows(commit).filter(|r| r[0] == d.g).map(|r| u64_at(r, 1)).max())
+                .unwrap_or(0)
+        };
+        let before = committed(&d);
+        for &n in &all {
+            d.c.set_tick_cost(n, 150_000_000).unwrap();
+        }
+        for k in 0..30 {
+            d.wait(200_000_000);
+            assert_eq!(
+                d.leads(l),
+                Some(t),
+                "seed {seed}: the leader lost its group after {} ms of load",
+                (k + 1) * 200
+            );
+            for &n in &all {
+                let term =
+                    d.c.state(n)
+                        .unwrap()
+                        .and_then(|s| s.rows(d.rterm).filter(|r| r[0] == d.g).map(|r| u64_at(r, 1)).max());
+                assert_eq!(term, Some(t), "seed {seed}: b{} moved to another term", n.0 + 1);
+            }
+        }
+        assert!(
+            committed(&d) > before + 20,
+            "seed {seed}: the loaded group committed only {} entries",
+            committed(&d) - before
+        );
+    }
+}
+
 /// A directed run of the harness (CheckQuorum and PreVote on) with every group held at every broker, once each has
 /// a leader: no group proposes, so every one goes idle.
 #[cfg(test)]

@@ -36,6 +36,10 @@
 //! link = "http"                   # a page's link: "http" (plain requests, the default) or "websocket"
 //! style = "app.css"               # optional: the page's stylesheet, relative to this file (`/blossom/style.css`)
 //!
+//! [liveness]                      # optional (ARCHITECTURE §5.13; defaults in liveness::LivenessConfig)
+//! period_ms = 50                  # how often a node tells each peer it is alive
+//! session_ms = 500                # how long a peer counts as alive after the last it heard (`R.up` / `R.down`)
+//!
 //! [stream_limits]                 # optional, in bytes (FOREIGN-PROTOCOLS §1.2; defaults in streams::StreamLimits)
 //! max_stream_bytes = 1048576      # one connection's `data` in one tick
 //! read_ahead_bytes = 1048576      # one connection's reads queued ahead of the engine
@@ -80,7 +84,17 @@ struct RawSpec {
     #[serde(default)]
     stream_limits: RawStreamLimits,
     #[serde(default)]
+    liveness: RawLiveness,
+    #[serde(default)]
     web: RawWeb,
+}
+
+/// `[liveness]`: how often nodes tell their peers they are alive, and for how long that holds.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLiveness {
+    period_ms: Option<u64>,
+    session_ms: Option<u64>,
 }
 
 /// `[web]`: how the pages a node serves reach it.
@@ -197,6 +211,8 @@ pub struct DeploymentSpec {
     pub tiered: bool,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
     pub stream_limits: crate::streams::StreamLimits,
+    /// How nodes keep their views of their peers' liveness (`[liveness]`).
+    pub liveness: crate::liveness::LivenessConfig,
     /// How new stores certify their WAL tail (an existing store keeps the one it was created with, and must match).
     pub tail_certification: blossom_store::Certification,
     /// The link the pages a node serves use (`[web] link`): plain requests unless the deployment says `websocket`.
@@ -320,6 +336,23 @@ impl DeploymentSpec {
             backlog_bytes: positive("backlog_bytes", l.backlog_bytes, d.backlog_bytes)?,
             write_queue_bytes: positive("write_queue_bytes", l.write_queue_bytes, d.write_queue_bytes)?,
         };
+        let dl = crate::liveness::LivenessConfig::default();
+        let period = match raw.liveness.period_ms {
+            Some(0) => return Err(invalid("liveness.period_ms", "must be at least 1".to_owned())),
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => dl.period,
+        };
+        let session = match raw.liveness.session_ms {
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => dl.session,
+        };
+        if session < period * 2 {
+            return Err(invalid(
+                "liveness.session_ms",
+                "must be at least two periods (a peer would be taken down between two of its words)".to_owned(),
+            ));
+        }
+        let liveness = crate::liveness::LivenessConfig { period, session };
         let web_link = match raw.web.link.as_deref() {
             None => crate::web::Transport::default(),
             Some(l) => crate::web::Transport::parse(l)
@@ -351,6 +384,7 @@ impl DeploymentSpec {
             tiered: raw.storage.tiered.unwrap_or(true),
             tail_certification,
             stream_limits,
+            liveness,
             web_link,
             web_style,
         })

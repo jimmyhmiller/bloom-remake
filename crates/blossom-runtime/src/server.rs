@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::{RelId, RoleId, internal_error};
+use blossom_ir::core::{EventSource, RelClass};
 use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::{DurableCodec, DurableSchema};
 use blossom_node::env::{Clock, Entropy};
@@ -44,9 +45,9 @@ use blossom_store::{
     FileWal, Lsn, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf,
     WalWriter,
 };
-use blossom_value::Seed;
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::value::SessionId;
+use blossom_value::{Seed, Value};
 use blossom_wire::frame::{Frame, Peer, RejectReason};
 
 use crate::RuntimeError;
@@ -277,6 +278,8 @@ enum Control {
     DatabaseFlushed(Result<Flushed, String>),
     /// Data was queued.
     Wake,
+    /// The node's view of a peer changed (ARCHITECTURE §5.13).
+    Peer(crate::liveness::PeerChange),
     Stop,
 }
 
@@ -721,6 +724,42 @@ impl Server {
                 peer_writer(addr, id, me, restarts, nonce, catalog, rx, stop)
             })?);
         }
+        // Liveness (ARCHITECTURE §5.13): a connection to each peer that carries `ALIVE` frames alone, the views its
+        // readers feed, and the checker that takes silent peers down.
+        let progress = Arc::new(crate::liveness::EngineProgress::new());
+        let liveness = {
+            let control = ctl_tx.clone();
+            Arc::new(crate::liveness::PeerViews::new(
+                spec.liveness.session,
+                Box::new(move |c| {
+                    // The engine is gone only when the node stops.
+                    let _ = control.send(Control::Peer(c));
+                }),
+            ))
+        };
+        {
+            let (views, cfg, stop) = (liveness.clone(), spec.liveness, stop.clone());
+            threads.push(spawn("liveness-check", move || {
+                crate::liveness::checker(views, cfg, stop)
+            })?);
+        }
+        for (i, n) in spec.nodes.iter().enumerate() {
+            let to = NodeId(u32::try_from(i).map_err(|_| RuntimeError::Config("too many nodes".into()))?);
+            if to == me {
+                continue;
+            }
+            let addr = entry.dial.get(&n.name).copied().unwrap_or(n.addr);
+            let (id, catalog, stop, progress, cfg) = (
+                id.clone(),
+                catalog.clone(),
+                stop.clone(),
+                progress.clone(),
+                spec.liveness,
+            );
+            threads.push(spawn("liveness", move || {
+                crate::liveness::sender(addr, id, me, restarts, nonce, catalog, progress, cfg, stop)
+            })?);
+        }
         // Listeners.
         {
             let ctx = Accept {
@@ -740,6 +779,7 @@ impl Server {
                 spec: Arc::new(spec.clone()),
                 keyed: members.clone(),
                 routing: routing.clone(),
+                liveness,
             };
             let c = ctx.clone();
             threads.push(spawn("peer-listener", move || accept_loop(peer_listener, c, false))?);
@@ -838,7 +878,22 @@ impl Server {
                 clock: SystemClock::anchored_at(boot.now),
                 stats: stats.clone(),
                 resident_noted: None,
+                progress,
+                peer_rels: program
+                    .rels
+                    .iter_enumerated()
+                    .filter_map(|(id, r)| match &r.class {
+                        RelClass::Event(EventSource::Peer { peer, up }) => Some(((*peer, *up), id)),
+                        _ => None,
+                    })
+                    .collect(),
             };
+            // A node is its own peer: its first tick learns its incarnation (ARCHITECTURE §5.13).
+            let mut e = e;
+            e.peer_changed(crate::liveness::PeerChange {
+                peer: me,
+                up: Some(restarts),
+            });
             let (data, env) = (data.clone(), stream_env.clone());
             std::thread::Builder::new()
                 .name("engine".into())
@@ -1181,6 +1236,8 @@ struct Accept {
     /// The keyed members this node has met, and their hosts (docs/design/KEYED.md).
     keyed: Arc<blossom_ir::members::Members>,
     routing: Arc<crate::keyed::Routing>,
+    /// The node's views of its peers' liveness, which their `ALIVE` frames feed (ARCHITECTURE §5.13).
+    liveness: Arc<crate::liveness::PeerViews>,
 }
 
 fn accept_loop(listener: TcpListener, ctx: Accept, clients: bool) {
@@ -1269,6 +1326,10 @@ fn peer_reader(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
         // A batch from the peer, or one a keyed member it hosts sent (docs/design/KEYED.md): a member is a sender
         // only through the host that runs it.
         let (sender, b) = match frame {
+            Frame::Alive => {
+                ctx.liveness.heard(from, hello.restarts);
+                continue;
+            }
             Frame::Batch(b) => (from, b),
             Frame::FromMember { role, key, batch } => {
                 let m = crate::keyed::member_of(program, role, key)?;
@@ -1529,6 +1590,10 @@ struct Engine {
     stats: Arc<Stats>,
     /// When the stats last took the stores holding the most rows.
     resident_noted: Option<Stopwatch>,
+    /// When the tick the engine is in began, for the liveness senders (ARCHITECTURE §5.13).
+    progress: Arc<crate::liveness::EngineProgress>,
+    /// The program's `R.up` and `R.down` relations, by role and whether up.
+    peer_rels: BTreeMap<(RoleId, bool), RelId>,
 }
 
 impl Engine {
@@ -1575,10 +1640,10 @@ impl Engine {
             while self.node.ready(self.clock.now())? {
                 let now = self.clock.now();
                 let clock = Stopwatch::start();
-                let fx = self
-                    .node
-                    .run_tick(now)
-                    .map_err(|f| RuntimeError::Fault(f.to_string()))?;
+                self.progress.tick_begins();
+                let fx = self.node.run_tick(now);
+                self.progress.tick_ends();
+                let fx = fx.map_err(|f| RuntimeError::Fault(f.to_string()))?;
                 let took = clock.nanos();
                 bump(&self.stats.ticks, 1);
                 bump(&self.stats.tick_nanos, took);
@@ -1737,6 +1802,25 @@ impl Engine {
         Ok(())
     }
 
+    /// A peer is up in an incarnation, or down: `R.up(n, incarnation)` or `R.down(n)` for its role `R`, if the
+    /// program reads it, in the next tick.
+    fn peer_changed(&mut self, c: crate::liveness::PeerChange) {
+        let Some(role) = self.roles.get(c.peer.0 as usize).copied().flatten() else {
+            return;
+        };
+        let Some(&rel) = self.peer_rels.get(&(role, c.up.is_some())) else {
+            return;
+        };
+        let row = match c.up {
+            Some(incarnation) => Row::from(vec![
+                Value::Node(c.peer),
+                Value::Int(blossom_value::value::IntValue::U64(incarnation)),
+            ]),
+            None => Row::from(vec![Value::Node(c.peer)]),
+        };
+        self.node.offer_input(rel, row);
+    }
+
     fn control(&mut self, m: Control, codec: &blossom_wire::codec::Codec<'_>) -> Result<Option<Stopped>, RuntimeError> {
         match m {
             Control::Synced(t) => {
@@ -1768,6 +1852,7 @@ impl Engine {
                 }
             }
             Control::Wake => {}
+            Control::Peer(c) => self.peer_changed(c),
             Control::Stop => return Ok(Some(Stopped::Stopped)),
         }
         Ok(None)

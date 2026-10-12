@@ -160,6 +160,64 @@ pub struct SyncConfig {
     pub streams: Option<crate::fabric::StreamsConfig>,
     /// The client links, whose events the round loop raises.
     pub links: Links,
+    /// The cluster nodes' views of their peers' liveness, whose events the round loop raises.
+    pub peers: Peers,
+}
+
+/// Cluster nodes' views of their peers' liveness (ARCHITECTURE §5.13) in the synchronous world: every node of a
+/// cluster role whose `R.up` or `R.down` the program reads is watched by every cluster node, itself included. A peer is
+/// up from the first round (`R.up(p, 1)`), down in its crash round, and up again in its restart round in incarnation
+/// 2 (a restarting node sees every live peer up, itself too). Liveness travels on its own connection, outside the
+/// rounds' messages: an omission does not take a peer down, only its crash does.
+#[derive(Clone, Debug, Default)]
+pub struct Peers {
+    pub pairs: Vec<PeerPair>,
+}
+
+/// `node` watches `peer` through the relations it reads (a program reads only the ones it names).
+#[derive(Clone, Debug)]
+pub struct PeerPair {
+    pub node: NodeId,
+    pub peer: NodeId,
+    pub up: Option<RelId>,
+    pub down: Option<RelId>,
+}
+
+impl Peers {
+    /// The watched pairs of `program` deployed with `roles` (node `n`'s role is `roles[n]`).
+    pub fn of(program: &blossom_ir::core::Program, roles: &[Option<blossom_base::RoleId>]) -> Peers {
+        use blossom_ir::core::{EventSource, RelClass, RoleKind};
+        let cluster = |r: Option<blossom_base::RoleId>| {
+            r.and_then(|r| program.roles.get(r))
+                .is_some_and(|d| matches!(d.kind, RoleKind::Cluster))
+        };
+        let rel = |peer: blossom_base::RoleId, up: bool| {
+            program
+                .rels
+                .iter_enumerated()
+                .find(|(_, r)| matches!(&r.class, RelClass::Event(EventSource::Peer { peer: p, up: u }) if *p == peer && *u == up))
+                .map(|(id, _)| id)
+        };
+        let mut pairs = Vec::new();
+        for (i, a) in roles.iter().enumerate() {
+            for (j, b) in roles.iter().enumerate() {
+                let (Some(peer_role), true) = (*b, cluster(*a) && cluster(*b)) else {
+                    continue;
+                };
+                let (up, down) = (rel(peer_role, true), rel(peer_role, false));
+                if up.is_none() && down.is_none() {
+                    continue;
+                }
+                pairs.push(PeerPair {
+                    node: NodeId(u32::try_from(i).unwrap_or(u32::MAX)),
+                    peer: NodeId(u32::try_from(j).unwrap_or(u32::MAX)),
+                    up,
+                    down,
+                });
+            }
+        }
+        Peers { pairs }
+    }
 }
 
 /// The client links of a deployment (CLIENTS.md §6): every client member is linked to every node of each process or
@@ -529,6 +587,30 @@ impl<'a, E: Evaluator> SyncWorld<'a, E> {
                         link_events.push((r, Row::from(vec![pair.peer_value.clone()])));
                     }
                 }
+                // Peers that come up or go down this round (`Peers`).
+                for pair in config.peers.pairs.iter().filter(|p| p.node == node) {
+                    let peer_live = !faults.crashed(pair.peer, tick);
+                    let comes_up =
+                        ((tick == config.first || restarting) && peer_live) || faults.restarts_at(pair.peer, tick);
+                    let goes_down = pair.peer != node && faults.crashes.get(&pair.peer) == Some(&tick);
+                    let peer_incarnation = if faults.restarts.get(&pair.peer).is_some_and(|r| tick >= *r) {
+                        2u64
+                    } else {
+                        1
+                    };
+                    if comes_up && let Some(r) = pair.up {
+                        link_events.push((
+                            r,
+                            Row::from(vec![
+                                Value::Node(pair.peer),
+                                Value::Int(blossom_value::value::IntValue::U64(peer_incarnation)),
+                            ]),
+                        ));
+                    }
+                    if goes_down && let Some(r) = pair.down {
+                        link_events.push((r, Row::from(vec![Value::Node(pair.peer)])));
+                    }
+                }
                 let with_more: Vec<(RelId, Row)>;
                 let events = if timer_firings.is_empty() && stream_events.is_empty() && link_events.is_empty() {
                     scheduled
@@ -795,6 +877,7 @@ mod tests {
             recovered: None,
             streams: None,
             links: Links::default(),
+            peers: Peers::default(),
         }
     }
 
