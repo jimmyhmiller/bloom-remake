@@ -672,3 +672,23 @@ had already begun. Do not use these as matched-time CPU comparisons; each is a s
 sample. Future timers must target the phase-start timestamp plus the offset and reject missed deadlines.
 The two soaks themselves retain matched workload/pinning/durability/phases/fault controls. Final 256 MiB
 throughput, memory and complete verification are still pending.
+
+## 256 MiB decoded-cache diagnostic (2026-10-13)
+
+`cache-256m-corrected-20261013`, the same binary, 180/180-second phases, CPU pinning, strict tail
+certification, tiered mode and 262,144 hot rows, with 268,435,456 decoded-cache bytes: **13,168 records/s**
+versus corrected 32 MiB **12,326** (+6.8% observed). All **2,853,821** acknowledged records verified,
+zero loss, misplacement, duplication, unacknowledged or foreign records. Peak broker RSS **1,902 /
+1,140 / 1,175 MB**, versus **796 / 839 / 893 MB** at 32 MiB. Steady ack p50 434.18 ms (was 503.81),
+steady p99 1.71 s (was 1.21); fault p99 8.90 s (was 7.30); after-recovery p99 1.57 s (was 2.31).
+Catch-up read all records in 15.2 seconds. Both benchmark processes completed with successful reports
+and full verification. All correctness checks are terminal and passing.
+
+This is a measured tuning option, not a default change or Kafka acceptance result. Larger retention
+improves observed throughput but raises memory and worsens fault-window and steady p99 in this pair.
+The 256 MiB profile has 6,783 samples, zero lost, but its 103-second offset differs from the 32 MiB
+profile's 78-second offset; do not attribute differences in their shares solely to cache capacity.
+Artifact: `/tmp/blossom-cache-256m-current-max.perf` and its profile timing file on the server.
+
+The Kafka target remains unachieved. The large remaining gap needs changes to relational execution,
+physical row/index representation and intermediate materialization, beyond cache capacity alone.
