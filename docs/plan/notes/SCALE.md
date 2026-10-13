@@ -731,3 +731,20 @@ tags. The regression round-trips unknown values and their options through RefVal
 fingerprints. It fails under the previous classification and passes after restoration. All 62 value
 units and value Clippy pass. This corrects the documented contract without a public signature or
 wire-format change. The fix was found while building physical row storage.
+
+## Physical storage checkpoint (2026-10-13)
+
+Isolated word-kernel-bench checkpoint 12747cca implements an owned generational interner, immutable
+U64 word rows, shared layouts and counted primary word-key tables. One arena can serve multiple tables;
+foreign namespace/layout handles are rejected. Pinned word snapshots retain values, released slots are
+recycled without stale-handle aliasing, exact collision checks preserve identity, and canonical ordering
+and fingerprints never use intern ids. Payload/entry limits are explicit and are not RSS limits.
+
+All 15 kernel units, 62 value units, workspace targets and kernel/value Clippy pass. The open-enum
+classification fix is separately retained as a58a1a52; its regression failed under the previous rule
+and passed restored. No public signature/wire-format change.
+
+The kernel code is not yet used by the engine and is not merged into scale-bench. Secondary indexes,
+epoch/delta handling, tiered/lattice integration, word ingest and physical-plan execution remain. U32
+lanes/chunk arenas and specialized compound storage remain open. No new speedup/acceptance claim;
+the last tuned diagnostic remains 13,168 records/s. Next work must integrate the actual execution path.
