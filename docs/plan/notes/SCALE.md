@@ -692,3 +692,32 @@ Artifact: `/tmp/blossom-cache-256m-current-max.perf` and its profile timing file
 
 The Kafka target remains unachieved. The large remaining gap needs changes to relational execution,
 physical row/index representation and intermediate materialization, beyond cache capacity alone.
+
+## Projected index ordering prototype (2026-10-13)
+
+Isolated `projected-index-bench` lets a multi-row bucket compare the suffix after a leading run of indexed
+columns. Those columns are equal within the bucket by construction. Full rows break suffix ties and
+prefix width participates in the internal total order, so even independently compared keys cannot
+collapse distinct rows. Single-row buckets remain allocation-free. No schema uniqueness assumption,
+hash ordering, wire/persistence change or public ABI change.
+
+Eleven engine units pass: mixed ordered-set models over seven projections including reordered/duplicate
+columns, non-prefix columns and variable row arity; total-order/Eq checks; support, old-version and
+range checks; removal and payload release. All 33 selected planner/deletion/scoped/Kafka/database/tiered
+integration checks and engine Clippy pass. Release build and captured replay timing are next. No
+performance claim or retention yet.
+
+## Projected index ordering — not retained (2026-10-13)
+
+Captured broker-2 replay outcomes pass and the rule/function work report remains byte-for-byte identical.
+Three pinned, interleaved user-CPU timings: retained 4.66 / 4.57 / 4.56 seconds; projected 4.61 / 4.64 /
+4.65. Peak RSS after warm-up about 291 MB for both. No repeatable CPU reduction is established; the
+prototype is slightly slower on this captured workload. Do not merge it into scale-bench. Archive on
+`projected-index-bench`, implementation d00d837e. All eleven engine units, 33 integration checks,
+workspace all-target compilation and engine Clippy pass. No full throughput/fault soak was run for this
+rejected prototype. No process remains running.
+
+The planner, kernel and codegen crates remain placeholders; the retained engine uses dynamic Value
+rows and interpreted relational operators. Those files were inspected directly. Next larger work must
+build the physical execution path rather than assume a public Value layout or comparison tweak can
+supply the remaining Kafka throughput gap. Final target remains open.
