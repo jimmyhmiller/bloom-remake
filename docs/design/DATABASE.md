@@ -183,8 +183,11 @@ Moving durable relations onto the database, so a node's durable state may outgro
 - *The hot tier.* A row's key is the whole row, so a table updated in place leaves a delete and a new key per
   update under the same prefix, and the history the tree keeps (`storage.history_ticks`) leaves them there: a probe
   of the tree walks them. Each tiered table keeps the answers to its recent probes (the rows with given values in
-  given columns, sorted; whether a row is there) in a hot tier bounded in rows (`EngineConfig::hot_rows`, 16384 by
-  default), kept equal to the database's newest version: an overlay entry the database catches up with is applied
+  given columns, sorted; whether a row is there) in a hot tier whose row budget is shared across the engine's
+  tiered stores
+  (`storage.hot_rows`, passed through `EngineConfig::hot_rows`, 65536 by default). The deployment value
+  must be positive; omitting it keeps the engine default. This is a row budget, not a byte limit. The answers are
+  kept equal to the database's newest version: an overlay entry the database catches up with is applied
   to them, not dropped, so a probe asked again never reads the tree. A range probe on the column after a leading
   run is cut from its prefix's kept rows by binary search; a prefix too large to keep is known as such, and its
   ranges read the tree. The overlay is indexed by the columns probes ask for, so a probe's correction costs the

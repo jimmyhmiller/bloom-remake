@@ -449,7 +449,7 @@ impl Executors {
         self.backend
     }
 
-    /// The engines keep `rows` rows of each tiered table's recent probes (`EngineConfig::hot_rows`).
+    /// The engines keep `rows` rows of recent probes across their tiered stores (`EngineConfig::hot_rows`).
     pub fn with_hot_rows(mut self, rows: usize) -> Executors {
         self.engine.hot_rows = Some(rows);
         self

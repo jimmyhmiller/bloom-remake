@@ -519,6 +519,7 @@ fn the_database_recovers_from_a_crash_anywhere_in_its_flushes() {
 fn storage_tiered_is_on_unless_a_deployment_opts_out() {
     let (spec, _) = setup("tiered-default");
     assert!(spec.tiered, "a deployment that says nothing tiers its tables");
+    assert_eq!(spec.hot_rows, None);
     let dir = std::env::temp_dir().join(format!("blossom-db-tiered-off-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -532,6 +533,9 @@ fn storage_tiered_is_on_unless_a_deployment_opts_out() {
         free_port(),
     );
     assert!(!DeploymentSpec::parse(&text, &dir).unwrap().tiered);
+    let cache = format!("{text}hot_rows = 262144\n");
+    assert_eq!(DeploymentSpec::parse(&cache, &dir).unwrap().hot_rows, Some(262144));
+    assert!(DeploymentSpec::parse(&format!("{text}hot_rows = 0\n"), &dir).is_err());
 }
 
 /// `[web] link` (docs/design/CLIENTS.md §3a): pages use plain requests unless the deployment says `websocket`; any

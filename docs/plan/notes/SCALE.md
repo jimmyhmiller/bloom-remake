@@ -420,3 +420,33 @@ A 20-second leaf-only CPU sample near the end of maximum load crossed the max/dr
 SST scans, and relational evaluation remained prominent. This is diagnostic evidence, not a controlled
 profile comparison or acceptance result. Next: a symbolized call-stack profile of the retained version
 under a longer maximum phase, to identify a larger engine bottleneck.
+
+## Cold-table isolation and cache controls (2026-10-13)
+
+The retained implementation's symbolized/frame-pointer build ran a 180-second maximum phase and a
+180-second paced phase with the same pinning, 2,000 records/s, kill at 60 seconds and restart 10 seconds later.
+`baseline-stacks-20261013`: 11,439 records/s, 2,580,128 records fully verified. Steady ack p50 498.69 ms;
+fault-window ack p99 9.40 seconds. Peak broker RSS 1,413 / 781 / 805 MB.
+The 30-second broker-2 profile captured 25 seconds into maximum load had 7,156 samples, none lost.
+Inclusive shares: tick evaluation 86.9%, relational evaluation 50.5%, store updates 18.4%, cold probes 18.0%.
+Shares overlap. Artifact: `/tmp/blossom-baseline-current-max.perf` on the server.
+
+The same build and controls with `TIERED=false` (`in-memory-diagnostic-20261013`) produced 18,663 records/s
+(+63.2%), and fully verified 3,862,932 records. Steady ack p50 308.99 ms; fault-window ack p99 10.82 seconds.
+Peak broker RSS was 5,691 / 5,420 / 5,157 MB. This isolates substantial cold-table overhead but does **not**
+prove a matched-resource win or a solution for state that outgrows RAM. Durability remained strict.
+
+Skipping unification comparisons for columns already matched by an index probe passed 22 planner/scoped/deletion
+checks, additional produce/read checks, and the six-test multi-process suite with ignored tests included
+(the opt-in latency measurement did not run). `probe-unify-after-20261013` produced 10,742 records/s,
+with all 2,432,362 records fully verified. It was reverted: no throughput gain.
+
+`storage.hot_rows` now exposes the existing engine-wide cache row budget through deployments, for both
+node and keyed-object executors. Omission keeps the 65,536 default; zero is rejected. The benchmark accepts
+`HOT_ROWS`. This is a row budget, not a byte limit, and changing it does not change persistence or durability.
+Configuration validation, 13 runtime units, 12 runtime database/server checks and 8 storage model/crash checks
+passed, along with Clippy for runtime/node/storage. Two preexisting storage lint violations were corrected.
+The next run measures a 262,144-row budget in tiered mode; no throughput claim yet.
+
+Open cache issue recorded in the project pad: distinct empty probe/range answers cost zero rows in the cache
+counter, so their metadata can grow without triggering row-budget eviction. This remains unfixed.

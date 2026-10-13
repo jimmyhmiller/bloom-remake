@@ -515,7 +515,7 @@ impl Sst {
             // Blocks are ordered by key, then newest version first. Seek to the range rather than comparing every
             // preceding entry on each probe; stop as soon as the exclusive upper bound is reached.
             let first = block.partition_point(|e| e.key.as_slice() < start);
-            for e in block[first..].iter().take_while(|e| before_end(&e.key)) {
+            for e in block.iter().skip(first).take_while(|e| before_end(&e.key)) {
                 if last.as_deref() != Some(e.key.as_slice()) {
                     if taken == keys {
                         return Ok(last);

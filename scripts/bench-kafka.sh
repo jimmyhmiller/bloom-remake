@@ -13,7 +13,8 @@
 #
 # Environment: KAFKA_HOME (default: the repository's .tools/kafka_*), BENCH_DIR (scratch data, default
 # /tmp/bench-kafka), BLOSSOM (the blossom binary, default target/release/blossom), REDPANDA_IMAGE, OUT; for Blossom,
-# TAIL_CERT (strict | crc), TIERED (true | false: storage.tiered) and RECORD=1 (each broker records a trace into
+# TAIL_CERT (strict | crc), TIERED (true | false: storage.tiered), HOT_ROWS (optional storage.hot_rows)
+# and RECORD=1 (each broker records a trace into
 # $BENCH_DIR/blossom/traces). BROKER_CPUS pins the brokers of Blossom and Kafka: three `taskset -c` lists separated by
 # spaces, one per broker (e.g. "0-3,16-19 4-7,20-23 8-11,24-27"). PARTITIONS=0 creates no topic.
 set -euo pipefail
@@ -52,6 +53,7 @@ blossom_up() {
     printf '["b3", 3, "127.0.0.1", 19094]]\n\n[security]\nmode = "insecure-dev"\n\n[storage]\ndata_dir = "data"\n'
     printf 'tail_certification = "%s"\n' "${TAIL_CERT:-strict}"
     printf 'tiered = %s\n' "${TIERED:-true}"
+    if [ -n "${HOT_ROWS:-}" ]; then printf 'hot_rows = %s\n' "$HOT_ROWS"; fi
   } > "$d/deploy.toml"
   printf 'seed = "00112233445566778899aabbccddeeff"\n' > "$d/k.secrets"
   chmod 600 "$d/k.secrets"

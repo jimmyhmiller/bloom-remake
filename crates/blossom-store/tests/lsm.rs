@@ -203,7 +203,7 @@ fn seeks_find_historical_versions_across_block_boundaries() {
         history: 100,
         ..opts()
     };
-    let lsm = Lsm::open(fs.clone(), dir, options.clone()).unwrap();
+    let lsm = Lsm::open(fs.clone(), dir, options).unwrap();
     // All versions of b go into one SSTable, spanning several blocks, between neighboring keys. Its oldest
     // version is absent; the alternating puts/deletes distinguish each as-of seek from a newest-version lookup.
     for v in 1..=24 {

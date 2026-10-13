@@ -407,7 +407,7 @@ impl ObjectNode {
         // The engine, unless a test run asks every harness for another (`BLOSSOM_EVALUATOR`: `checked` runs the
         // engine against the oracle at every tick).
         let backend = Backend::from_env().map_err(RuntimeError::Config)?;
-        let executors = Executors::new(
+        let mut executors = Executors::new(
             backend,
             artifact.program.clone(),
             artifact.roles.clone(),
@@ -417,6 +417,9 @@ impl ObjectNode {
             members.clone(),
         )?
         .tiered(spec.tiered);
+        if let Some(rows) = spec.hot_rows {
+            executors = executors.with_hot_rows(rows);
+        }
         let oracle = executors.oracle().clone();
         // A store that does not exist yet is created: an object's first start.
         let fresh = cfg.fs.list(&cfg.dir).map_or(true, |entries| entries.is_empty());

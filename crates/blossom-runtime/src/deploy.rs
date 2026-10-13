@@ -27,6 +27,7 @@
 //! [storage]
 //! data_dir = "data"               # each node's store is <data_dir>/<node name>, relative to this file
 //! checkpoint_wal_bytes = 67108864
+//! hot_rows = 65536                  # recent-probe rows across the engine's tiered stores
 //! history_ticks = 65536             # how far back a database query may read (docs/design/DATABASE.md §4)
 //! tiered = true                   # durable tables read from the database, so state may outgrow memory (§7); false:
 //!                                 # every table in memory (faster while it fits), the database still the durable store
@@ -155,6 +156,7 @@ struct RawStorage {
     checkpoint_wal_bytes: Option<u64>,
     history_ticks: Option<u64>,
     tiered: Option<bool>,
+    hot_rows: Option<usize>,
     tail_certification: Option<String>,
 }
 
@@ -211,6 +213,8 @@ pub struct DeploymentSpec {
     /// Whether the engine reads durable tables from the database (docs/design/DATABASE.md §7), or keeps them all in
     /// memory.
     pub tiered: bool,
+    /// Recent-probe row budget across the engine's tiered stores (`None`: engine default).
+    pub hot_rows: Option<usize>,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
     pub stream_limits: crate::streams::StreamLimits,
     /// How nodes keep their views of their peers' liveness (`[liveness]`).
@@ -248,6 +252,9 @@ impl DeploymentSpec {
                 "format",
                 format!("{} is not a format this build reads (1)", raw.format),
             ));
+        }
+        if raw.storage.hot_rows == Some(0) {
+            return Err(invalid("storage.hot_rows", "must be positive"));
         }
         let security = match raw.security.mode.as_str() {
             "insecure-dev" => SecurityMode::InsecureDev,
@@ -388,6 +395,7 @@ impl DeploymentSpec {
             checkpoint_wal_bytes: raw.storage.checkpoint_wal_bytes.unwrap_or(256 * 1024 * 1024),
             history_ticks: raw.storage.history_ticks.unwrap_or(65_536),
             tiered: raw.storage.tiered.unwrap_or(true),
+            hot_rows: raw.storage.hot_rows,
             tail_certification,
             stream_limits,
             liveness,

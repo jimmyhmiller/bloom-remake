@@ -509,7 +509,7 @@ impl Server {
             )
             .into());
         }
-        let executors = Executors::new(
+        let mut executors = Executors::new(
             cfg.backend,
             artifact.program.clone(),
             artifact.roles.clone(),
@@ -519,6 +519,9 @@ impl Server {
             members.clone(),
         )?
         .tiered(spec.tiered);
+        if let Some(rows) = spec.hot_rows {
+            executors = executors.with_hot_rows(rows);
+        }
         let oracle = executors.oracle().clone();
         let nonce = OsEntropy.boot_nonce().map_err(RuntimeError::Config)?;
         let dir = cfg.dir.clone().unwrap_or_else(|| spec.data_dir.join(&entry.name));
