@@ -363,17 +363,15 @@ impl Hot {
 
     /// Past either budget, the least recently used half goes.
     fn trim(&mut self) {
-        if self.size() > self.budget {
-            self.halve();
-        }
+        self.shrink(self.budget);
     }
 
     /// Down to `target` rows and entries, the least recently used half at a time.
     fn shrink(&mut self, target: usize) {
         while self.size() > target {
-            let before = self.size();
+            let before = (self.rows, self.entries);
             self.halve();
-            if self.size() >= before {
+            if self.rows >= before.0 && self.entries >= before.1 {
                 return;
             }
         }
@@ -1682,6 +1680,23 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eviction_repeats_when_old_empty_answers_hide_large_recent_answers() {
+        let mut hot = Hot {
+            budget: 256,
+            ..Hot::default()
+        };
+        for i in 0..192 {
+            hot.keep_probe(&[0], &[Value::u64(i)], Arc::new(Vec::new()));
+        }
+        for i in 1000..1065 {
+            let rows = (0..4).map(|j| Arc::from([Value::u64(i), Value::u64(j)])).collect();
+            hot.keep_probe(&[0], &[Value::u64(i)], Arc::new(rows));
+            assert!(hot.rows <= hot.budget, "evicting old empty answers alone frees no rows");
+            assert!(hot.entries <= hot.budget);
+        }
+    }
 
     #[test]
     fn empty_cache_answers_and_markers_stay_bounded() {

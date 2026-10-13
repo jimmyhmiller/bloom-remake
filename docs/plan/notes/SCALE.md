@@ -471,3 +471,16 @@ one-sixty-fourth budget share govern probe size. The old code comment records th
 one eighth of throughput in a prior 300,000-record Kafka test, so this is an experiment, not an assumed win.
 The wider partition workload and larger total budget will be measured, including RSS and full verification;
 retain it only if the evidence supports it.
+
+The wider-probe policy (`probe-share-diagnostic-20261013`) regressed badly: 7,727 records/s versus
+11,666 with the 256-row cap, and steady ack p50 5.06 seconds versus 459.78 ms. All 1,952,691 acknowledged
+records verified with zero loss, misplacement or duplication. Peak RSS 803 / 980 / 868 MB.
+A matched-time maximum-load profile had 6,950 samples, none lost; inclusive cold-probe work rose to
+24.1% and row decoding to 13.5%. The per-probe cap was restored. Increasing read-ahead here repeats
+substantial speculative decoding rather than eliminating the cold path.
+
+An additional cache regression test found that one LRU pass can remove many old empty answers without
+freeing any rows. Trimming now repeats until both counters fit. Its progress guard checks both counters,
+so a decrease in entries alone does not stop reclamation early. The new test fails on the previous
+single-pass rule and passes after the fix. Five engine units, eight database/tiered regressions and
+Clippy pass with the original 256-row cap retained.
