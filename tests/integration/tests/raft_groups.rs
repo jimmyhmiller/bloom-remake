@@ -650,6 +650,82 @@ fn a_loaded_clusters_crashed_leader_is_replaced() {
     }
 }
 
+/// A broker whose ticks outlast the liveness session but are not stuck stays up (ARCHITECTURE §5.13): its ALIVE
+/// frames go out between and during ticks, so a leader taking 1.5 s a tick (longer than the 500 ms session, as on a
+/// saturated broker) is held up by every peer throughout and keeps its group. It once stopped saying it was alive
+/// whenever a tick ran past the session, so the brokers of a loaded cluster took each other down and back up, and
+/// leadership flapped. A broker whose tick runs past `liveness_stuck` is stuck: its peers take it down and elect
+/// another leader. `liveness_stuck` is 4 s here rather than the default 10 s: the harness's leaders append without
+/// end, and the run's cost grows with its length.
+#[test]
+fn a_broker_whose_ticks_outlast_the_session_stays_up_until_stuck() {
+    use blossom_value::time::NodeId;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let peer_up = artifact.rel_named("peer_up").unwrap();
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                record: blossom_integration_tests::sim_record(&format!("long-ticks-seed{seed}")),
+                liveness_stuck: 4_000_000_000,
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let stuck = 4_000_000_000;
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        let rest: Vec<NodeId> = all.iter().copied().filter(|n| *n != l).collect();
+        let holds_up = |d: &Directed<'_>, at: NodeId| {
+            d.c.state(at)
+                .unwrap()
+                .is_some_and(|s| s.rows(peer_up).any(|r| r[0] == Value::Node(l)))
+        };
+        d.c.set_tick_cost(l, 1_500_000_000).unwrap();
+        for k in 0..25 {
+            d.wait(200_000_000);
+            for &n in &rest {
+                assert!(
+                    holds_up(&d, n),
+                    "seed {seed}: b{} took the slow leader down after {} ms",
+                    n.0 + 1,
+                    (k + 1) * 200
+                );
+            }
+        }
+        assert_eq!(d.leads(l), Some(t), "seed {seed}: the slow leader lost its group");
+        // Stuck: one tick far longer than `liveness_stuck`. Its peers take it down once that long has passed, and
+        // not before (allowing for the 1.5 s tick it may be inside now).
+        d.c.set_tick_cost(l, 10 * stuck).unwrap();
+        d.wait(stuck - 2_000_000_000);
+        for &n in &rest {
+            assert!(holds_up(&d, n), "seed {seed}: b{} took the leader down before it was stuck", n.0 + 1);
+        }
+        d.await_until(5_000_000_000, "the stuck leader taken down", |d| {
+            rest.iter().all(|&n| !holds_up(d, n))
+        });
+        d.await_leader(&rest, t, 10_000_000_000);
+    }
+}
+
 /// A directed run of the harness (CheckQuorum and PreVote on) with every group held at every broker, once each has
 /// a leader: no group proposes, so every one goes idle.
 #[cfg(test)]

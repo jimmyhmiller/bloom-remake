@@ -3,8 +3,8 @@
 //!
 //! A node keeps a liveness connection to each peer, beside its data connection, that carries nothing but `ALIVE`
 //! frames: one every `period`, sent by the connection's own thread, never behind data, a tick or a WAL sync. It sends
-//! none while its engine has been inside one tick for longer than `session` (a live process with a stuck engine is not
-//! serving). The receiving side stamps each frame as it arrives: a peer is up from its first frame (in an incarnation,
+//! none while its engine has been inside one tick for longer than `stuck` (a live process with a stuck engine is not
+//! serving; a tick that only runs long under load is not stuck, so `stuck` is far longer than any such tick). The receiving side stamps each frame as it arrives: a peer is up from its first frame (in an incarnation,
 //! the `restarts` its `HELLO` gave), and down once no frame came for `session`. Only changes reach the engine, through
 //! its control channel (not behind queued data), as inputs of its next tick: recorded in its trace, so replay sees the
 //! same view. A loaded node is slower, not dead: its frames still leave and arrive on time.
@@ -22,11 +22,13 @@ use crate::RuntimeError;
 use crate::clock::Stopwatch;
 use crate::net::{self, Catalog, Conn, Identity};
 
-/// How often a node says it is alive, and how long a peer counts as alive after its last word (`[liveness]`).
+/// How often a node says it is alive, how long a peer counts as alive after its last word, and how long one tick of its
+/// engine may run before it stops saying so (`[liveness]`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LivenessConfig {
     pub period: Duration,
     pub session: Duration,
+    pub stuck: Duration,
 }
 
 impl Default for LivenessConfig {
@@ -34,6 +36,7 @@ impl Default for LivenessConfig {
         LivenessConfig {
             period: Duration::from_millis(50),
             session: Duration::from_millis(500),
+            stuck: Duration::from_secs(10),
         }
     }
 }
@@ -195,7 +198,7 @@ pub fn sender(
             }
         };
         while !stop.load(Ordering::SeqCst) {
-            if progress.responsive(cfg.session) && conn.send(&Frame::Alive).is_err() {
+            if progress.responsive(cfg.stuck) && conn.send(&Frame::Alive).is_err() {
                 break;
             }
             std::thread::sleep(cfg.period);

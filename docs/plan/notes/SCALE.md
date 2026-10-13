@@ -215,3 +215,53 @@ sync, queues behind data, and is noticed at the receiver's next tick), so its se
 - Tests: `blossom-cli` `liveness` (three processes through proxies: kill -9 -> down after >= 300 ms, back in
   incarnation 2; SIGSTOP -> down, SIGCONT -> back; a one-way cut -> down at the far end only), `raft_groups`
   `a_loaded_cluster_keeps_its_leaders`, front-end diagnostics, liveness unit tests.
+
+## Fix 5 (uncommitted): in-sync replicas follow liveness; a stuck limit apart from the session
+
+- examples/kafka/cluster.bls `in_sync`: a follower counts only while its broker is up (`peer_alive`); one taken down
+  leaves at once (Kafka's controller shrinks the ISR of a broker it fences), rather than after `REPLICA_LAG_MAX`
+  (30 s in the soak), during which every acks=all produce to the partitions it followed waited for it. Test:
+  `blossom-cli` `kafka3::a_killed_follower_leaves_the_in_sync_replicas_with_its_session` (REPLICA_LAG_MAX 30 s; after
+  a kill -9 of a follower a produce is acknowledged within 6 s, the next ones within 2 s; the restarted follower
+  rejoins). Checked on the server against the old rule: it fails there ("after the kill: not acknowledged within
+  6s"), passes on the new one.
+- `[liveness] stuck_ms` (10 s; `LivenessConfig::stuck`, sim `liveness_stuck`): a node stops sending `ALIVE` only once
+  one tick has run that long. It used the session (500 ms), so a saturated broker whose ticks ran past 500 ms was taken
+  down by its peers and back up again, and leadership flapped. Test: `raft_groups::
+  a_broker_whose_ticks_outlast_the_session_stays_up_until_stuck` (a leader at 1.5 s a tick stays up and keeps its
+  group; at a tick longer than `liveness_stuck` its peers take it down and elect another). It fails with the stuck
+  limit equal to the session ("took the slow leader down after 1200 ms").
+- A simulator bug the new test hit (again the one Fix 4 found, another path): `liveness_next` raised a stuck node's
+  "words stop" instant for the whole tick, also after it had passed; clamped to `now + 1`, the simulation crept a
+  nanosecond at a time for the rest of the tick (a 100 s tick: ~10^11 steps; the test ran 6 h before it was killed).
+  Fixed: the instant is raised only while it is ahead. And the clamp is gone: a liveness change due at or before now
+  is an internal error, so this class of bug fails the run at once ("a liveness change fell due at ... not after
+  now") instead of hanging it.
+- That error found a second such path at once (5 tests in raft_groups, kafka_groups, kafka_topics, kafka_cluster, all
+  restarting a node): a down node kept `live_since` for the peers it could not hear, so restarted it raised their
+  `R.up` from a moment seconds past (hidden by the clamp: it fired a nanosecond after the restart). A down node now
+  forgets its views wholly (as `liveness_step`'s doc said), and restarted hears each peer one latency after its first
+  word, as the runtime does. Every simulator suite, the sim/runtime unit tests and the multi-process liveness, kafka3
+  and raft3 tests pass on the server (`~/bloom-logs/simcheck.log`).
+- The new test's run cost: the harness's leaders append without end (no compaction) and the safety observer reads
+  every node's whole state at every step, so a run's cost grows with the square of its length; with the default 10 s
+  stuck limit the test took 264 s. It uses a 4 s stuck limit (the property is relative: session < tick < stuck stays
+  up; tick > stuck goes down): 50 s. The observer's per-step full-state read is a known simulator cost, not addressed.
+
+## Soak 3 (both fixes, 2026-10-12 21:39-22:52; `~/soak-results/{blossom,kafka}-3`)
+
+Same harness and phases as above; brokers `0-1,16-17`, `2-3,18-19`, `4-5,20-21`, clients `6-7,22-23` (half the box).
+Both verify OK: every acknowledged record present at its offset, none lost, misplaced or duplicated.
+
+| phase | Blossom | Kafka 4.0 |
+|---|---|---|
+| max (4 unthrottled producers, 300 s) | 6 736 rec/s, ack p50 17.8 s, p99 24.1 s | 26 786 rec/s, ack p50 4.7 s, p99 7.9 s |
+| fixed 2000/s, steady (572 s) | ack p50 1 056 ms, p99 2 022 ms, max 3.2 s | ack p50 179 ms, p99 1 523 ms, max 2.2 s |
+| fixed, broker killed and back (120 s) | ack p50 2 134 ms, p99 12.7 s, max 15.3 s | ack p50 173 ms, p99 7.9 s, max 10.0 s |
+| fixed, after recovery (1 080 s) | ack p50 1 260 ms, p99 2 681 ms | ack p50 184 ms, p99 1 518 ms |
+| catch-up read, a new group of 4 | 5.76 M records in 26.4 s (~218k rec/s) | 11.8 M records in 15.2 s (~777k rec/s) |
+| acknowledged in all | 5 758 330 | 11 814 643 |
+
+Read: no failures and no loss on either side, and Blossom now rides through the kill -9 (soak 2 left partitions
+leaderless). The gap is throughput and latency: ~4x lower max rate, ~6x the steady ack p50 at a rate both hold, and a
+longer stall at the kill. Next, per the plan: bounded per-tick work.

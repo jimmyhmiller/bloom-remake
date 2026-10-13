@@ -39,6 +39,7 @@
 //! [liveness]                      # optional (ARCHITECTURE §5.13; defaults in liveness::LivenessConfig)
 //! period_ms = 50                  # how often a node tells each peer it is alive
 //! session_ms = 500                # how long a peer counts as alive after the last it heard (`R.up` / `R.down`)
+//! stuck_ms = 10000                # how long one tick may run before the node stops saying it is alive
 //!
 //! [stream_limits]                 # optional, in bytes (FOREIGN-PROTOCOLS §1.2; defaults in streams::StreamLimits)
 //! max_stream_bytes = 1048576      # one connection's `data` in one tick
@@ -95,6 +96,7 @@ struct RawSpec {
 struct RawLiveness {
     period_ms: Option<u64>,
     session_ms: Option<u64>,
+    stuck_ms: Option<u64>,
 }
 
 /// `[web]`: how the pages a node serves reach it.
@@ -352,7 +354,11 @@ impl DeploymentSpec {
                 "must be at least two periods (a peer would be taken down between two of its words)".to_owned(),
             ));
         }
-        let liveness = crate::liveness::LivenessConfig { period, session };
+        let stuck = match raw.liveness.stuck_ms {
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => dl.stuck,
+        };
+        let liveness = crate::liveness::LivenessConfig { period, session, stuck };
         let web_link = match raw.web.link.as_deref() {
             None => crate::web::Transport::default(),
             Some(l) => crate::web::Transport::parse(l)

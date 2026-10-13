@@ -2890,7 +2890,8 @@ count) from `R.up(self, i)` in its first tick.
 - **Heard outside the ticks.** Each node keeps a liveness connection to each peer, beside its data connection, that
   carries only `ALIVE` frames (§5.4): one every `[liveness] period_ms` (50), sent by the connection's own thread, so
   they wait for no tick, no WAL sync and no queued data. A node sends none while its engine has been inside one tick
-  for longer than the session: a live process with a stuck engine is not serving.
+  for longer than `[liveness] stuck_ms` (10 s): a live process with a stuck engine is not serving, while a tick that
+  only runs long under load (seconds, at saturation) is not stuck.
 - **Judged on arrival.** The receiving side stamps each frame as it arrives. A peer is up from its first frame in an
   incarnation (its `HELLO`'s `restarts`; a frame of an older incarnation is ignored) and down once no frame came for
   `[liveness] session_ms` (500). Changes reach the engine through its control channel, not behind queued data, and are

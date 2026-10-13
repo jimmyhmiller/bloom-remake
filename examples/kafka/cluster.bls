@@ -836,12 +836,16 @@ at Broker {
     forget_behind_removed: while behind(g, f, at, out), leader(g, _), not members(g, f) {
         delete behind(g, f, at, out);
     }
-    /// A led partition's in-sync replicas, by broker id: the leader, and every follower not behind for
-    /// `REPLICA_LAG_MAX`.
+    /// A led partition's in-sync replicas, by broker id: the leader, and every follower whose broker is up
+    /// (`peer_alive`) and that is not behind for `REPLICA_LAG_MAX`. A follower whose broker the runtime takes down
+    /// leaves at once, as Kafka's controller shrinks the in-sync replicas of a broker it fences when its session ends:
+    /// otherwise every `acks=all` produce waits for a dead broker until the lag runs out. It comes back only once it
+    /// has caught up (it fell behind meanwhile).
     view in_sync(g, id) {
         leader(g, _), not is_controller(g), my_id(id);
-        leader(g, _), isr_term(g, _), members(g, f), broker(f, id, _, _), not behind(g, f, _, _) where f != self;
-        leader(g, _), members(g, f), broker(f, id, _, _), behind(g, f, at, out)
+        leader(g, _), isr_term(g, _), members(g, f), broker(f, id, _, _), peer_alive(f), not behind(g, f, _, _)
+                where f != self;
+        leader(g, _), members(g, f), broker(f, id, _, _), peer_alive(f), behind(g, f, at, out)
                 where f != self && not out && now() < at + REPLICA_LAG_MAX;
     }
     view isr_of(g, ids = collect!(id)) = in_sync(g, id);

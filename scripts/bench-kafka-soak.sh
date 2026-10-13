@@ -220,7 +220,7 @@ event "catchup done: $read_n records in $(awk "BEGIN { printf \"%.1f\", ($cend -
 event "verify"
 taskset -c "$CLIENT_CPUS" java -Xmx16g -cp "$classes:$KAFKA_HOME/libs/*" Soak verify --bootstrap "$BOOTSTRAP" \
   --topics "$topic_list" --out "$OUT" --prop max.poll.records=5000 > "$OUT/verify.txt" 2>&1 || true
-tail -n 1 "$OUT/verify.txt" | tee -a "$OUT/events.log"
+event "verify: $(tail -n 1 "$OUT/verify.txt")"
 echo "$(since),$(du -sm "$BENCH_DIR/$SYSTEM" | cut -f1)" >> "$OUT/disk.csv"
 
 # ---- summary

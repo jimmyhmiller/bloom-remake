@@ -117,8 +117,10 @@ pub struct ClusterConfig {
     /// Each node records its trace (`blossom trace`) into this directory: `<node>-<incarnation>.blstrace`.
     pub record: Option<std::path::PathBuf>,
     /// How long a node counts as alive at a peer after it stopped being heard (ARCHITECTURE §5.13: `R.down`), in
-    /// virtual nanoseconds; a node whose single tick runs longer stops being heard while it runs.
+    /// virtual nanoseconds.
     pub liveness_session: i64,
+    /// How long one tick of a node may run before it stops being heard (its engine stuck), in virtual nanoseconds.
+    pub liveness_stuck: i64,
 }
 
 impl Default for ClusterConfig {
@@ -145,6 +147,7 @@ impl Default for ClusterConfig {
             stream_drops: false,
             record: None,
             liveness_session: 500_000_000,
+            liveness_stuck: 10_000_000_000,
         }
     }
 }
@@ -767,7 +770,7 @@ impl<'p> Cluster<'p> {
             if let Some(w) = self.stream_wake() {
                 next = next.min(w);
             }
-            if let Some(t) = self.liveness_next() {
+            if let Some(t) = self.liveness_next()? {
                 next = next.min(t);
             }
             for n in &self.nodes {
@@ -819,7 +822,7 @@ impl<'p> Cluster<'p> {
     }
 
     /// Whether `peer` is heard at `observer` now: it runs, its words to `observer` get through, and its engine is not
-    /// inside one tick for longer than the session. A node hears itself while it runs.
+    /// inside one tick for longer than `liveness_stuck`. A node hears itself while it runs.
     fn heard(&self, observer: NodeId, peer: NodeId) -> bool {
         let Some(s) = self.nodes.get(peer.0 as usize) else {
             return false;
@@ -827,9 +830,9 @@ impl<'p> Cluster<'p> {
         if observer == peer {
             return s.driver.is_some();
         }
-        let stuck = s.tick_cost > self.cfg.liveness_session
+        let stuck = s.tick_cost > self.cfg.liveness_stuck
             && s.busy_until > self.now
-            && self.now >= s.busy_from.saturating_add(self.cfg.liveness_session);
+            && self.now >= s.busy_from.saturating_add(self.cfg.liveness_stuck);
         s.driver.is_some() && !self.blocked.contains(&(peer, observer)) && !stuck
     }
 
@@ -866,16 +869,17 @@ impl<'p> Cluster<'p> {
             let observer_up = self.nodes.get(o.0 as usize).is_some_and(|s| s.driver.is_some());
             let now = self.now;
             let v = self.views.entry((o, p)).or_default();
+            // A down node hears nothing; restarted, it hears each peer anew (one latency after its first word).
+            if !observer_up {
+                *v = PeerView::default();
+                continue;
+            }
             if heard {
                 v.dead_since = None;
                 v.live_since.get_or_insert(now);
             } else {
                 v.live_since = None;
                 v.dead_since.get_or_insert(now);
-            }
-            if !observer_up {
-                v.seen = None;
-                continue;
             }
             let change = match (heard, v.seen, v.live_since, v.dead_since) {
                 (true, seen, Some(since), _) if seen != Some(incarnation) && now >= since.saturating_add(delay) => {
@@ -904,8 +908,10 @@ impl<'p> Cluster<'p> {
         Ok(())
     }
 
-    /// When the next liveness change falls due, if one will.
-    fn liveness_next(&self) -> Option<i64> {
+    /// When the next liveness change falls due, if one will. Each falls due after now: [`Cluster::liveness_step`] raised
+    /// whatever was due, so a change still due by now is a bug in this bookkeeping (stepping on from it would creep a
+    /// nanosecond at a time), and an error.
+    fn liveness_next(&self) -> Result<Option<i64>, SimError> {
         let session = self.cfg.liveness_session;
         let mut next: Option<i64> = None;
         let mut at = |t: i64| next = Some(next.map_or(t, |n| n.min(t)));
@@ -927,15 +933,26 @@ impl<'p> Cluster<'p> {
             {
                 at(since.saturating_add(session));
             }
-            // A slow node's long tick stops its words a session after it began.
+            // A stuck node's tick stops its words `liveness_stuck` after it began; once that has passed, its silence
+            // is `dead_since`'s to time (raising the past moment again would step the clock a nanosecond at a time
+            // for the rest of the tick).
             if let Some(s) = self.nodes.get(p.0 as usize)
-                && s.tick_cost > session
+                && s.tick_cost > self.cfg.liveness_stuck
                 && s.busy_until > self.now
+                && s.busy_from.saturating_add(self.cfg.liveness_stuck) > self.now
             {
-                at(s.busy_from.saturating_add(session));
+                at(s.busy_from.saturating_add(self.cfg.liveness_stuck));
             }
         }
-        next.map(|t| t.max(self.now + 1))
+        match next {
+            Some(t) if t <= self.now => Err(internal_error!(
+                "a liveness change fell due at {} ns, not after now ({} ns)",
+                t - EPOCH,
+                self.now - EPOCH
+            )
+            .into()),
+            next => Ok(next),
+        }
     }
 
     fn check(&mut self) -> Result<(), SimError> {

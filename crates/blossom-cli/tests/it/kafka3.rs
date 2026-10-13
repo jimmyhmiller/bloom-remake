@@ -144,7 +144,8 @@ impl Cluster {
         Cluster::with_config(tag, "", storage)
     }
 
-    /// As `new`, with more lines for the deployment's `[params]` and `[storage]` tables.
+    /// As `new`, with more lines for the deployment's `[params]` and `[storage]` tables. `REPLICA_LAG_MAX` is 2 s
+    /// unless `params` sets it.
     fn with_config(tag: &str, params: &str, storage: &str) -> Cluster {
         let dir = std::env::temp_dir().join(format!("blossom-kafka3-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -183,8 +184,9 @@ impl Cluster {
             .enumerate()
             .map(|(i, n)| format!("[\"{n}\", {}, \"127.0.0.1\", {}]", i + 1, ports[i]))
             .collect();
+        let lag = if params.contains("REPLICA_LAG_MAX") { "" } else { "REPLICA_LAG_MAX = \"2s\"\n" };
         spec.push_str(&format!(
-            "\n[params]\nREPLICA_LAG_MAX = \"2s\"\n{params}\n\n[statics]\nbroker = [{}]\n\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n{storage}",
+            "\n[params]\n{lag}{params}\n\n[statics]\nbroker = [{}]\n\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n{storage}",
             statics.join(", ")
         ));
         let deploy = dir.join("deploy.toml");
@@ -923,6 +925,63 @@ fn a_restarted_follower_catches_up_on_batches_near_the_size_limit() {
     // How often the producer had to find a new leader (CheckQuorum steps down a leader whose slow ticks leave a
     // follower's acknowledgements queued past a period).
     eprintln!("partition 0's leader moved {moves} time(s) under the producer");
+}
+
+/// A killed follower leaves the in-sync replicas once its broker is taken down (the liveness session, 500 ms), not
+/// after `REPLICA_LAG_MAX` (30 s here, as in the soak): acks=all produces to the leader go on being acknowledged by the
+/// two brokers left within seconds, as on Kafka, whose controller fences a broker whose session ends. They once
+/// waited for the dead follower until the lag ran out, so every partition's produces timed out together
+/// (docs/plan/notes/SCALE.md).
+#[test]
+fn a_killed_follower_leaves_the_in_sync_replicas_with_its_session() {
+    let _one = crate::one_cluster();
+    let mut cluster = Cluster::with_config("isr", "REPLICA_LAG_MAX = \"30s\"", "");
+    let ports = cluster.ports.clone();
+    create_topic(&ports);
+    let all = [0, 1, 2];
+    let mut corr = 0;
+    let mut acked_within = |cluster: &Cluster, live: &[usize], v: &str, limit: Duration| -> Duration {
+        let clock = Stopwatch::start();
+        loop {
+            assert!(
+                clock.elapsed() < limit,
+                "{v}: not acknowledged within {limit:?}{}",
+                cluster.diagnose()
+            );
+            corr += 1;
+            let Some((l, _)) = leader_of_0(&ports, live) else {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            match produce_one(ports[l], 0, &[v.to_owned()], corr) {
+                Some(0) => return clock.elapsed(),
+                Some(NOT_LEADER_OR_FOLLOWER | LEADER_NOT_AVAILABLE | REQUEST_TIMED_OUT) | None => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Some(code) => panic!("{v}: a produce answered {code}{}", cluster.diagnose()),
+            }
+        }
+    };
+    acked_within(&cluster, &all, "first", Duration::from_secs(30));
+    let (l, _) = leader_of_0(&ports, &all).expect("partition 0 has a leader");
+    let follower = (l + 1) % 3;
+    cluster.kill(follower);
+    let up: Vec<usize> = all.iter().copied().filter(|i| *i != follower).collect();
+    // A produce sent just before the follower goes down waits out its 3 s timeout; the one after it is acknowledged.
+    acked_within(&cluster, &up, "after the kill", Duration::from_secs(6));
+    // And it stays out: the next produces need no wait.
+    for n in 0..5 {
+        acked_within(&cluster, &up, &format!("next {n}"), Duration::from_secs(2));
+    }
+    // Restarted, it catches up and comes back into the in-sync replicas: with the other follower down, a produce
+    // needs it.
+    cluster.start(follower, false);
+    std::thread::sleep(Duration::from_secs(3));
+    let (l, _) = leader_of_0(&ports, &up).expect("partition 0 has a leader");
+    let other = *up.iter().find(|i| **i != l).unwrap();
+    cluster.kill(other);
+    let left: Vec<usize> = all.iter().copied().filter(|i| *i != other).collect();
+    acked_within(&cluster, &left, "with the restarted follower", Duration::from_secs(30));
 }
 
 /// Sequential one-record acks=all produces to one partition's leader, one at a time, timed: the latency a producer
