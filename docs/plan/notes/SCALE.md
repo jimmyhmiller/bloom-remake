@@ -508,3 +508,25 @@ Next larger investigation: compact dynamic value representation. Current Value i
 rare wide scalar/opaque/member/modular/blob variants constrain every scalar's layout. Any public representation
 change must follow ARCHITECTURE §1.6 and preserve wire/JSON/postcard encoding, typed fingerprints, numeric
 semantics and canonical ordering. Prototype separately and benchmark before retaining it.
+
+## Compact dynamic Value experiment — rejected (2026-10-13)
+
+Isolated `compact-value-bench` prototype reduced Value from 48 bytes/alignment 16 to 32/alignment 8 using
+safe two-word full-width integers and immutable handles for bulky variants. All workspace targets compiled;
+legacy JSON/postcard/hash/fingerprint/debug cases matched; arithmetic/ordering/encoding properties,
+core/runtime units, 50 integration checks, full-tier Kafka tests and additional keyed/web-member checks passed.
+The new binary opened each old store and read 229,245 batches per broker without initialization.
+
+`compact-values-after-20261013`, same 180/180-second profiling workload, strict durability, tiered mode,
+256-row probe cap, 262,144 total budget and pinning: **10,962 records/s** versus **12,145** (-9.7% observed).
+Every **2,466,995** acknowledged record verified, zero lost, misplaced or duplicated. Peak broker RSS
+753 / 816 / 1,005 MB (previous 1,273 / 886 / 947): memory improvement was uneven across brokers.
+Steady ack p50 464.38 ms, fault-window p99 7.70 s, after-recovery p99 1.43 s. The maximum-load stack profile
+(`/tmp/blossom-compact-values-current-max.perf`, 7,186 samples, zero lost) still showed relational work,
+store updates and value comparison dominating. A smaller enum did not deliver higher throughput.
+
+The prototype is rejected for the active throughput goal. It is preserved only on its isolated experimental
+branch, with its API 3 amendment/version/migration kept together; it is not merged into scale-bench.
+The retained value API remains version 2. The goal remains open.
+
+Archived experiment commit: `b19a0f42` on `compact-value-bench`; do not merge into the retained branch.
