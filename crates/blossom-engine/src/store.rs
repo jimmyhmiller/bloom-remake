@@ -1325,10 +1325,29 @@ impl Store {
         if self.cell.is_some() || self.tiered.is_some() {
             return Err(bug("a lattice or tiered store is never tick-scoped".into()));
         }
-        let rows: Vec<(Row, i64)> = self.counts.iter().map(|(r, c)| (r.clone(), *c)).collect();
-        for (row, count) in rows {
-            self.add(row, -count)?;
+        if self.counts.is_empty() {
+            return Ok(());
         }
+        self.touched = true;
+        self.generation = self.generation.wrapping_add(self.counts.len() as u64);
+        // Everything present goes away, so empty the secondary indexes and blob counts once. Keep the index
+        // definitions: later inserts in this tick must maintain the same probes.
+        for index in self.indexes.get_mut().values_mut() {
+            index.clear();
+        }
+        if let Some(refs) = &mut self.blob_refs {
+            refs.clear();
+        }
+        // Rows inserted this tick cancel their insertion; all other present rows join the deletions. Draining
+        // takes the row allocations without another hash probe, and building/appending sorted sets avoids one
+        // tree removal per index per row. Already-deleted rows remain in `del` for old-version readers.
+        let ins = &mut self.ins;
+        let mut deleted: BTreeSet<Row> = self
+            .counts
+            .drain()
+            .filter_map(|(row, _)| (!ins.remove(&row)).then_some(row))
+            .collect();
+        self.del.append(&mut deleted);
         Ok(())
     }
 
@@ -1619,5 +1638,71 @@ impl Store {
     /// The tick's change: inserted rows with weight 1, deleted rows with weight -1.
     pub fn delta(&self) -> impl Iterator<Item = (&Row, i64)> {
         self.ins.iter().map(|r| (r, 1)).chain(self.del.iter().map(|r| (r, -1)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: u64, blob: blossom_value::BlobRef) -> Row {
+        Arc::from([Value::u64(id), Value::Blob(blob)])
+    }
+
+    #[test]
+    fn retracting_all_preserves_old_rows_and_cancels_new_rows() {
+        let blob = blossom_value::BlobRef::of(b"shared blob");
+        let (a, b, c) = (row(0, blob), row(1, blob), row(2, blob));
+        let mut store = Store::new(None, true);
+        store.add(a.clone(), 7).unwrap();
+        store.add(b.clone(), 5).unwrap();
+        store.ensure_index(&[0]);
+        store.clear_delta();
+        // Mix current-tick additions, deletions and a delete/reinsert of an old row, with multiple supports.
+        store.add(c.clone(), 3).unwrap();
+        store.add(b.clone(), -5).unwrap();
+        store.add(b.clone(), 2).unwrap();
+        store.add(a.clone(), -7).unwrap();
+        let generation = store.generation();
+        store.retract_all().unwrap();
+        assert_eq!(store.generation(), generation.wrapping_add(2));
+        assert_eq!(store.present_len(), 0);
+        assert!(!store.holds_blob(&blob));
+        assert_eq!(store.old_rows(&[], &[]).unwrap(), vec![a.clone(), b.clone()]);
+        assert_eq!(
+            store.delta().map(|(r, w)| (r.clone(), w)).collect::<Vec<_>>(),
+            vec![(a, -1), (b, -1)]
+        );
+        assert!(store.new_rows(&[0], &[Value::u64(1)]).unwrap().is_empty());
+        // Reuse the emptied index and blob counter for a later insertion, without resurrecting an old row.
+        store.add(c.clone(), 1).unwrap();
+        assert_eq!(store.new_rows(&[0], &[Value::u64(2)]).unwrap(), vec![c]);
+        assert!(store.holds_blob(&blob));
+        assert!(store.old_rows(&[0], &[Value::u64(2)]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn retracting_all_removes_every_support_and_keeps_index_definitions() {
+        let blob = blossom_value::BlobRef::of(b"shared blob");
+        let mut store = Store::new(None, true);
+        let rows: Vec<Row> = (0..300).map(|i| row(i, blob)).collect();
+        for (i, row) in rows.iter().enumerate() {
+            store.add(row.clone(), (i % 5 + 1) as i64).unwrap();
+        }
+        store.ensure_index(&[0]);
+        store.ensure_index(&[1]);
+        store.clear_delta();
+        let generation = store.generation();
+        store.retract_all().unwrap();
+        assert_eq!(store.generation(), generation.wrapping_add(300));
+        assert_eq!(store.old_rows(&[], &[]).unwrap(), rows);
+        assert_eq!(store.delta().count(), 300);
+        assert!(store.new_rows(&[], &[]).unwrap().is_empty());
+        assert_eq!(store.indexes.borrow().len(), 2);
+        assert!(!store.holds_blob(&blob));
+        let generation = store.generation();
+        store.retract_all().unwrap();
+        assert_eq!(store.generation(), generation, "an empty retraction changes nothing");
+        assert_eq!(store.delta().count(), 300, "earlier deletions remain visible");
     }
 }

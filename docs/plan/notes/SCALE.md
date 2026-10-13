@@ -370,3 +370,21 @@ Next concrete cost found: `Store::retract_all` removes every scoped row through 
 probes, per-index removals and blob traversal although the whole store is being emptied. Its bulk operation must
 preserve old-version rows, net deltas, generation, index definitions and blob retention; lattice/tiered stores
 remain excluded. This is the next relation-update optimization to implement and measure.
+
+### Bulk scoped-store retraction
+
+`Store::retract_all` now drains its support rows, empties each secondary index and blob counter once, and builds
+the net deleted set in bulk. Current-tick insertions cancel; already-deleted and old present rows remain visible
+to old-version readers. Index definitions survive for subsequent inserts. Generation advances once per removed
+present row, independent of support multiplicity. The lattice/tiered-store exclusion is unchanged.
+
+Two directed unit cases cover mixed inserts/deletes/reinsertion, multiple supports, old reads and deltas, generation,
+index reuse, empty clears and blob retention. Eleven scoped/deletion/blob checks and 27 broader engine/planner/
+produce/fetch/read-after-ack tests pass. All six release `kafka3` tests pass with `BLOSSOM_FULL=1` (193 s).
+Engine Clippy, workspace formatting and whitespace checks pass.
+
+Matching normal-release run (`~/soak-results/bulk-after-20261013`, same 60/180 s phases and pins as the preceding
+pair): **12,124 rec/s**, versus 11,721 (+3.4% observed in one run). Steady ack p50 454.14 ms (was 483.07), fault
+window p99 6.10 s (was 6.46), after-recovery p99 944.64 ms (was 842.75). Do not infer a general latency improvement
+from these short windows. All **1,209,993** acknowledged records verified after kill/restart, with zero lost,
+misplaced or duplicated. The 25%-above-Kafka acceptance goal remains open.
