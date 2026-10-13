@@ -548,3 +548,39 @@ The next isolated investigation (`function-plan-bench`, `.worktrees/function-pla
 evaluation plans (ARCHITECTURE §3.2). Preserve evaluation order, short circuits, scoped bindings,
 function budgets, work counters, errors and time/random/blob tracking; no Kafka-name specialization
 or unbounded memoization. No implementation or performance claim yet.
+
+## Compiled function control-flow prototype (2026-10-13)
+
+Isolated `function-plan-bench` prototype compiles let/if/match/typed control flow once per program into
+immutable flat instructions. Leaves retain the established evaluator (including borrowed field reads,
+arithmetic, library/host calls, closures, budgets and time/blob/random tracking). No input-dependent
+memoization, Kafka function-name specialization, public ABI change or semantic IR mutation.
+
+Ten engine units pass, including four direct tree/plan equivalence checks for results, arithmetic errors,
+exact expression counters, time flips, failed partial patterns, guards, nested matches and restoration
+of displaced bindings. All 51 selected function/planner/Kafka codec/record/produce/read-after-ack integration
+checks pass. Engine all-target Clippy passes with warnings denied. Captured workload replay and matched
+180/180-second throughput diagnostic remain pending; this is not retained on scale-bench yet.
+
+Prototype follow-up checks: all workspace targets compile, and the six-test multi-process Kafka suite
+passes with ignored fault cases included (359 seconds; opt-in latency measurement skipped). Captured
+broker-2 replay through epoch 1791888657 verifies the recorded outcome digests and reproduces the entire
+rule/function work report byte-for-byte. Three pinned replay runs per version, interleaved: baseline
+user CPU 4.85 / 4.74 / 4.73 seconds; prototype 4.79 / 4.77 / 4.75. Essentially unchanged. The matched soak
+is running; no throughput conclusion yet.
+
+## Compiled control-flow result — not retained (2026-10-13)
+
+`function-plan-after-20261013`, same 180/180-second profiling build workload, strict durability, tiered
+mode, 256-row probe cap, 262,144 cache budget and pinning: **12,256 records/s** versus retained
+**12,145** (+0.9% observed). Every **2,687,819** acknowledged record verified with zero loss,
+misplacement, duplicates, unacknowledged or foreign records. Steady ack p50 479.49 ms; fault-window
+p99 7.82 s; after-recovery p99 953.34 ms. Catch-up read 2,687,819 records in 15.2 seconds. Peak RSS 1,444 / 898 / 855 MB (retained comparison: 1,273 / 886 / 947 MB).
+
+The three replay CPU comparisons showed essentially no change. This one soak's 0.9% difference does
+not establish a useful throughput gain, so the prototype is not retained on scale-bench. It remains
+archived on `function-plan-bench`, implementation commit `17a99e28`, with its correctness checks and
+measurements. The large Kafka throughput gap remains. Next work must address relation/index execution
+and materialization costs, rather than merely flattening function control flow.
+
+Archived branch tip: `115fe467`; no prototype code merged into scale-bench.
