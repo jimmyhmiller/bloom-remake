@@ -627,3 +627,39 @@ Retain the bucket change for its repeatable captured-workload CPU reduction, low
 observed throughput gain. Broad repeatability and latency must still be assessed in final matched soaks.
 The active Kafka target remains far away; next investigation is accurate decoded-cache accounting and
 whether a larger bounded block cache can reduce the tiered-storage gap without in-memory-mode resource use.
+
+## Decoded block-cache accounting and controls (2026-10-13)
+
+Isolated `block-cache-bench` fixes the cache's encoded-size charge: retention now charges Vec<Entry>
+capacity, each key's capacity and the Vec header. Allocator/Arc/cache-index overhead and externally
+pinned blocks are excluded explicitly; this is not an RSS cap. The regression checks oversized spare
+capacity, replacement, LRU eviction, disabled retention and preservation of pinned snapshots.
+
+The documented `storage.cache_bytes` setting is now parsed and passed to both ordinary nodes and keyed
+member databases. Omission keeps the LSM's 32 MiB default; zero disables retention; negative bytes are
+rejected. The harness accepts BLOCK_CACHE_BYTES. Defaults and persistence/wire formats do not change.
+
+All 40 storage units, 13 runtime units, 20 database/tiered/server/configuration integration checks,
+eight LSM model/history/flush-compaction crash checks and both WAL crash-point tests pass. Runtime/store
+all-target Clippy passes with warnings denied. The long segment-roll crash test was CPU-active and
+finished; no test remains hung. The next measurements compare corrected 32 MiB and 256 MiB budgets
+under the same 180/180-second soak controls; no performance claim yet.
+
+## Corrected 32 MiB cache — verified and retained (2026-10-13)
+
+`cache-32m-corrected-20261013` uses strict tail certification, tiered storage, 262,144 hot rows and
+33,554,432 decoded cache bytes with the same 180/180-second controls and CPU pinning. **12,326 records/s**
+versus the preceding singleton run's **12,338** (essentially unchanged). Every **2,740,863** acknowledged
+record verified, zero loss, misplacement, duplicates, unacknowledged or foreign records. Peak RSS
+796 / 839 / 893 MB. Steady ack p50 503.81 ms; steady p99 1.21 s; fault p99 7.30 s; after-recovery
+p99 2.31 s. Catch-up took 15.2 seconds. These varying latency results are not a general improvement claim.
+
+All six Kafka multi-process tests pass with ignored fault cases included (357 seconds; opt-in latency
+skipped). Workspace all-target check passed. The accounting regression was explicitly changed back to
+encoded charging: it failed (16 bytes charged versus 1,688 decoded bytes), then passed after restoration.
+Retain the correct accounting and configuration wiring; no cache default change or Kafka target claim.
+
+The 30-second maximum profile began around 78 seconds into maximum load, captured 6,986 samples, zero
+lost. Inclusive scan-page work 13.3%, block access 9.1%, block reads 5.1%; shares overlap. It was later
+than earlier profiles, so use a matching offset for the 256 MiB comparison. Artifact:
+`/tmp/blossom-cache-32m-current-max.perf`. Next run uses the same binary and 268,435,456 cache bytes.

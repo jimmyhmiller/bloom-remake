@@ -142,8 +142,11 @@ Moving durable relations onto the database, so a node's durable state may outgro
 5. **Lattice tables** keep their merged cells in the database and their live contributions in `hot` (a cell's carried
    row is one contribution).
 6. **Blob counts** (FOREIGN-PROTOCOLS §5) move to a keyspace of their own, kept with every apply.
-7. **A block cache**: decoded SSTable blocks in a bounded LRU (`storage.cache_bytes`), so a node's working set stays
-   in memory and the rest is read on demand.
+7. **A block cache**: decoded SSTable blocks in a bounded LRU (`storage.cache_bytes`, default 32 MiB; zero
+   disables retention), so a node's working set stays in memory and the rest is read on demand. The budget
+   charges entry-vector capacity, key-vector capacities and the Vec header. It excludes allocator, Arc and
+   cache-index overhead and blocks pinned by active readers; it is not an RSS limit. The same deployment
+   setting applies to ordinary nodes and each keyed member's database.
 8. **Recovery and checkpoints.** A node boots on its database (the WAL after the database's flushed tick applied
    to it); it loads no image. Checkpoints retire: the WAL truncates behind the database alone, and blob collection
    anchors to its flushes.

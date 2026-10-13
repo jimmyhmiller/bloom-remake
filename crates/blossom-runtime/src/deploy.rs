@@ -28,6 +28,7 @@
 //! data_dir = "data"               # each node's store is <data_dir>/<node name>, relative to this file
 //! checkpoint_wal_bytes = 67108864
 //! hot_rows = 65536                  # recent-probe rows across the engine's tiered stores
+//! cache_bytes = 33554432      # decoded database block retention; zero disables it
 //! history_ticks = 65536             # how far back a database query may read (docs/design/DATABASE.md §4)
 //! tiered = true                   # durable tables read from the database, so state may outgrow memory (§7); false:
 //!                                 # every table in memory (faster while it fits), the database still the durable store
@@ -157,6 +158,7 @@ struct RawStorage {
     history_ticks: Option<u64>,
     tiered: Option<bool>,
     hot_rows: Option<usize>,
+    cache_bytes: Option<usize>,
     tail_certification: Option<String>,
 }
 
@@ -215,6 +217,8 @@ pub struct DeploymentSpec {
     pub tiered: bool,
     /// Recent-probe row budget across the engine's tiered stores (`None`: engine default).
     pub hot_rows: Option<usize>,
+    /// Database decoded-block retention budget (`None`: LSM default; zero disables retention).
+    pub cache_bytes: Option<usize>,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
     pub stream_limits: crate::streams::StreamLimits,
     /// How nodes keep their views of their peers' liveness (`[liveness]`).
@@ -396,6 +400,7 @@ impl DeploymentSpec {
             history_ticks: raw.storage.history_ticks.unwrap_or(65_536),
             tiered: raw.storage.tiered.unwrap_or(true),
             hot_rows: raw.storage.hot_rows,
+            cache_bytes: raw.storage.cache_bytes,
             tail_certification,
             stream_limits,
             liveness,

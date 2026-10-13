@@ -54,6 +54,7 @@ blossom_up() {
     printf 'tail_certification = "%s"\n' "${TAIL_CERT:-strict}"
     printf 'tiered = %s\n' "${TIERED:-true}"
     if [ -n "${HOT_ROWS:-}" ]; then printf 'hot_rows = %s\n' "$HOT_ROWS"; fi
+    if [ -n "${BLOCK_CACHE_BYTES:-}" ]; then printf 'cache_bytes = %s\n' "$BLOCK_CACHE_BYTES"; fi
   } > "$d/deploy.toml"
   printf 'seed = "00112233445566778899aabbccddeeff"\n' > "$d/k.secrets"
   chmod 600 "$d/k.secrets"

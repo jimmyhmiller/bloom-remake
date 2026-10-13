@@ -534,6 +534,9 @@ impl Server {
                 certification: spec.tail_certification,
                 database: blossom_store::lsm::LsmOptions {
                     history: spec.history_ticks,
+                    cache_bytes: spec
+                        .cache_bytes
+                        .unwrap_or_else(|| blossom_store::lsm::LsmOptions::default().cache_bytes),
                     ..blossom_store::lsm::LsmOptions::default()
                 },
             },

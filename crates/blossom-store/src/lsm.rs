@@ -59,7 +59,8 @@ pub struct LsmOptions {
     /// How many versions back from the newest an as-of read may go: compaction keeps every version above
     /// `newest - history` and, per key, the newest at or below it.
     pub history: u64,
-    /// The bytes of decoded blocks the tree keeps for reads.
+    /// Retained decoded-block budget: entry/key allocation capacities and the Vec header. Excludes allocator,
+    /// Arc and cache-index overhead, and snapshots pinned by callers. Zero disables retention.
     pub cache_bytes: usize,
     /// The owner's format of its keys, recorded in the manifest: a tree written in another one is refused
     /// ([`manifest_format`] tells it beforehand).
@@ -295,6 +296,15 @@ struct CacheInner {
     bytes: usize,
 }
 
+/// Owned decoded storage, including spare capacity. Saturation rejects an unrepresentable charge rather than
+/// allowing accounting overflow to admit it. Arc control blocks and allocator/cache metadata are not charged.
+fn decoded_bytes(block: &Vec<Entry>) -> usize {
+    block.iter().fold(
+        std::mem::size_of::<Vec<Entry>>().saturating_add(block.capacity().saturating_mul(std::mem::size_of::<Entry>())),
+        |bytes, entry| bytes.saturating_add(entry.key.capacity()),
+    )
+}
+
 impl BlockCache {
     fn new(capacity: usize) -> BlockCache {
         BlockCache {
@@ -322,7 +332,8 @@ impl BlockCache {
         Ok(Some(block))
     }
 
-    fn put(&self, key: (u64, u64), block: Arc<Vec<Entry>>, bytes: usize) -> Result<(), StoreError> {
+    fn put(&self, key: (u64, u64), block: Arc<Vec<Entry>>) -> Result<(), StoreError> {
+        let bytes = decoded_bytes(&block);
         let mut c = self.lock()?;
         if bytes > self.capacity {
             return Ok(());
@@ -472,7 +483,7 @@ impl Sst {
             return Ok(block);
         }
         let block = Arc::new(self.read_block(b)?);
-        self.cache.put(key, block.clone(), b.len as usize)?;
+        self.cache.put(key, block.clone())?;
         Ok(block)
     }
 
@@ -1605,6 +1616,42 @@ impl crate::tree::KeyTree for Lsm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_cache_charges_capacity_evicts_and_preserves_pinned_snapshots() {
+        let block = |byte| {
+            let mut entries = Vec::with_capacity(16);
+            let mut key = Vec::with_capacity(1024);
+            key.push(byte);
+            entries.push(Entry {
+                key,
+                version: 1,
+                op: Op::Put,
+            });
+            Arc::new(entries)
+        };
+        let first = block(1);
+        let charge = decoded_bytes(&first);
+        assert!(charge >= 1024 + 16 * std::mem::size_of::<Entry>());
+        let cache = BlockCache::new(charge);
+        cache.put((1, 0), first.clone()).unwrap();
+        assert_eq!(cache.lock().unwrap().bytes, charge);
+        let pinned = cache.get((1, 0)).unwrap().unwrap();
+        cache.put((2, 0), block(2)).unwrap();
+        assert!(cache.get((1, 0)).unwrap().is_none());
+        assert_eq!(pinned.first().unwrap().key, vec![1]);
+        assert_eq!(cache.lock().unwrap().bytes, charge);
+        cache.put((2, 0), block(3)).unwrap();
+        assert_eq!(cache.lock().unwrap().bytes, charge, "replacement is charged once");
+        cache.forget(2).unwrap();
+        assert_eq!(cache.lock().unwrap().bytes, 0);
+        let too_small = BlockCache::new(charge - 1);
+        too_small.put((1, 0), first.clone()).unwrap();
+        assert!(too_small.get((1, 0)).unwrap().is_none());
+        let disabled = BlockCache::new(0);
+        disabled.put((1, 0), first).unwrap();
+        assert!(disabled.get((1, 0)).unwrap().is_none());
+    }
 
     #[test]
     fn a_filter_has_no_false_negatives_and_few_false_positives() {
