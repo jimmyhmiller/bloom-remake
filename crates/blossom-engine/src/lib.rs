@@ -14,6 +14,7 @@ mod engine;
 mod expr;
 mod func;
 mod purity;
+mod row_bucket;
 mod rule;
 mod store;
 mod strata;

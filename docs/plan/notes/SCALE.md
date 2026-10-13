@@ -584,3 +584,46 @@ measurements. The large Kafka throughput gap remains. Next work must address rel
 and materialization costs, rather than merely flattening function control flow.
 
 Archived branch tip: `115fe467`; no prototype code merged into scale-bench.
+
+## Singleton index-bucket prototype (2026-10-13)
+
+Isolated `singleton-index-bench` replaces the per-key BTreeSet in in-memory and tiered-overlay indexes
+with an empty/single-row/tree bucket. A second distinct row promotes it; removing all but one demotes
+it and releases the removed allocations. Distinct rows under the same key are always retained; no
+schema uniqueness shortcut. Iteration remains canonical, equal separately allocated rows deduplicate,
+and support counting remains in the existing Store.
+
+Nine engine units include a 10,000-operation ordered-set model comparison, promotion/demotion/lifetime
+checks and an indexed support/old-version/range/retraction check. All 33 selected planner/deletion/scoped,
+Kafka produce/read-after-ack and database/tiered integration checks pass. Engine Clippy passes. Release
+build, captured replay comparisons, Kafka multi-process checks and throughput measurement are next;
+no performance claim or merge into scale-bench yet.
+
+Captured broker-2 replay passed and reproduced the full rule/function work report exactly. Three pinned,
+interleaved user-CPU timings: retained 4.81 / 4.73 / 4.71 seconds; singleton buckets 4.57 / 4.56 / 4.57.
+Peak replay RSS about 291 MB versus 321–324 MB. This is modest repeatable evidence on one trace, not
+an acceptance result. All workspace targets compile. The matched 180/180-second soak remains live.
+
+Open independent storage bug recorded in the project pad: decoded-block cache retention is charged
+`BlockRef.len` (encoded bytes), rather than decoded Vec<Entry>/key allocation capacities. Its documented
+decoded-byte budget can therefore be exceeded. Fix accounting before treating cache_bytes as a decoded
+memory budget; it is not an RSS limit. This remains unfixed and is not part of the bucket prototype.
+
+## Singleton buckets — retained (2026-10-13)
+
+`singleton-index-after-20261013`, same 180/180-second profiling controls, strict durability, tiered mode,
+256-row cap and 262,144 total cache budget: **12,338 records/s**, versus **12,145** (+1.6% in one run).
+Every **2,730,259** acknowledged record verified with zero loss, misplacement, duplication, unacknowledged
+or foreign records. Peak RSS **1,154 / 820 / 816 MB**, versus **1,273 / 886 / 947 MB**. Steady ack p50
+482.30 ms (was 494.59), steady p99 2.57 s (was 1.09); fault p99 7.82 s (was 7.75); after-recovery p99
+1.48 s (was 2.28). Catch-up read all records in 15.2 seconds. No general latency or Kafka acceptance claim.
+
+The nine engine units, 33 integration checks, full workspace check and engine Clippy pass. All six
+multi-process Kafka checks pass with ignored fault cases included (362 seconds; opt-in latency skipped).
+The maximum-load profile `/tmp/blossom-singleton-current-max.perf` captured 7,087 samples, zero lost:
+relational evaluation 45.1%, store updates 20.5%, Value comparison 16.5%, memcmp 14.1% inclusive, overlapping.
+
+Retain the bucket change for its repeatable captured-workload CPU reduction, lower memory use and small
+observed throughput gain. Broad repeatability and latency must still be assessed in final matched soaks.
+The active Kafka target remains far away; next investigation is accurate decoded-cache accounting and
+whether a larger bounded block cache can reduce the tiered-storage gap without in-memory-mode resource use.

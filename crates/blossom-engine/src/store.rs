@@ -29,6 +29,7 @@ use blossom_value::Value;
 
 use crate::cold::{ColRange, ColdTables};
 use crate::expr::{ExprError, ExprResult, bug};
+use crate::row_bucket::RowBucket;
 
 /// How a lattice-valued relation's rows merge.
 #[derive(Clone, Debug)]
@@ -86,10 +87,10 @@ impl CellSpec {
     }
 }
 
-type Index = BTreeMap<Vec<Value>, BTreeSet<Row>>;
+type Index = BTreeMap<Vec<Value>, RowBucket>;
 
 /// Rows by the values of some of their columns, hashed.
-type RowsBy = blossom_base::det::DetMap<Vec<Value>, BTreeSet<Row>>;
+type RowsBy = blossom_base::det::DetMap<Vec<Value>, RowBucket>;
 
 /// A probe's rows kept in the hot tier (sorted), and when they were last used.
 type Kept = (Arc<Vec<Row>>, u64);
@@ -730,12 +731,9 @@ impl Tiered {
         }
         let mut by = self.overlay_by.borrow_mut();
         let index = by.entry(cols.to_vec()).or_insert_with(|| {
-            let mut index = blossom_base::det::DetMap::new();
+            let mut index = RowsBy::new();
             for row in self.overlay.keys() {
-                index
-                    .entry(key(row, cols))
-                    .or_insert_with(BTreeSet::new)
-                    .insert(row.clone());
+                index.entry(key(row, cols)).or_default().insert(row.clone());
             }
             index
         });
@@ -820,12 +818,9 @@ impl Tiered {
         }
         let mut by = self.overlay_by.borrow_mut();
         let index = by.entry(cols.to_vec()).or_insert_with(|| {
-            let mut index = blossom_base::det::DetMap::new();
+            let mut index = RowsBy::new();
             for row in self.overlay.keys() {
-                index
-                    .entry(key(row, cols))
-                    .or_insert_with(BTreeSet::new)
-                    .insert(row.clone());
+                index.entry(key(row, cols)).or_default().insert(row.clone());
             }
             index
         });
@@ -842,7 +837,7 @@ impl Tiered {
         for (cols, index) in self.overlay_by.get_mut().iter_mut() {
             let k = key(row, cols);
             if gained {
-                index.entry(k).or_insert_with(BTreeSet::new).insert(row.clone());
+                index.entry(k).or_default().insert(row.clone());
             } else if let Some(rows) = index.get_mut(&k) {
                 rows.remove(row);
                 if rows.is_empty() {
@@ -1681,6 +1676,47 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_buckets_preserve_support_old_versions_and_ranges_through_demotion() {
+        let mut store = Store::new(None, false);
+        store.ensure_index(&[0]);
+        store.ensure_index(&[0, 1]);
+        let values = [Value::u64(7)];
+        let a: Row = Arc::from([Value::u64(7), Value::u64(1)]);
+        let b: Row = Arc::from([Value::u64(7), Value::u64(2)]);
+        let c: Row = Arc::from([Value::u64(7), Value::u64(3)]);
+        store.add(a.clone(), 2).unwrap();
+        store.add(b.clone(), 1).unwrap();
+        store.clear_delta();
+        store.add(a.clone(), -1).unwrap();
+        assert_eq!(store.new_rows(&[0], &values).unwrap(), vec![a.clone(), b.clone()]);
+        store.add(b.clone(), -1).unwrap();
+        assert_eq!(store.new_rows(&[0], &values).unwrap(), vec![a.clone()]);
+        assert_eq!(store.old_rows(&[0], &values).unwrap(), vec![a.clone(), b.clone()]);
+        store.add(c.clone(), 1).unwrap();
+        assert_eq!(store.new_rows(&[0], &values).unwrap(), vec![a.clone(), c]);
+        let ranged = |old| {
+            store
+                .range_rows(
+                    old,
+                    &[0],
+                    &values,
+                    1,
+                    Bound::Excluded(Value::u64(1)),
+                    Bound::Included(Value::u64(2)),
+                )
+                .unwrap()
+        };
+        assert!(ranged(false).is_empty());
+        assert_eq!(ranged(true), vec![b]);
+        store.add(a, -1).unwrap();
+        store.retract_all().unwrap();
+        assert!(!store.any(false, &[0], &values).unwrap());
+        assert!(store.any(true, &[0], &values).unwrap());
+        store.clear_delta();
+        assert!(!store.any(true, &[0], &values).unwrap());
+    }
 
     #[test]
     fn a_cold_range_reads_only_its_range_and_reuses_the_answer() {
