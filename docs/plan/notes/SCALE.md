@@ -484,3 +484,27 @@ freeing any rows. Trimming now repeats until both counters fit. Its progress gua
 so a decrease in entries alone does not stop reclamation early. The new test fails on the previous
 single-pass rule and passes after the fix. Five engine units, eight database/tiered regressions and
 Clippy pass with the original 256-row cap retained.
+
+## Requested-range reads (2026-10-13)
+
+Range misses no longer first decode a speculative whole prefix. A complete prefix already cached is still
+used; otherwise the cold side reads the requested range directly and keeps small range answers.
+A source-counter guard fails on the previous rule and passes on the new one, demonstrating one range read,
+no whole-prefix probe, and reuse of the cached answer. Six engine units, 25 planner/database/tiered checks,
+Clippy, and the six-test multi-process Kafka suite (ignored fault cases included; opt-in latency measurement
+skipped) passed.
+
+`range-first-after-20261013`, the same profiling build and 180/180-second controls with tiered storage,
+256-row per-probe cap and 262,144 total budget: 12,145 records/s versus 11,666 (+4.1% in one comparison).
+All 2,683,234 acknowledged records verified with zero loss, misplacement or duplication. Peak broker RSS
+1,273 / 886 / 947 MB. Steady ack p50 494.59 ms (was 459.78); fault-window p99 7.75 s (was 8.65);
+after-recovery p99 2.28 s (was 0.82). This does not prove a general latency improvement, repeatability,
+or the Kafka acceptance target. The code is retained for its demonstrated read reduction and observed
+throughput gain; the final matched soak must still assess recovery and memory behavior.
+
+The maximum-load profile (`/tmp/blossom-range-first-current-max.perf`, 6,979 samples, zero lost) put inclusive
+cold-probe work around 11%, with row decoding below the report's 3% threshold. Shares overlap and are relative.
+Next larger investigation: compact dynamic value representation. Current Value is 48 bytes, alignment 16;
+rare wide scalar/opaque/member/modular/blob variants constrain every scalar's layout. Any public representation
+change must follow ARCHITECTURE §1.6 and preserve wire/JSON/postcard encoding, typed fingerprints, numeric
+semantics and canonical ordering. Prototype separately and benchmark before retaining it.

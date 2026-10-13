@@ -679,7 +679,8 @@ impl Tiered {
             }
             (hot.is_large(cols, values), hot.largest())
         };
-        if !large {
+        // A range miss reads its requested range, rather than speculatively decoding the whole prefix.
+        if !large && range.is_none() {
             match self.cold.probe_at_most(self.rel, cols, values, v, max)? {
                 Some(mut all) => {
                     all.sort_unstable();
@@ -1680,6 +1681,100 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cold_range_reads_only_its_range_and_reuses_the_answer() {
+        use blossom_base::RelId;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Cold {
+            rows: Vec<Row>,
+            bounded: AtomicUsize,
+            ranged: AtomicUsize,
+        }
+        impl ColdTables for Cold {
+            fn version(&self) -> Result<Option<u64>, EvalError> {
+                Ok(Some(0))
+            }
+            fn tables(&self) -> Vec<RelId> {
+                vec![RelId::from_raw(0)]
+            }
+            fn contains(&self, _: RelId, row: &Row, _: u64) -> Result<bool, EvalError> {
+                Ok(self.rows.contains(row))
+            }
+            fn open_views(&self, _: &[(RelId, [u8; 32])], _: bool) -> Result<bool, EvalError> {
+                Ok(true)
+            }
+            fn count(&self, _: RelId, _: u64) -> Result<usize, EvalError> {
+                Ok(self.rows.len())
+            }
+            fn probe(
+                &self,
+                _: RelId,
+                cols: &[usize],
+                values: &[Value],
+                range: Option<ColRange<'_>>,
+                _: u64,
+            ) -> Result<Vec<Row>, EvalError> {
+                if range.is_none() {
+                    return Err(internal_error!("the range query unexpectedly read an unbounded prefix").into());
+                }
+                self.ranged.fetch_add(1, Ordering::Relaxed);
+                Ok(self
+                    .rows
+                    .iter()
+                    .filter(|r| {
+                        holds(r, cols, values)
+                            && range.is_none_or(|(col, lo, hi)| {
+                                r.get(col).is_some_and(|v| within_bounds(v, &lo.cloned(), &hi.cloned()))
+                            })
+                    })
+                    .cloned()
+                    .collect())
+            }
+            fn probe_at_most(
+                &self,
+                _: RelId,
+                cols: &[usize],
+                values: &[Value],
+                _: u64,
+                max: usize,
+            ) -> Result<Option<Vec<Row>>, EvalError> {
+                self.bounded.fetch_add(1, Ordering::Relaxed);
+                let rows: Vec<Row> = self
+                    .rows
+                    .iter()
+                    .filter(|r| holds(r, cols, values))
+                    .take(max.saturating_add(1))
+                    .cloned()
+                    .collect();
+                Ok((rows.len() <= max).then_some(rows))
+            }
+        }
+        let cold = Arc::new(Cold {
+            rows: (0..1000).map(|i| Arc::from([Value::u64(0), Value::u64(i)])).collect(),
+            bounded: AtomicUsize::new(0),
+            ranged: AtomicUsize::new(0),
+        });
+        let store = Tiered::new(
+            RelId::from_raw(0),
+            cold.clone(),
+            vec![0, 1],
+            false,
+            HOT_ROWS,
+            false,
+            false,
+        )
+        .unwrap();
+        let (lo, hi) = (Value::u64(500), Value::u64(502));
+        let range = Some((1, Bound::Included(&lo), Bound::Excluded(&hi)));
+        let matches = |r: &Row| r.get(1).is_some_and(|v| v >= &lo && v < &hi);
+        let first = store.read_cold(&[0], &[Value::u64(0)], range, &matches).unwrap();
+        assert_eq!(first.as_ref(), cold.rows.get(500..502).unwrap());
+        let again = store.read_cold(&[0], &[Value::u64(0)], range, &matches).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert_eq!(cold.ranged.load(Ordering::Relaxed), 1);
+        assert_eq!(cold.bounded.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn eviction_repeats_when_old_empty_answers_hide_large_recent_answers() {
