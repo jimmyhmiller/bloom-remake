@@ -264,7 +264,7 @@ fn one<'a>(name: &str, args: &'a [Value]) -> Result<&'a Value, ExternError> {
 }
 
 fn bytes(v: Vec<u8>) -> Value {
-    Value::Bytes(Arc::from(v))
+    Value::Bytes((v).into())
 }
 
 fn optional(v: Option<Vec<u8>>) -> Value {

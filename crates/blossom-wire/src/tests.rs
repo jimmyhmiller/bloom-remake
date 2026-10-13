@@ -328,6 +328,100 @@ fn rows_use_field_numbers_and_skip_unknown_fields() {
 }
 
 #[test]
+fn tuple_fields_decode_in_any_order_and_reject_duplicates_and_omissions() {
+    let f = fixture();
+    let c = Codec::new(&f.program, NodeEncoding::Dense, WireLimits::default());
+    let cols: Vec<Column> = (1..=4)
+        .map(|i| Column {
+            name: Symbol::intern(&format!("c{i}")),
+            ty: f.scalars[2],
+            field_no: Some(FieldNo(i)),
+            default: None,
+            since: None,
+            deprecated: None,
+            hidden_dest: false,
+        })
+        .collect();
+    let encoded = |fields: &[u32]| {
+        let mut wire = Vec::new();
+        crate::codec::put_varint(&mut wire, fields.len() as u64);
+        for &number in fields {
+            crate::codec::put_varint(&mut wire, u64::from(number) << 3);
+            crate::codec::put_varint(&mut wire, u64::from(number));
+        }
+        wire
+    };
+    let want: Vec<Value> = (1..=4).map(|i| Value::Int(IntValue::U64(i))).collect();
+    for order in [
+        &[1, 2, 3, 4][..],
+        &[4, 3, 2, 1],
+        &[1, 3, 2, 4],
+        &[1, 99, 2, 3, 4],
+        &[99, 1, 2, 3, 4, 100],
+    ] {
+        let wire = encoded(order);
+        let mut input = wire.as_slice();
+        assert_eq!(c.decode_row(&cols, &mut input).unwrap(), want, "order {order:?}");
+        assert!(input.is_empty());
+    }
+    for order in [&[1, 2, 2, 3, 4][..], &[4, 3, 2, 1, 1], &[1, 3, 2, 3, 4]] {
+        assert!(matches!(
+            c.decode_row(&cols, &mut encoded(order).as_slice()),
+            Err(WireError::Malformed(m)) if m.contains("appears twice")
+        ));
+    }
+    for order in [&[1, 2][..], &[4, 2, 1], &[99, 1, 2, 3]] {
+        assert!(matches!(
+            c.decode_row(&cols, &mut encoded(order).as_slice()),
+            Err(WireError::Malformed(m)) if m.contains("is missing")
+        ));
+    }
+    // An invalid schema with duplicate field numbers must not let the ordered path accept duplicate fields.
+    let mut duplicate_cols = cols.clone();
+    duplicate_cols[1].field_no = Some(FieldNo(1));
+    assert!(
+        c.decode_row(&duplicate_cols, &mut encoded(&[1, 1, 3, 4]).as_slice())
+            .is_err()
+    );
+}
+
+#[test]
+fn implicit_tuple_field_numbers_handle_order_and_unknown_fields() {
+    let f = fixture();
+    let c = Codec::new(&f.program, NodeEncoding::Dense, WireLimits::default());
+    let want = Value::tuple([Value::Int(IntValue::U64(42)), Value::str("value")]);
+    let encoded = |fields: &[u32]| {
+        let mut body = Vec::new();
+        crate::codec::put_varint(&mut body, fields.len() as u64);
+        for &number in fields {
+            let (ty, value, wt) = match number {
+                1 => (f.scalars[2], Value::Int(IntValue::U64(42)), 0),
+                2 => (f.scalars[8], Value::str("value"), 3),
+                _ => (f.scalars[2], Value::Int(IntValue::U64(99)), 0),
+            };
+            crate::codec::put_varint(&mut body, (u64::from(number) << 3) | wt);
+            c.encode_value(ty, &value, &mut body).unwrap();
+        }
+        let mut wire = Vec::new();
+        crate::codec::put_varint(&mut wire, body.len() as u64);
+        wire.extend(body);
+        wire
+    };
+    for order in [&[1, 2][..], &[2, 1], &[99, 1, 100, 2], &[1, 99, 2], &[2, 99, 1]] {
+        assert_eq!(
+            c.decode_value(f.scalars[15], &mut encoded(order).as_slice()).unwrap(),
+            want
+        );
+    }
+    for order in [&[1, 1, 2][..], &[2, 1, 2], &[2]] {
+        assert!(matches!(
+            c.decode_value(f.scalars[15], &mut encoded(order).as_slice()),
+            Err(WireError::Malformed(_))
+        ));
+    }
+}
+
+#[test]
 fn unknown_enum_variants_keep_their_bytes() {
     let f = fixture();
     let c = Codec::new(&f.program, NodeEncoding::Dense, WireLimits::default());

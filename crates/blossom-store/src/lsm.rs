@@ -511,10 +511,11 @@ impl Sst {
             if !before_end(&b.first) {
                 break;
             }
-            for e in self.block(b)?.iter() {
-                if e.key.as_slice() < start || !before_end(&e.key) {
-                    continue;
-                }
+            let block = self.block(b)?;
+            // Blocks are ordered by key, then newest version first. Seek to the range rather than comparing every
+            // preceding entry on each probe; stop as soon as the exclusive upper bound is reached.
+            let first = block.partition_point(|e| e.key.as_slice() < start);
+            for e in block[first..].iter().take_while(|e| before_end(&e.key)) {
                 if last.as_deref() != Some(e.key.as_slice()) {
                     if taken == keys {
                         return Ok(last);
@@ -540,8 +541,11 @@ impl Sst {
             if b.first.as_slice() > key {
                 break;
             }
-            // Versions of a key are newest first: the first at or below `as_of` is the one.
-            if let Some(e) = self.block(b)?.iter().find(|e| e.key == key && e.version <= as_of) {
+            // Seek by key and version together: versions of a key are newest first. A key can span blocks, so a
+            // block with only newer versions does not end the search.
+            let block = self.block(b)?;
+            let first = block.partition_point(|e| e.key.as_slice() < key || (e.key == key && e.version > as_of));
+            if let Some(e) = block.get(first).filter(|e| e.key == key) {
                 return Ok(Some((e.version, e.op)));
             }
         }

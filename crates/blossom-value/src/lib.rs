@@ -21,6 +21,7 @@
 #[cfg(feature = "arbitrary")]
 pub mod arbitrary;
 pub mod blob;
+pub mod bytes;
 pub mod class;
 pub mod digest;
 pub mod error;
@@ -44,6 +45,7 @@ mod serialize_value;
 mod testgen;
 
 pub use blob::{BlobMap, BlobSource, NoBlobs, blobs_in};
+pub use bytes::BytesValue;
 pub use class::{Claim, HeightClass, LatOpKind, LawStatus, MonoClass, ProofStatus};
 pub use digest::{Digest128, Digest256, SetElement};
 pub use error::ValueError;
@@ -63,4 +65,4 @@ pub use value::{BlobRef, ConnId, GroupValue, IntValue, LatValue, ModValue, Sessi
 pub use word::{BytesWord, ColEncTag, Lane, NicheScalar, ScalarKind, StrWord, Word};
 
 /// The version of this crate's public API (ARCHITECTURE §1.6).
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;

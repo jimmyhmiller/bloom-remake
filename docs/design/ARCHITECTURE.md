@@ -1610,6 +1610,17 @@ performance (BENCH-200) is the second target and is reached through the same str
 
 ### 4.1 Values (ENG-020, ENG-032; ARCH-05, ARCH-22)
 
+**Canonical bytes in the value-level engine (API amendment, 2026-10-13).** `Value::Bytes` holds
+`blossom_value::BytesValue`, not a bare `Arc<[u8]>` (`blossom-value::API_VERSION = 2`). `BytesValue` provides
+immutable slice access and conversion to/from a shared byte allocation. Large payloads share a BLAKE3-256
+digest across clones; collection hashers mix that digest with the length and their own key instead of repeatedly
+reading the entire payload; `BytesValue::blob_ref` also reuses it for `Blob::of`. Small values retain one allocation.
+Equality checks bytes on a digest collision,
+canonical ordering is still lexicographic, and wire/serde encodings and canonical typed fingerprints are unchanged.
+The digest is computed at construction and cannot mutate while the value serves as a collection key. The cache
+belongs to the live value and cannot accumulate dead payloads in a global table. This is an optimization
+of the current value-level engine, independent of the word-level representations below.
+
 **Lanes.** A relation's rows are arrays of words of one lane width. The planner picks `Lane::U32` when every column's
 encoding fits in 32 bits (u8–u32, i8–i32, bool, C-like enums, `Node`, `Mod<N≤32>`, interned and bulk ids, inline
 lattices over those) and `Lane::U64` otherwise. Lanes are a `RowShape` parameter of every kernel (§4.10).

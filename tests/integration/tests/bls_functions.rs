@@ -99,7 +99,7 @@ fn opt(x: Option<Value>) -> Value {
 
 #[cfg(test)]
 fn bytes(b: &[u8]) -> Value {
-    Value::Bytes(Arc::from(b))
+    Value::Bytes((b).into())
 }
 
 /// The value each view's function computes, written directly.

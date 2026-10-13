@@ -74,7 +74,7 @@ fn compress(reg: &ExternRegistry, codec: Codec, input: &[u8]) -> Vec<u8> {
             other => panic!("{other:?}"),
         }
     };
-    let b = Value::Bytes(Arc::from(input));
+    let b = Value::Bytes((input).into());
     match codec {
         Codec::None => input.to_vec(),
         Codec::Gzip => call(
@@ -92,7 +92,7 @@ fn compress(reg: &ExternRegistry, codec: Codec, input: &[u8]) -> Vec<u8> {
             for part in [&input[..mid], &input[mid..]] {
                 let block = call(
                     "blossom_std::compress::snappy_compress",
-                    vec![Value::Bytes(Arc::from(part))],
+                    vec![Value::Bytes((part).into())],
                 );
                 out.extend((block.len() as u32).to_be_bytes());
                 out.extend(block);

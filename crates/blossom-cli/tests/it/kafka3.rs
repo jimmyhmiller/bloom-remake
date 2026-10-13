@@ -184,7 +184,11 @@ impl Cluster {
             .enumerate()
             .map(|(i, n)| format!("[\"{n}\", {}, \"127.0.0.1\", {}]", i + 1, ports[i]))
             .collect();
-        let lag = if params.contains("REPLICA_LAG_MAX") { "" } else { "REPLICA_LAG_MAX = \"2s\"\n" };
+        let lag = if params.contains("REPLICA_LAG_MAX") {
+            ""
+        } else {
+            "REPLICA_LAG_MAX = \"2s\"\n"
+        };
         spec.push_str(&format!(
             "\n[params]\n{lag}{params}\n\n[statics]\nbroker = [{}]\n\n[security]\nmode = \"insecure-dev\"\n\n[storage]\ndata_dir = \"data\"\ncheckpoint_wal_bytes = 262144\n{storage}",
             statics.join(", ")

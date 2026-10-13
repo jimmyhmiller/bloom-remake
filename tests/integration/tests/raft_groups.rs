@@ -274,7 +274,7 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
         let mut d = Directed {
             c,
             g: Value::Tuple(std::sync::Arc::from(vec![
-                Value::Bytes(std::sync::Arc::from(&b"left"[..])),
+                Value::bytes(b"left"),
                 Value::Int(IntValue::I32(0)),
             ])),
             rterm: r("rterm"),
@@ -372,7 +372,7 @@ fn groups() -> Vec<Value> {
     .iter()
     .map(|(n, p)| {
         Value::Tuple(std::sync::Arc::from(vec![
-            Value::Bytes(std::sync::Arc::from(n.as_bytes())),
+            Value::bytes(n.as_bytes()),
             Value::Int(IntValue::I32(*p)),
         ]))
     })
@@ -717,7 +717,11 @@ fn a_broker_whose_ticks_outlast_the_session_stays_up_until_stuck() {
         d.c.set_tick_cost(l, 10 * stuck).unwrap();
         d.wait(stuck - 2_000_000_000);
         for &n in &rest {
-            assert!(holds_up(&d, n), "seed {seed}: b{} took the leader down before it was stuck", n.0 + 1);
+            assert!(
+                holds_up(&d, n),
+                "seed {seed}: b{} took the leader down before it was stuck",
+                n.0 + 1
+            );
         }
         d.await_until(5_000_000_000, "the stuck leader taken down", |d| {
             rest.iter().all(|&n| !holds_up(d, n))

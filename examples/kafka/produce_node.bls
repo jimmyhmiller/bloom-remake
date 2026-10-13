@@ -268,9 +268,9 @@ view waits_index(g, idx) {
     duplicate(_c, _i, _j, tid, p, _e, base, _l), entry_index(tid, p, base, idx), let g = (tid, p);
 }
 view placed_done(c, i, j) {
-    placed(c, i, j, tid, p, idx, _e, _b, _last, _s), let g = (tid, p), commit_of(g, cm), not isr_lacks(g, idx)
+    placed(c, i, j, tid, p, idx, _e, _b, _last, _s), partition_commit(tid, p, cm), let g = (tid, p), not isr_lacks(g, idx)
             where cm >= idx;
-    duplicate(c, i, j, tid, p, _e, base, _last), entry_index(tid, p, base, idx), let g = (tid, p), commit_of(g, cm),
+    duplicate(c, i, j, tid, p, _e, base, _last), entry_index(tid, p, base, idx), partition_commit(tid, p, cm), let g = (tid, p),
             not isr_lacks(g, idx)
             where cm >= idx;
     duplicate(c, i, j, tid, p, _e, base, last), log_end(tid, p, hw), not entry_index(tid, p, base, _) where hw > last;
@@ -346,14 +346,17 @@ answer_produce_timeout: while produce_head(c, i, seq, corr, fr, at, req), produc
 /// pass an entry answers its `acks=all` producer without writing anything durable itself (an answer leaves only once
 /// every durable write before it is synced), and the next tick materializes it.
 table materialize_to(tid: Bytes, part: i32, c: u64) key(tid, part) while replica(tid, part);
-note_commit: while replica(tid, p), let g = (tid, p), commit_of(g, c), not materialize_to(tid, p, c) {
+/// Expose the partition columns of the Raft group before joining partition state. A change driven by `commit_of`
+/// then binds both columns for indexed probes, instead of joining unrelated partitions before constructing `g`.
+view partition_commit(tid, p, c) = commit_of(g, c), let (tid, p) = g;
+note_commit: while replica(tid, p), partition_commit(tid, p, c), not materialize_to(tid, p, c) {
     upsert materialize_to(tid, p, c);
 }
 
 /// The committed entries not materialized yet (at most a tick's worth): read as batches by Fetch and ListOffsets,
 /// which answer up to the commit index, as Kafka reads up to its high watermark. A batch's blob is its entry's.
-view pending_batch(tid, p, base, last, max_ts, blob) = applied_d(tid, p, a), not installing(tid, p), let g = (tid, p),
-        commit_of(g, c), data_entry(tid, p, i, base, last, max_ts, _h, blob)
+view pending_batch(tid, p, base, last, max_ts, blob) = applied_d(tid, p, a), not installing(tid, p),
+        partition_commit(tid, p, c), data_entry(tid, p, i, base, last, max_ts, _h, blob)
         where i > a && i <= c;
 view pending_end(tid, p, l = max!(last)) = pending_batch(tid, p, _base, last, _t, _blob);
 /// A partition's batches up to its high watermark: materialized, or committed and not materialized yet.

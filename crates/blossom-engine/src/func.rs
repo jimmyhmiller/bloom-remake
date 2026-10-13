@@ -476,7 +476,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                 return Ok(Value::Option(None));
             }
             let (lo, hi) = (lo as usize, hi as usize);
-            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes(Arc::from(s)))))
+            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes((s).into()))))
         }
         LibFn::BytesConcat => match (arg_value(cx, env, f, args, 0)?, arg_value(cx, env, f, args, 1)?) {
             (Value::Bytes(a), Value::Bytes(b)) => {
@@ -603,7 +603,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             other => Err(bug(format!("`to_uppercase` of {other:?}"))),
         },
         LibFn::StrToUtf8 => match arg_value(cx, env, f, args, 0)? {
-            Value::Str(s) => Ok(Value::Bytes(Arc::from(s.as_bytes()))),
+            Value::Str(s) => Ok(Value::Bytes((s.as_bytes()).into())),
             other => Err(bug(format!("`to_utf8` of {other:?}"))),
         },
         LibFn::BytesFromUtf8 => match arg_value(cx, env, f, args, 0)? {
@@ -667,13 +667,13 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
             }
             other => Err(bug(format!("`Bytes::varint` of {other:?}"))),
         },
-        LibFn::BytesEmpty => Ok(Value::Bytes(Arc::from(Vec::new()))),
+        LibFn::BytesEmpty => Ok(Value::Bytes((Vec::new()).into())),
         LibFn::BlobOf => {
             let Value::Bytes(b) = arg_value(cx, env, f, args, 0)? else {
                 return Err(bug("`Blob::of` of a non-Bytes value".into()));
             };
-            let r = blossom_value::BlobRef::of(&b);
-            cx.new_blobs.borrow_mut().entry(r).or_insert(b);
+            let r = b.blob_ref();
+            cx.new_blobs.borrow_mut().entry(r).or_insert_with(|| b.into());
             Ok(Value::Blob(r))
         }
         LibFn::BlobRead => {
@@ -692,7 +692,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                 return Ok(Value::Option(None));
             }
             let (lo, hi) = (lo as usize, hi as usize);
-            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes(Arc::from(s)))))
+            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes((s).into()))))
         }
         LibFn::BytesJoin => {
             let parts = arg_vector(cx, env, f, args, 0)?;
@@ -708,7 +708,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
     }
 }
 
-fn bytes_arg(v: Value) -> ExprResult<Arc<[u8]>> {
+fn bytes_arg(v: Value) -> ExprResult<blossom_value::BytesValue> {
     match v {
         Value::Bytes(b) => Ok(b),
         other => Err(bug(format!("Bytes expected, found {other:?}"))),

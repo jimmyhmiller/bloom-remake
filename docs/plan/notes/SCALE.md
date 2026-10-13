@@ -265,3 +265,108 @@ Both verify OK: every acknowledged record present at its offset, none lost, misp
 Read: no failures and no loss on either side, and Blossom now rides through the kill -9 (soak 2 left partitions
 leaderless). The gap is throughput and latency: ~4x lower max rate, ~6x the steady ack p50 at a rate both hold, and a
 longer stall at the kill. Next, per the plan: bounded per-tick work.
+
+## Performance target and CPU investigation (2026-10-13)
+
+The initial request was 50% higher throughput than Kafka (40,179 rec/s). The active goal was subsequently revised
+to **25% higher throughput**, provisionally **33,483 rec/s** against Soak 3's 26,786. Keep the same resources,
+workload, strict durability, Java
+clients, kill/restart and full record verification. Track acknowledgement latency and catch-up reads separately.
+The target remains open.
+
+Bounded CPU profiles on the server (`/tmp/blossom-{20261013,partition-max,seek-max}.perf`) show value comparison,
+hashing and relational evaluation taking substantial CPU. Under max load, the original storage build with the
+first partition-view change spent ~12% of sampled CPU in `DetHasher::write`, ~8% in `Value::cmp`, ~6% in `memcmp`,
+and additional time in codecs, storage probes and allocation/reference counting. These are sample shares, not
+independent speedups that can be added together.
+
+Changes:
+
+- Expose `partition_commit(tid, p, c)` from Raft's tuple-shaped group key. `note_commit`, `pending_batch` and
+  `placed_done` can then probe by partition even when their change is driven by the commit index. The first two
+  rules each spent ~14 million expression steps in a 30-second exploratory run at 2,000 rec/s; the explicit
+  partition columns removed them from the slow-rule report. That alone did not materially improve steady latency.
+- SSTable point and range reads seek within sorted blocks with binary search, rather than scanning from the
+  beginning. Historical versions of a key spanning blocks remain supported. The eight LSM tests pass, including
+  the versioned model, flush/compaction crash points, and a new directed cross-block historical-read test.
+- The soak harness used `|| true` for verification and report errors, and ended successfully after an incomplete
+  catch-up. It now preserves the summary/evidence and exits nonzero on those failures. Its final stage was checked
+  with successful and failing verifier/report commands and an incomplete catch-up.
+- A short soak could report a negative after-recovery duration, and count quiet drain time in the fixed fault
+  window. Reports now clip fixed windows to the fixed phase's end and omit empty windows. Full-duration windows
+  are unchanged.
+
+### Short paired smoke (not the acceptance soak)
+
+Server results: `~/soak-results/{baseline,seek}-smoke-20261013`. Same half-box pinning as Soak 3, 10 topics × 12
+partitions, RF3, 4 producers and 4 consumers, 1 KiB records. Max phase 30 s, fixed 2,000/s for 90 s, kill at 30 s,
+restart after 10 s. The max rate includes time to acknowledge the producers' outstanding records.
+
+| build | max rec/s | max ack p50 | verified records | lost / misplaced / duplicated |
+|---|---|---|---|---|
+| 3e697298 | 8,973 | 10.928 s | 591,136 | 0 / 0 / 0 |
+| partition joins + SST binary seeks | 9,714 | 10.215 s | 615,256 | 0 / 0 / 0 |
+
+Observed max-rate gain: **8.3%** in this single short pair. This is not repeatability evidence or a comparison
+against Kafka's full-soak rate. The fixed phase has only ~1 s after its 30 s warm-up before the kill, so its steady
+percentiles are not useful acceptance evidence. Catch-up includes startup and is too short for comparison. An
+earlier exploratory partition-view-only smoke overlapped a release build during catch-up; do not use its read rate.
+
+Validation of the final changes: 24 Kafka integration tests across nine suites pass (four full-tier
+`kafka_cluster` tests not included), all six release `kafka3` tests pass with `BLOSSOM_FULL=1` (190 s), and all
+eight LSM tests pass. Shell syntax, changed Rust files' formatting, and whitespace checks pass. The original and
+clipped reporters produce byte-for-byte identical output for the full Soak 3 artifacts.
+
+The runtime still uses the value-level interpreted engine; `blossom-codegen` and `blossom-kernel` are placeholders.
+The architecture's native executors, specialized codecs, word-level stores and bulk fingerprints are not implemented
+there. Repeated hashing/comparison of immutable payloads and interpreted evaluation are candidates for the larger
+performance work. The profiles do not establish that the requested target is impossible, or that these changes
+will reach it. The simulator's full-state safety observer cost also remains open.
+
+### Caller stacks and immutable byte hashes
+
+The previous perf files had essentially flat call chains. A separate profiling build with release optimization,
+debug symbols and frame pointers (`target/perf`) produced usable stacks (`/tmp/blossom-stacks-max.perf`, 4,734
+samples, none lost). Inclusive CPU: engine tick ~90.6%, rule maintenance ~72.5%, evaluation ~43.9%, relation
+insertion/update ~29.1%, cold database probes ~17.1%. Expression evaluation was only ~5.8%; missing expression
+codegen is not the immediate dominant cost. `DetHasher::write` was ~13.2%, with substantial work hashing nested
+values on relation insertion/removal. These shares overlap and must not be summed.
+
+- `Value::Bytes` now holds immutable `BytesValue` (value API 2, architecture/DECISIONS amendments in the same
+  commit). Payloads >=128 bytes share a construction-time BLAKE3-256 digest across clones. Collection hashing
+  reads only the length and digest; `Blob::of` reuses the full content address. Small byte values retain one Arc.
+  Equality still checks contents on a digest collision, ordering remains lexicographic, and the wire/serde bytes
+  and typed fingerprints are unchanged. No global cache or interior mutability. The extra large-value allocation
+  and construction-time hash are included in the measurement below.
+- Tuple decoding appends fields arriving in schema order directly, without building implicit field-number arrays
+  or optional-slot arrays. Reordered known fields switch to indexed slots; unknown, duplicate, missing and
+  mistyped fields retain their existing checks. Explicit unordered schemas use the general path.
+
+Clean normal-release pair: `~/soak-results/bytes-{before,after}-20261013`, same half-box pins, 10×12 partitions,
+RF3, four producers/consumers, 1 KiB records, 60 s max, 180 s fixed at 2,000/s, kill at 60 s for 10 s. No profiling
+or compilation ran beside these measured phases.
+
+| build | max rec/s | steady ack p50 | verified records | lost / misplaced / duplicated |
+|---|---|---|---|---|
+| partition joins + SST seeks | 10,908 | 454.66 ms | 1,143,860 | 0 / 0 / 0 |
+| plus byte hashes + ordered decoding | 11,721 | 483.07 ms | 1,190,073 | 0 / 0 / 0 |
+
+Observed max-rate gain: **7.5%** in this single pair. Steady latency did not improve; the acceptance target remains
+open. This is still shorter than the full soak and is not evidence of 25% higher throughput than Kafka.
+
+The new normal-release binary also reopened the before run's three old stores without initialization and verified
+all 1,143,860 acknowledged records, with zero loss/misplacement/duplication. Verification log:
+`~/bloom-logs/scale-bytes-upgrade-verify.log`.
+
+Validation: all workspace targets check; 85 value/wire/standard-host unit tests pass; 59 selected engine, function,
+codec, blob and database regression tests pass (35 relevant tests rerun after the final immutable-digest/content-
+address implementation); all six release `kafka3` tests pass with `BLOSSOM_FULL=1` (192 s). The previously ignored
+large-format guard was also run separately with `BLOSSOM_FULL=1` and passes (35 s). Clippy on the value, wire,
+engine and standard-host crates passes with warnings denied;
+workspace formatting and whitespace checks pass. Two pre-existing formatting differences from 3e697298 were
+normalized while migrating the touched tests.
+
+Next concrete cost found: `Store::retract_all` removes every scoped row through `add(-count)`, repeating hash
+probes, per-index removals and blob traversal although the whole store is being emptied. Its bulk operation must
+preserve old-version rows, net deltas, generation, index definitions and blob retention; lattice/tiered stores
+remain excluded. This is the next relation-update optimization to implement and measure.

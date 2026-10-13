@@ -225,7 +225,7 @@ fn tiered_tables_agree_with_the_oracle_through_restarts_flushes_and_compactions(
                         _ => k.offer(
                             &mut d,
                             "stash",
-                            vec![u(key), Value::Bytes(Arc::from(format!("b{}", rng.below(5)).as_bytes()))],
+                            vec![u(key), Value::Bytes((format!("b{}", rng.below(5)).as_bytes()).into())],
                         ),
                     }
                 }

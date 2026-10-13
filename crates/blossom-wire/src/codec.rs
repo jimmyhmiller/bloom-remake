@@ -535,7 +535,7 @@ impl<'p> Codec<'p> {
             TypeDef::Duration => Value::Duration(Duration::from_nanos(get_zz(input)?)),
             TypeDef::Instant => Value::Instant(Instant(get_zz(input)?)),
             TypeDef::Str => Value::Str(Arc::from(utf8(get_bytes(input, "a string")?)?)),
-            TypeDef::Bytes => Value::Bytes(Arc::from(get_bytes(input, "bytes")?)),
+            TypeDef::Bytes => Value::Bytes((get_bytes(input, "bytes")?).into()),
             TypeDef::Principal => Value::Principal(Arc::from(utf8(get_bytes(input, "a principal")?)?)),
             TypeDef::Session => Value::Session(SessionId(get_varint(input)?)),
             TypeDef::Conn => Value::Conn(ConnId(get_varint(input)?)),
@@ -670,24 +670,47 @@ impl<'p> Codec<'p> {
 
     /// A tuple's fields, by field number (1-based); unknown fields are skipped, missing ones are an error.
     fn decode_fields(&self, tys: &[TypeId], input: &mut &[u8], depth: u32) -> Result<Vec<Value>, WireError> {
-        let numbers: Vec<u32> = (1..=tys.len() as u32).collect();
-        self.decode_numbered(tys, &numbers, input, depth)
+        self.decode_numbered(tys, None, input, depth)
     }
 
     fn decode_numbered(
         &self,
         tys: &[TypeId],
-        numbers: &[u32],
+        numbers: Option<&[u32]>,
         input: &mut &[u8],
         depth: u32,
     ) -> Result<Vec<Value>, WireError> {
         let n = get_count(input)?;
-        let mut slots: Vec<Option<Value>> = vec![None; tys.len()];
+        let number_at = |i: usize| match numbers {
+            Some(ns) => ns
+                .get(i)
+                .copied()
+                .ok_or_else(|| WireError::Malformed("field index".into())),
+            None => u32::try_from(i)
+                .ok()
+                .and_then(|i| i.checked_add(1))
+                .ok_or(WireError::Limit("field number")),
+        };
+        let increasing = numbers.is_none_or(|ns| ns.iter().zip(ns.iter().skip(1)).all(|(a, b)| a < b));
+        // Our encoder sends tuple fields in order. Append those directly, without building a field-number array
+        // or initializing and then collecting a second array of optional slots. Older/newer senders may reorder
+        // fields or add unknown ones; switch to indexed slots only when a known field arrives out of order.
+        let mut ordered = Vec::with_capacity(tys.len());
+        let mut slots: Option<Vec<Option<Value>>> = None;
         for _ in 0..n {
             let key = get_varint(input)?;
             let wt = (key & 7) as u8;
             let number = u32::try_from(key >> 3).map_err(|_| WireError::Malformed("field number".into()))?;
-            match numbers.iter().position(|x| *x == number) {
+            let index =
+                if increasing && slots.is_none() && ordered.len() < tys.len() && number == number_at(ordered.len())? {
+                    Some(ordered.len())
+                } else {
+                    match numbers {
+                        Some(ns) => ns.iter().position(|x| *x == number),
+                        None => number.checked_sub(1).map(|i| i as usize).filter(|i| *i < tys.len()),
+                    }
+                };
+            match index {
                 Some(i) => {
                     let ty = *tys.get(i).ok_or_else(|| WireError::Malformed("field index".into()))?;
                     let want = self.wire_type(ty)?;
@@ -697,6 +720,15 @@ impl<'p> Codec<'p> {
                         )));
                     }
                     let v = self.decode_at(ty, input, depth + 1)?;
+                    if slots.is_none() && i == ordered.len() {
+                        ordered.push(v);
+                        continue;
+                    }
+                    let slots = slots.get_or_insert_with(|| {
+                        let mut slots: Vec<Option<Value>> = ordered.drain(..).map(Some).collect();
+                        slots.resize(tys.len(), None);
+                        slots
+                    });
                     if let Some(slot) = slots.get_mut(i) {
                         if slot.is_some() {
                             return Err(WireError::Malformed(format!("field #{number} appears twice")));
@@ -707,11 +739,21 @@ impl<'p> Codec<'p> {
                 None => skip(wt, input)?,
             }
         }
-        slots
-            .into_iter()
-            .zip(numbers)
-            .map(|(v, n)| v.ok_or_else(|| WireError::Malformed(format!("field #{n} is missing"))))
-            .collect()
+        match slots {
+            Some(slots) => slots
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let n = number_at(i)?;
+                    v.ok_or_else(|| WireError::Malformed(format!("field #{n} is missing")))
+                })
+                .collect(),
+            None if ordered.len() == tys.len() => Ok(ordered),
+            None => Err(WireError::Malformed(format!(
+                "field #{} is missing",
+                number_at(ordered.len())?
+            ))),
+        }
     }
 
     fn decode_lattice(&self, ctor: &LatticeCtor, input: &mut &[u8], depth: u32) -> Result<LatValue, WireError> {
@@ -803,7 +845,7 @@ impl<'p> Codec<'p> {
     /// Reads a row of `cols`.
     pub fn decode_row(&self, cols: &[Column], input: &mut &[u8]) -> Result<Vec<Value>, WireError> {
         let tys: Vec<TypeId> = cols.iter().map(|c| c.ty).collect();
-        self.decode_numbered(&tys, &Self::numbers(cols), input, 0)
+        self.decode_numbered(&tys, Some(&Self::numbers(cols)), input, 0)
     }
 }
 

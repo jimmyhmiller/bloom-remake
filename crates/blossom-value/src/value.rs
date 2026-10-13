@@ -36,7 +36,7 @@ pub enum Value {
     /// `String`.
     Str(Arc<str>),
     /// `Bytes`.
-    Bytes(Arc<[u8]>),
+    Bytes(crate::BytesValue),
     /// `Duration` (nanoseconds).
     Duration(Duration),
     /// `Instant` (nanoseconds since the deployment epoch).

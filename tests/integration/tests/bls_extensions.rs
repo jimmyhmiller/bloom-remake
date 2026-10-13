@@ -534,7 +534,7 @@ fn ref_fields(r: &RefRequest) -> Value {
                 .map(|t| {
                     Value::Tuple(
                         vec![
-                            Value::Bytes(Arc::from(&t.id[..])),
+                            Value::Bytes((&t.id[..]).into()),
                             s(&t.name),
                             Value::Vec(t.parts.iter().map(|p| Value::Int(IntValue::I32(*p))).collect()),
                             Value::Vec(
@@ -561,7 +561,7 @@ fn ref_fields(r: &RefRequest) -> Value {
             u(r.big),
             Value::Int(IntValue::I8(r.small)),
             Value::Int(IntValue::I64(r.delta)),
-            Value::Bytes(Arc::from(&r.blob[..])),
+            Value::Bytes((&r.blob[..]).into()),
         ]
         .into(),
     )
@@ -618,11 +618,7 @@ fn formats_decode_and_encode_as_the_reference_does() {
             node: NodeId(0),
             tick: Tick(1),
             rel: msg,
-            row: Arc::from(vec![
-                u(k),
-                Value::Int(IntValue::I16(version)),
-                Value::Bytes(Arc::from(b)),
-            ]),
+            row: Arc::from(vec![u(k), Value::Int(IntValue::I16(version)), Value::Bytes((b).into())]),
         }
     };
     for _ in 0..60 {
@@ -692,8 +688,8 @@ fn formats_are_bounded_by_their_input_not_the_step_budget() {
     put_uvarint(&mut b, items);
     b.extend((0..items).map(|i| i as u8));
     let ok = vec![
-        ev("msg", vec![u(1), Value::Bytes(Arc::from(&b[..]))]),
-        ev("cond", vec![u(2), u(10), Value::Bytes(Arc::from(&[1u8, 7, 7][..]))]),
+        ev("msg", vec![u(1), Value::Bytes((&b[..]).into())]),
+        ev("cond", vec![u(2), u(10), Value::Bytes((&[1u8, 7, 7][..]).into())]),
     ];
     let run = match differential_or_error(&artifact, &ok, 2) {
         Outcome::Ran(run) => run,
@@ -710,7 +706,7 @@ fn formats_are_bounded_by_their_input_not_the_step_budget() {
     assert_eq!(rows("big"), vec![vec![u(1), u(items)]]);
     assert_eq!(rows("checked"), vec![vec![u(2), u(2)]]);
     let over = blossom_ir::core::FN_STEP_BUDGET + 1;
-    let heavy = [ev("cond", vec![u(3), u(over), Value::Bytes(Arc::from(&[1u8][..]))])];
+    let heavy = [ev("cond", vec![u(3), u(over), Value::Bytes((&[1u8][..]).into())])];
     match differential_or_error(&artifact, &heavy, 2) {
         Outcome::Failed(tick, code) => assert_eq!((tick, code.as_str()), (Tick(1), "BLSR012")),
         Outcome::Ran(_) => panic!("a metered function past its budget raised nothing"),
@@ -721,7 +717,7 @@ fn formats_are_bounded_by_their_input_not_the_step_budget() {
         let mut b = Vec::new();
         put_uvarint(&mut b, count);
         b.extend((0..count).flat_map(|_| [9u8, 9u8]));
-        ev("many", vec![u(k), u(n), Value::Bytes(Arc::from(&b[..]))])
+        ev("many", vec![u(k), u(n), Value::Bytes((&b[..]).into())])
     };
     let step = blossom_ir::core::FN_STEP_BUDGET / 10;
     match differential_or_error(&artifact, &[items(4, step, 9)], 2) {

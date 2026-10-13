@@ -201,6 +201,7 @@ for c in $(seq 1 "$CONSUMERS"); do
 done
 cstart=$(date +%s%N)
 deadline=$(($(date +%s) + 3600))
+catchup_ok=1
 while true; do
   read_n=0
   for c in $(seq 1 "$CONSUMERS"); do
@@ -208,7 +209,7 @@ while true; do
     read_n=$((read_n + ${n:-0}))
   done
   [ "$read_n" -ge "$total" ] && break
-  [ "$(date +%s)" -lt "$deadline" ] || { event "catchup gave up at $read_n of $total"; break; }
+  [ "$(date +%s)" -lt "$deadline" ] || { event "catchup gave up at $read_n of $total"; catchup_ok=0; break; }
   sleep 1
 done
 cend=$(date +%s%N)
@@ -218,14 +219,16 @@ event "catchup done: $read_n records in $(awk "BEGIN { printf \"%.1f\", ($cend -
 
 # ---- 5. verify
 event "verify"
+verify_status=0
 taskset -c "$CLIENT_CPUS" java -Xmx16g -cp "$classes:$KAFKA_HOME/libs/*" Soak verify --bootstrap "$BOOTSTRAP" \
-  --topics "$topic_list" --out "$OUT" --prop max.poll.records=5000 > "$OUT/verify.txt" 2>&1 || true
+  --topics "$topic_list" --out "$OUT" --prop max.poll.records=5000 > "$OUT/verify.txt" 2>&1 || verify_status=$?
 event "verify: $(tail -n 1 "$OUT/verify.txt")"
 echo "$(since),$(du -sm "$BENCH_DIR/$SYSTEM" | cut -f1)" >> "$OUT/disk.csv"
 
 # ---- summary
+report_status=0
 taskset -c "$CLIENT_CPUS" java -cp "$classes:$KAFKA_HOME/libs/*" Soak report --events "$OUT/events.log" --dir "$OUT" \
-  > "$OUT/report.csv" 2>&1 || true
+  > "$OUT/report.csv" 2>&1 || report_status=$?
 {
   echo "system=$SYSTEM topics=$TOPICS partitions=$PARTS producers=$PRODUCERS consumers=$CONSUMERS size=$SIZE"
   echo "max_seconds=$MAX_SECONDS rate=$RATE fixed_seconds=$FIXED_SECONDS kill_at=$KILL_AT down=$DOWN_SECONDS"
@@ -236,4 +239,8 @@ taskset -c "$CLIENT_CPUS" java -cp "$classes:$KAFKA_HOME/libs/*" Soak report --e
     echo "$(basename "$f" .csv): $(grep '^#' "$f" | tail -n 1)"
   done
 } > "$OUT/summary.txt"
+# Keep the evidence even on failure, but never report a failed verification or incomplete read as a successful run.
+[ "$verify_status" = 0 ] || die "verification failed (exit $verify_status); evidence in $OUT"
+[ "$catchup_ok" = 1 ] || die "catch-up did not finish; evidence in $OUT"
+[ "$report_status" = 0 ] || die "report failed (exit $report_status); evidence in $OUT"
 event "done: $OUT"

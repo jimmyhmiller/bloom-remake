@@ -282,7 +282,7 @@ fn a_recovered_node_reads_its_blobs_and_collects_the_unreferenced_ones() {
         let forget = k.artifact.rel_named("forget").unwrap();
         for c in chunks.iter().take(3) {
             d.node
-                .offer_input(forget, Arc::from(vec![Value::Bytes(Arc::from(&c[..]))]));
+                .offer_input(forget, Arc::from(vec![Value::Bytes((&c[..]).into())]));
         }
         d.run_until_quiescent(Instant(LATER + 1)).unwrap();
         d.flush().unwrap();
@@ -327,7 +327,7 @@ fn a_tick_reads_a_blob_whose_record_is_not_synced_yet() {
         let rel = |n: &str| k.artifact.rel_named(n).unwrap();
         let key: Arc<[u8]> = Arc::from(&b"pipelined blob"[..]);
         node.run_tick(Instant(1)).unwrap();
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let put = node.run_tick(Instant(2)).unwrap();
         assert_eq!(
             put.blobs.len(),
@@ -335,12 +335,12 @@ fn a_tick_reads_a_blob_whose_record_is_not_synced_yet() {
             "engine {engine}: the blob is handed over with the record"
         );
         // Neither written to the store nor synced: the next tick reads it all the same.
-        node.offer_input(rel("peek"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("peek"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         node.run_tick(Instant(3))
             .unwrap_or_else(|f| panic!("engine {engine}: {f}"));
         let peeked = node.carried_rows(rel("peeked")).unwrap();
         assert_eq!(peeked.len(), 1, "engine {engine}");
-        assert_eq!(peeked[0][1], Value::Bytes(key.clone()), "engine {engine}");
+        assert_eq!(peeked[0][1], Value::Bytes(key.clone().into()), "engine {engine}");
     }
 }
 
@@ -364,21 +364,21 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
             node.wal_synced(fx.tick).unwrap();
         };
         sync(&mut node, 1);
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         sync(&mut node, 2);
-        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         sync(&mut node, 3);
         // A checkpoint of this state holds no row with the blob: it is a candidate its installation may let go.
         let checkpoint = node.next_tick().prev().unwrap();
         let outside = node.collection_candidates();
         assert!(outside.contains(&blob), "engine {engine}");
         // After it: the row again (the blob is still durable, so it is not written again), then deleted.
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let fx = node.run_tick(Instant(4)).unwrap();
         assert!(fx.blobs.is_empty(), "engine {engine}: a durable blob is written again");
         store.put_all(&fx.blobs).unwrap();
         node.wal_synced(fx.tick).unwrap();
-        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         sync(&mut node, 5);
         let gone = node.blob_garbage(checkpoint, &outside);
         assert!(
@@ -394,7 +394,7 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
         assert_eq!(gone, vec![blob], "engine {engine}");
         assert_eq!(store.delete(&gone).unwrap(), 1, "engine {engine}");
         // Gone, it is no longer durable: a row that needs it again writes it again.
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let fx = node.run_tick(Instant(7)).unwrap();
         assert_eq!(
             fx.blobs.len(),
@@ -427,15 +427,15 @@ fn a_blob_only_a_derived_row_holds_survives_the_cache_trims() {
             fx
         };
         tick(&mut node);
-        node.offer_input(rel("keep"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("keep"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         tick(&mut node);
         // Ticks that make other blobs, past the cache's 64-byte budget, so it is trimmed.
         for i in 0..4u8 {
-            node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(Arc::from(vec![i; 300]))]));
+            node.offer_input(rel("put"), Arc::from(vec![Value::Bytes((vec![i; 300]).into())]));
             tick(&mut node);
             tick(&mut node);
         }
-        node.offer_input(rel("commit_kept"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("commit_kept"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let fx = tick(&mut node);
         assert_eq!(
             fx.blobs.len(),

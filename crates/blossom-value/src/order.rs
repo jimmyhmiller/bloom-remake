@@ -84,7 +84,7 @@ impl Ord for Value {
             (V::Int(a), V::Int(b)) => a.cmp(b),
             (V::F64(a), V::F64(b)) => a.total_cmp(b),
             (V::Str(a), V::Str(b)) => cmp_shared(a, b),
-            (V::Bytes(a), V::Bytes(b)) => cmp_shared(a, b),
+            (V::Bytes(a), V::Bytes(b)) => a.cmp(b),
             (V::Duration(a), V::Duration(b)) => a.cmp(b),
             (V::Instant(a), V::Instant(b)) => a.cmp(b),
             (V::Mod(a), V::Mod(b)) => a.cmp(b),
@@ -147,7 +147,16 @@ impl PartialOrd for Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Value) -> bool {
-        self.cmp(other) == Ordering::Equal
+        match (self, other) {
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b))
+            | (Value::Struct(a), Value::Struct(b))
+            | (Value::Vec(a), Value::Vec(b)) => Arc::ptr_eq(a, b) || a == b,
+            (Value::Enum { variant: va, fields: a }, Value::Enum { variant: vb, fields: b }) => {
+                va == vb && (Arc::ptr_eq(a, b) || a == b)
+            }
+            _ => self.cmp(other) == Ordering::Equal,
+        }
     }
 }
 
@@ -298,7 +307,7 @@ mod tests {
         match v {
             V::Str(s) => V::Str(Arc::from(&**s)),
             V::Principal(s) => V::Principal(Arc::from(&**s)),
-            V::Bytes(b) => V::Bytes(Arc::from(&**b)),
+            V::Bytes(b) => V::Bytes((&**b).into()),
             V::Tuple(items) => V::Tuple(copy_all(items)),
             V::Struct(items) => V::Struct(copy_all(items)),
             V::Vec(items) => V::Vec(copy_all(items)),

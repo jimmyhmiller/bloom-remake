@@ -195,6 +195,47 @@ fn an_amendment_joins_the_newest_version() {
 }
 
 #[test]
+fn seeks_find_historical_versions_across_block_boundaries() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let dir = Path::new("/db");
+    let options = LsmOptions {
+        block_bytes: 40,
+        history: 100,
+        ..opts()
+    };
+    let lsm = Lsm::open(fs.clone(), dir, options.clone()).unwrap();
+    // All versions of b go into one SSTable, spanning several blocks, between neighboring keys. Its oldest
+    // version is absent; the alternating puts/deletes distinguish each as-of seek from a newest-version lookup.
+    for v in 1..=24 {
+        lsm.apply(
+            v,
+            v,
+            [
+                (b"a".to_vec(), Op::Put),
+                (b"b".to_vec(), if v % 2 == 0 { Op::Put } else { Op::Del }),
+                (b"c".to_vec(), Op::Put),
+            ],
+        )
+        .unwrap();
+    }
+    lsm.flush().unwrap();
+    assert!(lsm.info().unwrap().tables[0].blocks > 3);
+    drop(lsm);
+    let lsm = Lsm::open(fs, dir, options).unwrap();
+    for v in 0..=24 {
+        assert_eq!(lsm.get(b"b", v).unwrap(), v > 0 && v % 2 == 0, "version {v}");
+        assert!(!lsm.get(b"bb", v).unwrap());
+        let expected = if v > 0 && v % 2 == 0 {
+            vec![b"b".to_vec()]
+        } else {
+            vec![]
+        };
+        assert_eq!(lsm.scan_range(b"b", Some(b"c"), v).unwrap(), expected);
+        assert_eq!(paged(&lsm, b"b", Some(b"c"), v, 1), expected);
+    }
+}
+
+#[test]
 fn reads_as_of_every_version_kept_agree_with_the_model() {
     for seed in 0..6 {
         let fs = SimFs::default();

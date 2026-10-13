@@ -373,7 +373,12 @@ public class Soak {
         }
         System.out.println("phase,seconds,produce_acked_per_s,ack_p50_ms,ack_p99_ms,ack_p999_ms,ack_max_ms,"
             + "consumed_per_s,e2e_p50_ms,e2e_p99_ms,e2e_p999_ms,e2e_max_ms");
-        for (Window w : windows) {
+        for (Window original : windows) {
+            // A short smoke can finish before the recovery window starts. Never report negative durations, or
+            // count quiet drain/catch-up time as part of the fixed-rate fault window.
+            Window w = original.name().equals("max") ? original : new Window(original.name(), original.from(),
+                Math.min(original.to(), at.getOrDefault("fixed done", original.to())));
+            if (w.to() <= w.from()) continue;
             String producers = w.name().equals("max") ? "producer-max-" : "producer-fixed-";
             Histogram ack = merged(dir, producers, w);
             Histogram e2e = merged(dir, "consumer-live-", w);
