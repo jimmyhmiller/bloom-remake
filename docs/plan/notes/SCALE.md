@@ -530,3 +530,21 @@ branch, with its API 3 amendment/version/migration kept together; it is not merg
 The retained value API remains version 2. The goal remains open.
 
 Archived experiment commit: `b19a0f42` on `compact-value-bench`; do not merge into the retained branch.
+
+## Recorded function-work diagnostic (2026-10-13)
+
+`rule-trace-20261013` recorded the retained profiling binary with the same tiered/cache/pinning controls,
+30 seconds maximum and 90 seconds paced, kill at 30 seconds, restart 10 seconds later. All 625,294
+acknowledged records verified, zero lost, misplaced, duplicated, unacknowledged or foreign. Recording
+changes performance, so its rate is not acceptance evidence. Traces occupy 2.2 GB on the server.
+
+Broker 2 replay over maximum-load epoch seconds 1791888656–1791888657 covered 17 ticks and 2,826,927
+expression steps. Own function steps: BatchHeader::decode 314,825 over 1,799 calls; after_append 310,276
+over 3,758 calls; producers_in 97,490 over 5,590 calls. Rule leaders remain materialized_producer,
+entry_check, sequenced, data_entry and produce_req. These are work counts, not CPU percentages.
+Profile: `/tmp/rule-trace-profile-20261013.txt`; traces: `/tmp/soak-rule-trace-20261013/blossom/traces`.
+
+The next isolated investigation (`function-plan-bench`, `.worktrees/function-plans`) is compiled function
+evaluation plans (ARCHITECTURE §3.2). Preserve evaluation order, short circuits, scoped bindings,
+function budgets, work counters, errors and time/random/blob tracking; no Kafka-name specialization
+or unbounded memoization. No implementation or performance claim yet.
