@@ -120,6 +120,8 @@ struct Hot {
     ranges: BTreeMap<(Vec<usize>, usize), RangesBy>,
     /// The rows kept: every probe's and range's, and one per membership.
     rows: usize,
+    /// Cached answers and large-prefix markers, including answers with no rows.
+    entries: usize,
     clock: u64,
     budget: usize,
 }
@@ -185,20 +187,16 @@ impl Hot {
 
     fn mark_large(&mut self, cols: &[usize], values: &[Value]) {
         let now = self.tick();
-        self.large
+        if self
+            .large
             .entry(cols.to_vec())
             .or_default()
-            .insert(values.to_vec(), now);
-        // The markers are a key each, not rows: past the budget's count, the least recently used half goes.
-        if self.large.values().map(|m| m.len()).sum::<usize>() > self.budget {
-            let mut uses: Vec<u64> = self.large.values().flat_map(|m| m.values().copied()).collect();
-            uses.sort_unstable();
-            let cut = uses.get(uses.len() / 2).copied().unwrap_or(0);
-            for by_values in self.large.values_mut() {
-                by_values.retain(|_, u| *u > cut);
-            }
-            self.large.retain(|_, m| !m.is_empty());
+            .insert(values.to_vec(), now)
+            .is_none()
+        {
+            self.entries += 1;
         }
+        self.trim();
     }
 
     /// Keeps a probe's rows (sorted).
@@ -212,6 +210,8 @@ impl Hot {
             .insert(values.to_vec(), (rows, now))
         {
             self.rows -= old.len();
+        } else {
+            self.entries += 1;
         }
         self.trim();
     }
@@ -242,13 +242,16 @@ impl Hot {
         if let Some(at) = kept.iter().position(|k| k.lo.as_ref() == *lo && k.hi.as_ref() == *hi) {
             let old = kept.remove(at);
             self.rows -= old.rows.len();
+            self.entries -= 1;
         }
         if kept.len() == RANGES_PER_PREFIX
             && let Some((at, _)) = kept.iter().enumerate().min_by_key(|(_, k)| k.used)
         {
             let old = kept.remove(at);
             self.rows -= old.rows.len();
+            self.entries -= 1;
         }
+        self.entries += 1;
         kept.push(KeptRange {
             lo: lo.cloned(),
             hi: hi.cloned(),
@@ -269,6 +272,7 @@ impl Hot {
         let now = self.tick();
         if self.contains.insert(row.clone(), (support, now)).is_none() {
             self.rows += 1;
+            self.entries += 1;
         }
         self.trim();
     }
@@ -291,8 +295,17 @@ impl Hot {
                         let used = *used;
                         if let Some((gone, _)) = by_values.remove(&values) {
                             self.rows -= gone.len();
+                            self.entries -= 1;
                         }
-                        self.large.entry(cols.clone()).or_default().insert(values, used);
+                        if self
+                            .large
+                            .entry(cols.clone())
+                            .or_default()
+                            .insert(values, used)
+                            .is_none()
+                        {
+                            self.entries += 1;
+                        }
                     }
                 }
                 (Ok(at), false) => {
@@ -326,29 +339,41 @@ impl Hot {
                 // A range that outgrows what one may keep goes.
                 if k.rows.len() > largest {
                     self.rows -= k.rows.len();
+                    self.entries -= 1;
                     return false;
                 }
                 true
             });
+            if kept.is_empty() {
+                by_values.remove(&values);
+            }
         }
+        self.probes.retain(|_, m| !m.is_empty());
+        self.ranges.retain(|_, m| !m.is_empty());
         if let Some((held, _)) = self.contains.get_mut(row) {
             *held = support;
         }
+        self.trim();
     }
 
-    /// Past the budget, the least recently used half goes.
+    /// Bounds both rows and cache entries; empty answers and large markers consume entries.
+    fn size(&self) -> usize {
+        self.rows.max(self.entries)
+    }
+
+    /// Past either budget, the least recently used half goes.
     fn trim(&mut self) {
-        if self.rows > self.budget {
+        if self.size() > self.budget {
             self.halve();
         }
     }
 
-    /// Down to `target` rows, the least recently used half at a time.
+    /// Down to `target` rows and entries, the least recently used half at a time.
     fn shrink(&mut self, target: usize) {
-        while self.rows > target {
-            let before = self.rows;
+        while self.size() > target {
+            let before = self.size();
             self.halve();
-            if self.rows >= before {
+            if self.size() >= before {
                 return;
             }
         }
@@ -361,6 +386,7 @@ impl Hot {
             .values()
             .flat_map(|m| m.values().map(|(_, u)| *u))
             .chain(self.contains.values().map(|(_, u)| *u))
+            .chain(self.large.values().flat_map(|m| m.values().copied()))
             .chain(
                 self.ranges
                     .values()
@@ -394,7 +420,19 @@ impl Hot {
         }
         self.ranges.retain(|_, m| !m.is_empty());
         self.contains.retain(|_, (_, u)| *u > cut);
+        for by_values in self.large.values_mut() {
+            by_values.retain(|_, used| *used > cut);
+        }
+        self.large.retain(|_, m| !m.is_empty());
         self.rows = rows + self.contains.len();
+        self.entries = self.contains.len()
+            + self.probes.values().map(|m| m.len()).sum::<usize>()
+            + self.large.values().map(|m| m.len()).sum::<usize>()
+            + self
+                .ranges
+                .values()
+                .flat_map(|m| m.values().map(Vec::len))
+                .sum::<usize>();
     }
 }
 
@@ -980,9 +1018,9 @@ impl Store {
         }
     }
 
-    /// How many rows a tiered store's hot tier keeps.
+    /// A tiered hot cache's budget usage: the larger of its row and answer-entry counts.
     pub fn hot_rows(&self) -> usize {
-        self.tiered.as_ref().map_or(0, |t| t.hot.borrow().rows)
+        self.tiered.as_ref().map_or(0, |t| t.hot.borrow().size())
     }
 
     /// Shrinks a tiered store's hot tier to `target` rows, the least recently used first.
@@ -1644,6 +1682,75 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_cache_answers_and_markers_stay_bounded() {
+        let mut hot = Hot {
+            budget: 8,
+            ..Hot::default()
+        };
+        for i in 0..100 {
+            let values = [Value::u64(i)];
+            hot.keep_probe(&[0], &values, Arc::new(Vec::new()));
+            hot.keep_range(
+                &[0],
+                &values,
+                &(1, Bound::Unbounded, Bound::Unbounded),
+                Arc::new(Vec::new()),
+            );
+            hot.mark_large(&[2], &values);
+            hot.keep_support(&Arc::from(values), 0);
+            assert!(hot.rows <= 8);
+            assert!(hot.entries <= 8);
+        }
+        assert_eq!(hot.probe(&[0], &[Value::u64(99)]).unwrap().len(), 0);
+        assert!(hot.is_large(&[2], &[Value::u64(99)]));
+        hot.shrink(0);
+        assert_eq!((hot.rows, hot.entries), (0, 0));
+        assert!(hot.probes.is_empty() && hot.ranges.is_empty() && hot.large.is_empty() && hot.contains.is_empty());
+    }
+
+    #[test]
+    fn cache_entry_counts_follow_growth_replacement_and_eviction() {
+        let mut hot = Hot {
+            budget: 128,
+            ..Hot::default()
+        };
+        let values = [Value::u64(7)];
+        let range = (1, Bound::Unbounded, Bound::Unbounded);
+        hot.keep_probe(&[0], &values, Arc::new(Vec::new()));
+        hot.keep_range(&[0], &values, &range, Arc::new(Vec::new()));
+        let first: Row = Arc::from([Value::u64(7), Value::u64(1)]);
+        hot.keep_support(&first, 0);
+        let old = hot.probe(&[0], &values).unwrap();
+        hot.caught_up(&first, 1);
+        assert!(
+            old.is_empty(),
+            "cache updates must preserve previously returned snapshots"
+        );
+        assert_eq!(hot.probe(&[0], &values).unwrap().as_ref(), &vec![first.clone()]);
+        assert_eq!(hot.support(&first), Some(1));
+        hot.caught_up(&first, 0);
+        assert!(hot.probe(&[0], &values).unwrap().is_empty());
+        assert_eq!((hot.rows, hot.entries), (1, 3));
+        for i in 1..=3 {
+            hot.caught_up(&Arc::from([Value::u64(7), Value::u64(i)]), 1);
+        }
+        assert!(hot.probe(&[0], &values).is_none());
+        assert!(hot.range(&[0], &values, &range).is_none());
+        assert!(hot.is_large(&[0], &values));
+        assert!(hot.ranges.is_empty(), "evicted ranges must leave no empty key buckets");
+        assert_eq!((hot.rows, hot.entries), (1, 2));
+        for i in 0..30 {
+            let bound = Value::u64(i);
+            let r = (1, Bound::Included(&bound), Bound::Unbounded);
+            hot.keep_range(&[0], &values, &r, Arc::new(Vec::new()));
+            hot.keep_range(&[0], &values, &r, Arc::new(Vec::new()));
+        }
+        assert_eq!(hot.entries, 2 + RANGES_PER_PREFIX);
+        hot.shrink(0);
+        assert_eq!((hot.rows, hot.entries), (0, 0));
+    }
 
     fn row(id: u64, blob: blossom_value::BlobRef) -> Row {
         Arc::from([Value::u64(id), Value::Blob(blob)])

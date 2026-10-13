@@ -450,3 +450,24 @@ The next run measures a 262,144-row budget in tiered mode; no throughput claim y
 
 Open cache issue recorded in the project pad: distinct empty probe/range answers cost zero rows in the cache
 counter, so their metadata can grow without triggering row-budget eviction. This remains unfixed.
+
+## Empty-answer cache bounds and wider-cache diagnostic (2026-10-13)
+
+With the existing per-probe cap, a 262,144-row budget (`hot-262k-diagnostic-20261013`, same 180/180-second
+controls and profiling build) produced 11,666 records/s versus the prior 11,439 baseline, a 2.0% single-run
+observation. All 2,596,583 acknowledged records verified with zero loss, misplacement or duplication.
+Peak RSS was 974 / 1,003 / 897 MB. This is modest diagnostic evidence; no default change or acceptance claim.
+
+The hot cache now bounds answer entries and large-prefix markers as well as rows, using the same engine-wide
+budget. Empty probes/ranges participate in LRU eviction; obsolete empty range-key buckets are removed.
+Residency reporting continues to count rows separately. Tests cover absent-key pressure, replacements,
+growth/deletion, promotion to large-prefix markers, range eviction and preservation of previously returned
+snapshots. The regression guard fails on row-only eviction and passes on the new rule. Four engine units,
+10 scoped/database/tiered checks (including oracle comparison with 8-row caches, flushes, compactions and
+restarts), and Clippy passed. This fixes the previously recorded metadata-growth bug.
+
+The next performance experiment will lift the independent 256-row per-probe cap, letting the existing
+one-sixty-fourth budget share govern probe size. The old code comment records that 1,024-row probes cost
+one eighth of throughput in a prior 300,000-record Kafka test, so this is an experiment, not an assumed win.
+The wider partition workload and larger total budget will be measured, including RSS and full verification;
+retain it only if the evidence supports it.
