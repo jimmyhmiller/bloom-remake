@@ -1622,14 +1622,14 @@ belongs to the live value and cannot accumulate dead payloads in a global table.
 of the current value-level engine, independent of the word-level representations below.
 
 **Lanes.** A relation's rows are arrays of words of one lane width. The planner picks `Lane::U32` when every column's
-encoding fits in 32 bits (u8–u32, i8–i32, bool, C-like enums, `Node`, `Mod<N≤32>`, interned and bulk ids, inline
+encoding fits in 32 bits (u8–u32, i8–i32, bool, closed C-like enums, `Node`, `Mod<N≤32>`, interned and bulk ids, inline
 lattices over those) and `Lane::U64` otherwise. Lanes are a `RowShape` parameter of every kernel (§4.10).
 
 **Scalar encodings** (word order = canonical order):
 
 | Type | Encoding |
 |---|---|
-| `bool`, `()`, C-like enum tags | 0/1, 0, variant number |
+| `bool`, `()`, closed C-like enum tags | 0/1, 0, variant number |
 | `u8`…`u64`, `Mod<N≤64>` | zero-extended |
 | `i8`…`i64`, `Duration`, `Instant` | sign-extended, then XOR the lane's top bit |
 | `f64` | IEEE totalOrder key: `if sign { !bits } else { bits ^ 1<<63 }` (LANGUAGE §5.1) |

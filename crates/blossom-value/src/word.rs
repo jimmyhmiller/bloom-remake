@@ -5,7 +5,7 @@
 //!
 //! | Type | Encoding |
 //! |---|---|
-//! | `bool`, `()`, C-like enum tags | 0/1, 0, variant number |
+//! | `bool`, `()`, closed C-like enum tags | 0/1, 0, variant number |
 //! | `u8`…`u64`, `Mod<N≤64>` | zero-extended |
 //! | `i8`…`i64`, `Duration`, `Instant` | sign-extended, then the lane's top bit flipped |
 //! | `f64` | IEEE totalOrder key: `if sign { !bits } else { bits ^ 1<<63 }` |
@@ -97,7 +97,7 @@ pub enum ScalarKind {
         /// The width.
         bits: u16,
     },
-    /// A C-like enum (no variant has a payload): the variant number.
+    /// A closed C-like enum (no payloads or unknown variant): the variant number.
     EnumTag,
     /// `Option<T>` for a `T` with a niche.
     Option(NicheScalar),
@@ -144,7 +144,9 @@ pub fn scalar_kind(types: &TypeTable, ty: TypeId) -> Result<Option<ScalarKind>, 
         TypeDef::Duration => Some(ScalarKind::Duration),
         TypeDef::Instant => Some(ScalarKind::Instant),
         TypeDef::Mod { bits } if *bits <= 64 => Some(ScalarKind::Mod { bits: *bits }),
-        TypeDef::Enum(e) if e.variants.iter().all(|v| v.payload.is_empty()) => Some(ScalarKind::EnumTag),
+        TypeDef::Enum(e) if e.unknown.is_none() && e.variants.iter().all(|v| v.payload.is_empty()) => {
+            Some(ScalarKind::EnumTag)
+        }
         TypeDef::Option(t) => match scalar_kind(types, *t)? {
             Some(ScalarKind::Bool) => Some(ScalarKind::Option(NicheScalar::Bool)),
             Some(ScalarKind::Int(t)) if t.bits() <= 32 => Some(ScalarKind::Option(NicheScalar::Int(t))),
@@ -301,6 +303,65 @@ pub fn decode_scalar(kind: ScalarKind, lane: Lane, word: Word) -> Result<Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_payload_free_enums_and_their_options_are_not_direct_words() {
+        use crate::{EnumDef, RefValueStore, ValueStore, VariantDef};
+        use blossom_base::{QualName, Symbol};
+        use std::sync::Arc;
+        let mut types = TypeTable::new();
+        let variants = || {
+            vec![
+                VariantDef {
+                    name: Symbol::intern("One"),
+                    number: 1,
+                    payload: vec![],
+                    since: None,
+                },
+                VariantDef {
+                    name: Symbol::intern("Unknown"),
+                    number: 9,
+                    payload: vec![],
+                    since: None,
+                },
+            ]
+        };
+        let closed = types
+            .insert(TypeDef::Enum(EnumDef {
+                name: QualName::parse_dotted("Closed").unwrap(),
+                variants: variants(),
+                unknown: None,
+                reserved: vec![],
+            }))
+            .unwrap();
+        let open = types
+            .insert(TypeDef::Enum(EnumDef {
+                name: QualName::parse_dotted("Open").unwrap(),
+                variants: variants(),
+                unknown: Some(9),
+                reserved: vec![],
+            }))
+            .unwrap();
+        let option = types.insert(TypeDef::Option(open)).unwrap();
+        assert_eq!(scalar_kind(&types, closed).unwrap(), Some(ScalarKind::EnumTag));
+        assert_eq!(scalar_kind(&types, open).unwrap(), None);
+        assert_eq!(scalar_kind(&types, option).unwrap(), None);
+        let unknown = Value::UnknownVariant {
+            variant: 9,
+            wire_number: 42,
+            payload: [1, 2, 3].into(),
+        };
+        types.check_value(open, &unknown).unwrap();
+        let mut store = RefValueStore::new(Arc::new(types));
+        for (ty, value) in [(open, unknown.clone()), (option, Value::some(unknown))] {
+            let word = store.intern_value(ty, &value).unwrap();
+            assert_eq!(store.to_value(ty, word).unwrap(), value);
+            assert_eq!(
+                store.fingerprint(ty, word).unwrap(),
+                crate::fp::fingerprint(&value).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn scalar_kind_lane_fit() {

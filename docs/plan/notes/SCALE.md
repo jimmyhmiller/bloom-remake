@@ -721,3 +721,13 @@ The planner, kernel and codegen crates remain placeholders; the retained engine 
 rows and interpreted relational operators. Those files were inspected directly. Next larger work must
 build the physical execution path rather than assume a public Value layout or comparison tweak can
 supply the remaining Kafka throughput gap. Final target remains open.
+
+## Open-enum word classification bug (2026-10-13)
+
+`scalar_kind` incorrectly chose direct tags for payload-free enums with an unknown variant. Valid
+UnknownVariant values preserve their original wire number and payload bytes, and cannot fit a scalar
+word; Option of the enum inherited the classification. Only closed payload-free enums now use direct
+tags. The regression round-trips unknown values and their options through RefValueStore and checks
+fingerprints. It fails under the previous classification and passes after restoration. All 62 value
+units and value Clippy pass. This corrects the documented contract without a public signature or
+wire-format change. The fix was found while building physical row storage.
