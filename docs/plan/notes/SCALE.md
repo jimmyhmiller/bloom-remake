@@ -663,3 +663,12 @@ The 30-second maximum profile began around 78 seconds into maximum load, capture
 lost. Inclusive scan-page work 13.3%, block access 9.1%, block reads 5.1%; shares overlap. It was later
 than earlier profiles, so use a matching offset for the 256 MiB comparison. Artifact:
 `/tmp/blossom-cache-32m-current-max.perf`. Next run uses the same binary and 268,435,456 cache bytes.
+
+## Cache profiling timing correction (2026-10-13)
+
+The 256 MiB sample started at epoch 1791892273.09, 103.0 seconds after its maximum phase began,
+versus 78.3 seconds for the 32 MiB sample. The profiling timer slept from invocation after the phase
+had already begun. Do not use these as matched-time CPU comparisons; each is a standalone 30-second
+sample. Future timers must target the phase-start timestamp plus the offset and reject missed deadlines.
+The two soaks themselves retain matched workload/pinning/durability/phases/fault controls. Final 256 MiB
+throughput, memory and complete verification are still pending.
