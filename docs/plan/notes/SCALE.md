@@ -268,8 +268,9 @@ longer stall at the kill. Next, per the plan: bounded per-tick work.
 
 ## Performance target and CPU investigation (2026-10-13)
 
-The initial request was 50% higher throughput than Kafka (40,179 rec/s). The active goal was subsequently revised
-to **25% higher throughput**, provisionally **33,483 rec/s** against Soak 3's 26,786. Keep the same resources,
+The initial request was 50% higher throughput than Kafka (40,179 rec/s). The active goal is
+**25% higher throughput**, provisionally **33,483 rec/s** against Soak 3's 26,786. The original 50% aspiration
+remains above that acceptance threshold. Keep the same resources,
 workload, strict durability, Java
 clients, kill/restart and full record verification. Track acknowledgement latency and catch-up reads separately.
 The target remains open.
@@ -388,3 +389,34 @@ pair): **12,124 rec/s**, versus 11,721 (+3.4% observed in one run). Steady ack p
 window p99 6.10 s (was 6.46), after-recovery p99 944.64 ms (was 842.75). Do not infer a general latency improvement
 from these short windows. All **1,209,993** acknowledged records verified after kill/restart, with zero lost,
 misplaced or duplicated. The 25%-above-Kafka acceptance goal remains open.
+
+## Rejected performance experiments (2026-10-13)
+
+Two private engine experiments used the same 60 s maximum / 180 s paced workload, 2,000 records/s,
+10 topics × 12 partitions, replication factor 3, the same CPU pinning, and kill/restart controls as
+`bulk-after-20261013` (12,124 records/s). Equality-only hash indexes, promoted for range queries,
+produced 11,509 records/s and verified 1,180,989 records. Hash accumulation of rule head weights,
+sorted canonically before application, produced 10,302 records/s and verified 1,109,314 records. Both were reverted: neither showed
+a throughput improvement. Record verification found no losses, misplacement, or duplicates.
+Artifacts: `~/soak-results/{hash-index,head-hash}-after-20261013` on the benchmark server.
+
+A separate storage experiment returned only the newest eligible version per key from each SST scan;
+older versions cannot win the subsequent cross-source merge. Paging still counts physical keys,
+including keys with no version eligible as of the read. A direct test checked exactly one emitted
+version, alternating puts/deletes, history spanning blocks, and a page boundary. The existing model,
+reopen, and crash tests also passed. The matched short run produced 12,094 records/s versus the retained 12,124 baseline, with all
+1,213,945 records verified and no losses, misplacement or duplicates. This showed no clear gain;
+the storage experiment and its new test were reverted. Artifacts: `~/soak-results/scan-newest-after-20261013`.
+
+The grouped-producer view experiment (`producer-group-after-20261013`) exposed each producer's
+materializing batches as a separate indexed group instead of invoking producers_in and producer_batches
+from both alternatives. It passed four simulator produce/read-after-ack tests, the default multi-process
+Kafka tests, and both explicitly requested ignored full-tier kill/partition/catch-up tests. The latency
+measurement remains opt-in. The server verified all 1,131,537 acknowledged records with zero loss,
+misplacement, or duplication. Maximum throughput was 10,666 records/s; the view was reverted.
+
+A 20-second leaf-only CPU sample near the end of maximum load crossed the max/drain phase boundary
+(`/tmp/blossom-producer-group-leaf.perf`, 2,831 samples, none lost). Value comparison, memcmp, hashing,
+SST scans, and relational evaluation remained prominent. This is diagnostic evidence, not a controlled
+profile comparison or acceptance result. Next: a symbolized call-stack profile of the retained version
+under a longer maximum phase, to identify a larger engine bottleneck.
