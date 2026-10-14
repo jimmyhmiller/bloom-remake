@@ -1,0 +1,420 @@
+%YAML 1.2
+---
+# Blossom (.bls). Tokens follow crates/blossom-syntax/src/lexer.rs; keywords follow docs/design/LANGUAGE.md
+# §2.3 (hard keywords) and Appendix C (contextual keywords, which are coloured only in the positions they hold).
+name: Blossom
+scope: source.blossom
+file_extensions:
+  - bls
+
+variables:
+  ident: '[A-Za-z_][A-Za-z0-9_]*'
+  raw_or_ident: '(?:r#)?{{ident}}'
+  int_suffix: '(?:u8|u16|u32|u64|u128|i8|i16|i32|i64|i128)'
+  duration_suffix: '(?:ns|us|ms|s|m|h|d)'
+  primitive: '(?:u8|u16|u32|u64|u128|i8|i16|i32|i64|i128|f64|bool)'
+  builtin_type: >-
+    (?:String|Bytes|Instant|Duration|Option|Vec|Set|Map|Node|Result|Ordering)
+  control: >-
+    (?:if|else|match|for|while|in|where|not|next|as)
+  declaration: >-
+    (?:fn|struct|enum|type|const|param|table|view|channel|input|output|lattice|module|protocol|choreography
+    |program|spec|invariant|migrate|translate|impl|extern|scratch|interpose|loopback|bootstrap)
+  modifier: '(?:pub|static|override|seal)'
+  statement: '(?:emit|delete|upsert|send|let|on)'
+  hard_keyword: >-
+    (?:as|bootstrap|channel|choreography|const|delete|else|emit|enum|extern|false|fn|for|if|impl|import|in
+    |include|input|interpose|invariant|lattice|let|loopback|match|migrate|module|next|not|on|output|override|param
+    |program|protocol|pub|scratch|seal|self|send|spec|static|struct|table|translate|true|type|upsert|use|view
+    |where|while)
+  item_modifier: >-
+    (?:durable|soft|sealed|zset|bag|final|monotone|morphism|bimorphism|antitone|threshold|stable)
+  item_kind: '(?:cell|timer|fact|service|aggregate|snapshot|block|acl)'
+  role_kind: '(?:process|cluster|external|client|keyed)'
+  clause: >-
+    (?:like|key|ttl|max|range|resolve|partition|by|over|sealed|producers|exactly_once)
+  policy: '(?:choose|choose_rand|choose_least|choose_most|merge|sticky)'
+  body_prefix: '(?:outer|inserted|deleted|sealed|per|ever|sent)'
+  bang_clause: '(?:per|by|default|least|most|sticky|durable|release|asc|desc)'
+  lattice_fold: '(?:lset|lmax|lmin|lbool|lmap|lbag|lpset)'
+  spec_word: >-
+    (?:nodes|assign|faults|liveness|eventually|within|ticks|after|eff|prove|induction|using|expect|confluent
+    |deterministic|check|ldfi|bmc|smt|sim|asp|holds|fails|never)
+  timer_word: '(?:every|ticks|times|once|after)'
+
+contexts:
+  prototype:
+    - include: comments
+
+  main:
+    - include: attributes
+    - include: items
+    - include: expressions
+
+  # ------------------------------------------------------------------ comments
+  comments:
+    - match: '///(?!/)|//!'
+      scope: punctuation.definition.comment.blossom
+      push: doc_comment
+    - match: '//'
+      scope: punctuation.definition.comment.blossom
+      push: line_comment
+    - match: '/\*'
+      scope: punctuation.definition.comment.begin.blossom
+      push: block_comment
+    # `#1` is a field number and `#[` an attribute; any other `#` starts a comment.
+    - match: '#(?![0-9\[]|!\[)'
+      scope: punctuation.definition.comment.blossom
+      push: hash_comment
+
+  doc_comment:
+    - meta_include_prototype: false
+    - meta_scope: comment.line.documentation.blossom
+    - match: '`[^`\n]*`'
+      scope: markup.raw.inline.blossom
+    - match: '$\n?'
+      pop: true
+
+  line_comment:
+    - meta_include_prototype: false
+    - meta_scope: comment.line.double-slash.blossom
+    - match: '$\n?'
+      pop: true
+
+  hash_comment:
+    - meta_include_prototype: false
+    - meta_scope: comment.line.number-sign.blossom
+    - match: '$\n?'
+      pop: true
+
+  block_comment:
+    - meta_include_prototype: false
+    - meta_scope: comment.block.blossom
+    - match: '/\*'
+      push: block_comment
+    - match: '\*/'
+      scope: punctuation.definition.comment.end.blossom
+      pop: true
+
+  # ------------------------------------------------------------------ attributes
+  attributes:
+    - match: '(#!?\[)\s*({{ident}})'
+      captures:
+        1: punctuation.definition.annotation.begin.blossom
+        2: variable.annotation.blossom
+      push: attribute_body
+
+  attribute_body:
+    - meta_scope: meta.annotation.blossom
+    - match: '\]'
+      scope: punctuation.definition.annotation.end.blossom
+      pop: true
+    - match: '\['
+      push: attribute_brackets
+    - include: expressions
+
+  attribute_brackets:
+    - match: '\]'
+      pop: true
+    - match: '\['
+      push: attribute_brackets
+    - include: expressions
+
+  # ------------------------------------------------------------------ items
+  items:
+    - match: '\b(program)\s+({{raw_or_ident}})(?:\s+(version)\b)?'
+      captures:
+        1: keyword.declaration.program.blossom
+        2: entity.name.namespace.blossom
+        3: keyword.other.blossom
+    - match: '\b(edition)\b(?=\s+\d)'
+      scope: keyword.other.blossom
+    # role Server: cluster;   role Room: keyed;
+    - match: '\b(role)\s+({{raw_or_ident}})(?:\s*(:)\s*({{role_kind}})\b)?'
+      captures:
+        1: keyword.declaration.role.blossom
+        2: entity.name.type.role.blossom
+        3: punctuation.separator.blossom
+        4: storage.modifier.role-kind.blossom
+    # at Server, Browser {
+    - match: '^\s*(at)\b(?=\s+[A-Z])'
+      captures:
+        1: keyword.other.placement.blossom
+    # Rule labels: `join: on …`, `tick: while …`.
+    - match: '^\s*({{ident}})\s*(:)(?!:)(?=\s*(?:on|while|monotone)\b)'
+      captures:
+        1: entity.name.label.blossom
+        2: punctuation.separator.blossom
+    # Contextual item kinds and modifiers at the start of an item: `durable cell n: u64`, `timer tick every 50ms`.
+    - match: '^\s*((?:{{item_modifier}}\s+)*)({{item_kind}})\s+({{raw_or_ident}})'
+      captures:
+        1: storage.modifier.blossom
+        2: keyword.declaration.blossom
+        3: entity.name.function.relation.blossom
+    - match: '^\s*((?:{{item_modifier}}\s+)+)(?=(?:{{hard_keyword}}|{{ident}})\b)'
+      captures:
+        1: storage.modifier.blossom
+    - match: '\b(fn)\s+({{raw_or_ident}})'
+      captures:
+        1: keyword.declaration.function.blossom
+        2: entity.name.function.blossom
+    - match: '\b(struct|enum|type|lattice|protocol|choreography|module)\s+({{raw_or_ident}})'
+      captures:
+        1: keyword.declaration.type.blossom
+        2: entity.name.type.blossom
+    - match: '\b(table|view|channel|input|output|scratch|interpose|loopback)\s+({{raw_or_ident}})(?=\s*[(<{;=])'
+      captures:
+        1: keyword.declaration.relation.blossom
+        2: entity.name.function.relation.blossom
+    - match: '\b(const|param|static)\s+({{raw_or_ident}})'
+      captures:
+        1: keyword.declaration.constant.blossom
+        2: entity.name.constant.blossom
+    - match: '\b(spec|invariant|migrate|translate|impl)\s+({{raw_or_ident}})'
+      captures:
+        1: keyword.declaration.blossom
+        2: entity.name.blossom
+    - match: '\b(use|import|include)\b'
+      scope: keyword.control.import.blossom
+    # Declaration clauses after a column list: `key(g) resolve choose`, `ttl 30s`.
+    - match: '\b(resolve)\s+({{policy}})\b'
+      captures:
+        1: keyword.other.clause.blossom
+        2: constant.language.policy.blossom
+    - match: '(?<=\))\s*(?!resolve\s+{{policy}}\b)({{clause}})\b'
+      captures:
+        1: keyword.other.clause.blossom
+    # Atom suffixes: `hello(name) from b`, `r(x) weight w`.
+    - match: '(?<=\))\s*(from|principal|weight)\b(?=\s+[A-Za-z_(])'
+      captures:
+        1: keyword.other.clause.blossom
+    - match: '\b(every|once)\b(?=\s+[0-9A-Z])'
+      scope: keyword.other.timer.blossom
+
+  # ------------------------------------------------------------------ expressions
+  expressions:
+    # A raw identifier `r#match` is a name, never a keyword or a `#` comment.
+    - match: '\br#{{ident}}(?=\s*\()'
+      scope: variable.function.blossom
+    - match: '\br#{{ident}}'
+      scope: variable.other.blossom
+    - include: strings
+    - include: numbers
+    # Field names, where any hard keyword is an ordinary name: `r.output`, `table started(at: Instant, table: u64)`.
+    - match: '(\.)\s*({{raw_or_ident}})'
+      captures:
+        1: punctuation.accessor.blossom
+        2: variable.other.member.blossom
+    - match: '\b({{raw_or_ident}})\s*(?=:(?!:))'
+      scope: variable.other.member.blossom
+    - match: '#\d+'
+      scope: constant.numeric.field-number.blossom
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.blossom
+    - match: '\bself\b'
+      scope: variable.language.self.blossom
+    - match: '\b{{control}}\b'
+      scope: keyword.control.blossom
+    - match: '\b{{statement}}\b'
+      scope: keyword.other.statement.blossom
+    - match: '\b{{modifier}}\b'
+      scope: storage.modifier.blossom
+    - match: '\b{{declaration}}\b'
+      scope: keyword.declaration.blossom
+    # Body literal prefixes: `per games(g)`, `not inserted r(x)`, `forall x in …`, `any { … }`.
+    - match: '\b{{body_prefix}}\b(?=\s+{{ident}})'
+      scope: keyword.other.literal-prefix.blossom
+    - match: '\bfinal\b(?=\s+(?:{{ident}}|not\b))'
+      scope: keyword.other.literal-prefix.blossom
+    - match: '\bforall\b(?=\s*(?:{{ident}}|\())'
+      scope: keyword.other.quantifier.blossom
+    - match: '\bany\b(?=\s*\{)'
+      scope: keyword.other.quantifier.blossom
+    - match: '\bquorum\b(?=\s+{{ident}}\s+in\b)'
+      scope: keyword.other.quantifier.blossom
+    # Bang calls `count!(x)`, `index!{ … }`, with their clause words inside.
+    - match: '\b({{ident}})(!)(?=[({])'
+      captures:
+        1: support.function.bang.blossom
+        2: punctuation.definition.bang.blossom
+    - match: '\b{{bang_clause}}\b(?=\s+[A-Za-z0-9_(\-"])'
+      scope: keyword.other.clause.blossom
+    - match: '\b({{lattice_fold}})(?=\s*\{)'
+      scope: support.function.lattice.blossom
+    - match: '\b(set|map)(?=\s*\[)'
+      scope: support.function.collection.blossom
+    - match: '\b{{spec_word}}\b(?=\s*\{|\s+[0-9A-Za-z_])'
+      scope: keyword.other.spec.blossom
+    # Types.
+    - match: '\b{{primitive}}\b'
+      scope: storage.type.primitive.blossom
+    - match: '\b{{builtin_type}}\b'
+      scope: support.type.blossom
+    - match: '\b[A-Z][A-Z0-9_]*[A-Z0-9]\b'
+      scope: constant.other.blossom
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.type.blossom
+    # Calls and atoms: `f(x)`, `games(g, x, o, _)`.
+    - match: '\b({{raw_or_ident}})(?=\s*\()'
+      scope: variable.function.blossom
+    - match: '\b_\b'
+      scope: variable.language.wildcard.blossom
+    - include: operators
+    - include: punctuation
+
+  operators:
+    - match: '<\.\.=|\.\.=|<\.\.|\.\.'
+      scope: keyword.operator.range.blossom
+    - match: '::'
+      scope: punctuation.accessor.path.blossom
+    - match: '->|=>'
+      scope: keyword.operator.arrow.blossom
+    - match: '==|!=|<=|>=|<(?![<])|>(?![>])'
+      scope: keyword.operator.comparison.blossom
+    - match: '&&|\|\|'
+      scope: keyword.operator.logical.blossom
+    - match: '<<|>>|&|\||\^|~'
+      scope: keyword.operator.bitwise.blossom
+    - match: '\*\*|\+\+|[-+*/%]'
+      scope: keyword.operator.arithmetic.blossom
+    - match: '='
+      scope: keyword.operator.assignment.blossom
+    - match: '\?'
+      scope: keyword.operator.try.blossom
+    - match: '@'
+      scope: keyword.operator.at.blossom
+
+  punctuation:
+    - match: ';'
+      scope: punctuation.terminator.blossom
+    - match: ','
+      scope: punctuation.separator.blossom
+    - match: ':'
+      scope: punctuation.separator.type.blossom
+    - match: '\{'
+      scope: punctuation.section.block.begin.blossom
+      push: block
+    - match: '\}'
+      scope: invalid.illegal.stray-bracket.blossom
+    - match: '\('
+      scope: punctuation.section.group.begin.blossom
+      push: group
+    - match: '\)'
+      scope: invalid.illegal.stray-bracket.blossom
+    - match: '\['
+      scope: punctuation.section.brackets.begin.blossom
+      push: brackets
+    - match: '\]'
+      scope: invalid.illegal.stray-bracket.blossom
+
+  block:
+    - meta_scope: meta.block.blossom
+    - match: '\}'
+      scope: punctuation.section.block.end.blossom
+      pop: true
+    - include: main
+
+  group:
+    - meta_scope: meta.group.blossom
+    - match: '\)'
+      scope: punctuation.section.group.end.blossom
+      pop: true
+    - include: main
+
+  brackets:
+    - meta_scope: meta.brackets.blossom
+    - match: '\]'
+      scope: punctuation.section.brackets.end.blossom
+      pop: true
+    - include: main
+
+  # ------------------------------------------------------------------ literals
+  numbers:
+    - match: '\b0x[0-9A-Fa-f_]+(I|{{int_suffix}})?\b'
+      scope: constant.numeric.integer.hexadecimal.blossom
+      captures:
+        1: storage.type.numeric.blossom
+    - match: '\b0b[01_]+({{int_suffix}})?\b'
+      scope: constant.numeric.integer.binary.blossom
+      captures:
+        1: storage.type.numeric.blossom
+    - match: '\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d[\d_]*)?({{duration_suffix}})\b'
+      scope: constant.numeric.duration.blossom
+      captures:
+        1: storage.type.numeric.blossom
+    - match: '\b\d[\d_]*(?:\.\d[\d_]*(?:[eE][+-]?\d[\d_]*)?|[eE][+-]?\d[\d_]*)(f64)?\b'
+      scope: constant.numeric.float.blossom
+      captures:
+        1: storage.type.numeric.blossom
+    - match: '\b\d[\d_]*(f64)\b'
+      scope: constant.numeric.float.blossom
+      captures:
+        1: storage.type.numeric.blossom
+    - match: '\b\d[\d_]*({{int_suffix}})?\b'
+      scope: constant.numeric.integer.decimal.blossom
+      captures:
+        1: storage.type.numeric.blossom
+
+  strings:
+    - match: '(b?r)(#*)"'
+      scope: punctuation.definition.string.begin.blossom
+      captures:
+        1: storage.type.string.blossom
+      push: raw_string
+    - match: '(f)"'
+      scope: punctuation.definition.string.begin.blossom
+      captures:
+        1: storage.type.string.blossom
+      push: fstring
+    - match: '(b)?"'
+      scope: punctuation.definition.string.begin.blossom
+      captures:
+        1: storage.type.string.blossom
+      push: string
+
+  string:
+    - meta_include_prototype: false
+    - meta_scope: string.quoted.double.blossom
+    - match: '"'
+      scope: punctuation.definition.string.end.blossom
+      pop: true
+    - include: escapes
+
+  raw_string:
+    - meta_include_prototype: false
+    - meta_scope: string.quoted.raw.blossom
+    - match: '"\2'
+      scope: punctuation.definition.string.end.blossom
+      pop: true
+
+  fstring:
+    - meta_include_prototype: false
+    - meta_scope: string.interpolated.blossom
+    - match: '"'
+      scope: punctuation.definition.string.end.blossom
+      pop: true
+    - match: '\{\{|\}\}'
+      scope: constant.character.escape.blossom
+    - match: '\{'
+      scope: punctuation.section.interpolation.begin.blossom
+      push: fstring_hole
+    - match: '\}'
+      scope: invalid.illegal.lone-brace.blossom
+    - include: escapes
+
+  fstring_hole:
+    - clear_scopes: 1
+    - meta_scope: meta.interpolation.blossom
+    - match: '\}'
+      scope: punctuation.section.interpolation.end.blossom
+      pop: true
+    # `{x:>8}`: a format spec runs from a top-level `:` to the closing brace.
+    - match: ':(?!:)[^}"\n]*'
+      scope: constant.other.format-spec.blossom
+    - include: expressions
+
+  escapes:
+    - match: '\\(?:[nrt\\"''0]|u\{[0-9A-Fa-f]{1,6}\})'
+      scope: constant.character.escape.blossom
+    - match: '\\.'
+      scope: invalid.illegal.escape.blossom
