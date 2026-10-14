@@ -91,7 +91,9 @@ impl Fixture {
             .with_workers(2)
             .with_map_cache_rows(128)
             .with_map_cache_joins(true)
-            .with_lazy_indexes(true);
+            .with_lazy_indexes(true)
+            .with_pipeline_batches(true)
+            .with_inferred_keys(true);
         Fixture {
             schema: DurableSchema::of(artifact.program.get()),
             artifact,

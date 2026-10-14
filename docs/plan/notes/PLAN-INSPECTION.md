@@ -50,3 +50,12 @@ Validation: an actual six-tick upsert trace is generated and replayed over a thr
 ## Experimental execution strategies
 
 Checked replay now accepts `--map-cache-rows N`, `--map-cache-joins`, and `--lazy-indexes`. Corresponding deployment storage settings select bounded retained output bags and non-materializing join cost estimates. `blossom plan --deploy` reflects the deployment's worker/storage/operator choices. Map-cache counters include the prefix since engine creation; ordinary work/timing and store counters describe the selected window. [Retained-plan experiments](RETAINED-PLAN-EXPERIMENTS.md) document eligibility, semantics and measured results. These switches select implemented strategies; they do not enable full pipeline fusion.
+
+
+## Experimental shared stage storage
+
+`storage.infer_keys = true` / replay `--infer-keys` infers compact physical keys of single-writer deterministic derived views. JSON `physical_key` describes the selected hint. It does not add language constraints or remove distinct conflicting payload rows.
+
+`storage.pipeline_batches = true` / replay `--pipeline-batches` lets eligible single-writer non-durable stage stores adopt or merge the evaluator's consolidated output bag. Small updates maintain indexes; large batches invalidate indexes for on-demand construction. Leading-prefix equality/range probes read the stage's ordered bag directly. Persistent identity stages over non-durable, non-lattice derived sources alias their source, eliminating their own stores. Original logical views and error/aggregate/recursion barriers remain observable.
+
+`batch_weight_updates` counts published nonzero consolidated weights. These updates replace counted support writes and are still physical work. `batch_backed` distinguishes buffered stages from eliminated aliases. Comparison JSON includes optional physical totals separately from logical support-write totals; unavailable counters remain null. Both settings default false pending measurements; result-bag adoption does not eliminate intermediate row buffers or compile rule expressions.

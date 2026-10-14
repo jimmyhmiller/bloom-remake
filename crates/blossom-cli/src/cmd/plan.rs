@@ -74,6 +74,8 @@ fn drive(args: Args) -> Result<String, String> {
         physical.map_cache_rows = spec.map_cache_rows;
         physical.map_cache_joins = spec.map_cache_joins;
         physical.lazy_indexes = spec.lazy_indexes;
+        physical.pipeline_batches = spec.pipeline_batches;
+        physical.infer_keys = spec.infer_keys;
         physical.hot_rows = spec.hot_rows;
         physical.in_memory = !spec.tiered;
         artifact
@@ -204,8 +206,41 @@ pub(super) fn compare(a: &serde_json::Value, b: &serde_json::Value) -> Result<se
         let reference = a_plan.rules.iter().find(|a| a.id == r.id);
         per_rule.push(serde_json::json!({"id":r.id,"head":r.head,"reference":reference.map(|r| &r.work),"candidate":r.work,"operator":r.operator,"reference_elapsed_ns":reference.and_then(|r| r.elapsed_ns),"candidate_elapsed_ns":r.elapsed_ns}));
     }
+    let physical = |p: &PlanReport| -> Option<serde_json::Value> {
+        let mut totals = [0u64; 7];
+        for s in &p.stores {
+            let m = s.operations.as_ref()?;
+            for (total, value) in totals.iter_mut().zip([
+                m.probe_calls,
+                m.membership_changes,
+                m.secondary_index_row_updates,
+                m.secondary_index_build_rows,
+                m.bulk_retracted_rows,
+                m.bulk_index_clears,
+                m.batch_weight_updates,
+            ]) {
+                *total += value;
+            }
+        }
+        let mut out = serde_json::Map::new();
+        for (name, total) in [
+            "probe_calls",
+            "membership_changes",
+            "secondary_index_row_updates",
+            "secondary_index_build_rows",
+            "bulk_retracted_rows",
+            "bulk_index_clears",
+            "batch_weight_updates",
+        ]
+        .iter()
+        .zip(totals)
+        {
+            out.insert((*name).to_owned(), total.into());
+        }
+        Some(out.into())
+    };
     Ok(
-        serde_json::json!({"workload":a["workload"],"reference_execution":a["execution"],"candidate_execution":b["execution"],"ticks":a["ticks"],"totals":rows,"rules":per_rule,"reference_stores":a_plan.stores,"candidate_stores":b_plan.stores,"reference_replay_elapsed_ns":a["replay_elapsed_ns"],"candidate_replay_elapsed_ns":b["replay_elapsed_ns"],"limitations":["Elapsed time is replay wall time, not CPU; repeat counterbalanced runs with other work idle.","Counters do not measure physical index updates, allocations, I/O waits or native membership writes.","Replay uses in-memory recovered state; broker durability and cold-storage costs need live measurement."]}),
+        serde_json::json!({"workload":a["workload"],"reference_execution":a["execution"],"candidate_execution":b["execution"],"ticks":a["ticks"],"totals":rows,"reference_physical_totals":physical(&a_plan),"candidate_physical_totals":physical(&b_plan),"rules":per_rule,"reference_stores":a_plan.stores,"candidate_stores":b_plan.stores,"reference_replay_elapsed_ns":a["replay_elapsed_ns"],"candidate_replay_elapsed_ns":b["replay_elapsed_ns"],"limitations":["Elapsed time is replay wall time, not CPU; repeat counterbalanced runs with other work idle.","Logical support writes exclude native membership and batch updates; inspect optional physical totals separately. Allocations, I/O waits and database index work are unmeasured.","Replay uses in-memory recovered state; broker durability and cold-storage costs need live measurement."]}),
     )
 }
 
@@ -247,7 +282,7 @@ mod deployment_plan_tests {
         let mut file = file;
         let source =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/integration/fixtures/engine/retained_map.bls");
-        writeln!(file,"format = 1\n[deployment]\nid = \"plan\"\nprogram = \"retained_map\"\nversion = 1\nsource = {:?}\n[[node]]\nname = \"n1\"\naddr = \"127.0.0.1:29999\"\nprincipal = \"spiffe://plan/n1\"\n[security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"plan-test-data\"\neval_workers = 2\nmap_cache_rows = 128\nmap_cache_joins = true\nlazy_indexes = true",source.to_str().unwrap()).unwrap();
+        writeln!(file,"format = 1\n[deployment]\nid = \"plan\"\nprogram = \"retained_map\"\nversion = 1\nsource = {:?}\n[[node]]\nname = \"n1\"\naddr = \"127.0.0.1:29999\"\nprincipal = \"spiffe://plan/n1\"\n[security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"plan-test-data\"\neval_workers = 2\nmap_cache_rows = 128\nmap_cache_joins = true\nlazy_indexes = true\npipeline_batches = true\ninfer_keys = true",source.to_str().unwrap()).unwrap();
         drop(file);
         let json = drive(Args {
             file: None,
@@ -265,6 +300,7 @@ mod deployment_plan_tests {
         assert_eq!(report.evaluation_workers, 2);
         assert_eq!(report.map_cache.row_budget, 128);
         assert!(report.lazy_indexes);
-        assert!(report.rules.iter().any(|r| r.operator == "retained-map"));
+        assert!(report.rules.iter().any(|r| r.operator == "retained-pipeline-batch"));
+        assert!(report.stores.iter().any(|s| s.batch_backed));
     }
 }

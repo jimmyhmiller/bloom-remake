@@ -500,6 +500,18 @@ impl Executors {
         self
     }
 
+    /// Let single-writer pipeline stages own consolidated result bags directly.
+    pub fn with_pipeline_batches(mut self, enabled: bool) -> Executors {
+        self.engine.pipeline_batches = enabled;
+        self
+    }
+
+    /// Infer compact physical keys for deterministic derived relations.
+    pub fn with_inferred_keys(mut self, enabled: bool) -> Executors {
+        self.engine.infer_keys = enabled;
+        self
+    }
+
     /// Whether the engines tier the durable tables they can (`EngineConfig::in_memory` when not).
     pub fn tiered(mut self, tiered: bool) -> Executors {
         self.engine.in_memory = !tiered;

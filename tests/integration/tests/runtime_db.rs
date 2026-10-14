@@ -539,6 +539,10 @@ fn storage_tiered_is_on_unless_a_deployment_opts_out() {
     assert!(DeploymentSpec::parse(&format!("{text}hot_rows = 0\n"), &dir).is_err());
     assert_eq!(DeploymentSpec::parse(&text, &dir).unwrap().eval_workers, 1);
     assert_eq!(DeploymentSpec::parse(&text, &dir).unwrap().map_cache_rows, 0);
+    assert!(!DeploymentSpec::parse(&text, &dir).unwrap().pipeline_batches);
+    assert!(!DeploymentSpec::parse(&text, &dir).unwrap().infer_keys);
+    let pipeline = DeploymentSpec::parse(&format!("{text}pipeline_batches = true\ninfer_keys = true\n"), &dir).unwrap();
+    assert!(pipeline.pipeline_batches && pipeline.infer_keys);
     assert_eq!(
         DeploymentSpec::parse(&format!("{text}map_cache_rows = 4096\n"), &dir)
             .unwrap()

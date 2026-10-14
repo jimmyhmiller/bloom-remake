@@ -38,6 +38,8 @@ fn retained_maps_match_serial_state_through_evictions_duplicates_and_reset() {
                 map_cache_rows: budget,
                 map_cache_joins: true,
                 lazy_indexes: true,
+                pipeline_batches: true,
+                infer_keys: true,
                 ..Default::default()
             },
         )
@@ -140,6 +142,8 @@ fn retained_maps_match_serial_state_through_evictions_duplicates_and_reset() {
             map_cache_rows: 128,
             map_cache_joins: true,
             lazy_indexes: true,
+            pipeline_batches: true,
+            infer_keys: true,
             ..Default::default()
         },
     );
@@ -182,6 +186,8 @@ fn retained_map_errors_match_and_reset_discards_outputs() {
                 map_cache_rows: budget,
                 map_cache_joins: true,
                 lazy_indexes: true,
+                pipeline_batches: true,
+                infer_keys: true,
                 ..Default::default()
             },
         )

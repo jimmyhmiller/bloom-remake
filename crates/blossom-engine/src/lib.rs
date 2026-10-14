@@ -13,6 +13,7 @@ mod cold;
 mod engine;
 mod expr;
 mod func;
+mod functional_keys;
 mod inspection;
 mod map_cache;
 mod probe_cache;

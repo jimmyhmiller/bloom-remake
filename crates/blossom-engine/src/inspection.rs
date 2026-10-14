@@ -37,6 +37,11 @@ pub struct StoreReport {
     pub indexes: Vec<Vec<usize>>,
     pub reasons: Vec<String>,
     pub operations: Option<StoreOperations>,
+    /// Physical key hint; never a new language-level key constraint.
+    #[serde(default)]
+    pub physical_key: Option<Vec<usize>>,
+    #[serde(default)]
+    pub batch_backed: bool,
 }
 /// Versioned snapshot. Unknown metrics are deliberately not represented as zero measurements.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +69,9 @@ pub struct StoreOperations {
     pub secondary_index_build_rows: u64,
     pub bulk_retracted_rows: u64,
     pub bulk_index_clears: u64,
+    /// Consolidated bag weights published; these are physical work, even with zero support writes.
+    #[serde(default)]
+    pub batch_weight_updates: u64,
 }
 
 impl PlanReport {

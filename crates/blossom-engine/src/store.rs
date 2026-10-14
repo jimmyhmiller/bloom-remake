@@ -926,6 +926,8 @@ pub(crate) struct Store {
     /// A construct-private boolean view whose support is proven to be at most one in valid ticks.
     /// It needs only membership and deltas, with no counted support or maintained probe indexes.
     boolean: Option<BTreeSet<Row>>,
+    /// A single-writer pipeline stage owns its already-consolidated output bag directly.
+    batch: Option<BTreeMap<Row, i64>>,
     /// Lattice relation: each cell's live contributions, and its merged row.
     contributions: BTreeMap<Vec<Value>, BTreeSet<Row>>,
     merged: BTreeMap<Vec<Value>, Row>,
@@ -965,6 +967,7 @@ fn holds(row: &[Value], cols: &[usize], values: &[Value]) -> bool {
 /// A store's present rows, in order.
 pub(crate) enum Present<'a> {
     Set(crate::row_support::Iter<'a>),
+    Batch(std::collections::btree_map::Keys<'a, Row, i64>),
     Boolean(std::collections::btree_set::Iter<'a, Row>),
     Lattice(std::collections::btree_set::Iter<'a, Row>),
 }
@@ -975,6 +978,7 @@ impl<'a> Iterator for Present<'a> {
     fn next(&mut self) -> Option<&'a Row> {
         match self {
             Present::Set(it) => it.next().map(|(row, _)| row),
+            Present::Batch(it) => it.next(),
             Present::Boolean(it) => it.next(),
             Present::Lattice(it) => it.next(),
         }
@@ -984,6 +988,7 @@ impl<'a> Iterator for Present<'a> {
 enum RetractedRows<'a> {
     Counted(crate::row_support::Drain<'a>),
     Boolean(std::collections::btree_set::IntoIter<Row>),
+    Batch(std::collections::btree_map::IntoKeys<Row, i64>),
 }
 impl Iterator for RetractedRows<'_> {
     type Item = Row;
@@ -991,6 +996,7 @@ impl Iterator for RetractedRows<'_> {
         match self {
             Self::Counted(rows) => rows.next().map(|(r, _)| r),
             Self::Boolean(rows) => rows.next(),
+            Self::Batch(rows) => rows.next(),
         }
     }
 }
@@ -1003,9 +1009,14 @@ struct InspectionCounters {
     index_build_rows: std::sync::atomic::AtomicU64,
     bulk_rows: u64,
     bulk_clears: u64,
+    batch_updates: u64,
 }
 
 impl Store {
+    pub(crate) fn inspection_key(&self) -> Option<Vec<usize>> {
+        self.declared_key.clone()
+    }
+
     pub(crate) fn lazy_estimates(&mut self, on: bool) {
         self.lazy_estimates = on;
     }
@@ -1021,6 +1032,7 @@ impl Store {
             secondary_index_build_rows: m.index_build_rows.load(std::sync::atomic::Ordering::Relaxed),
             bulk_retracted_rows: m.bulk_rows,
             bulk_index_clears: m.bulk_clears,
+            batch_weight_updates: m.batch_updates,
         })
     }
     fn count_probe(&self) {
@@ -1036,6 +1048,78 @@ impl Store {
             blob_refs: blobs.then(BTreeMap::new),
             ..Store::default()
         }
+    }
+
+    pub(crate) fn make_batch(&mut self) {
+        self.batch = Some(BTreeMap::new());
+        // A pipeline stage builds only the indexes its readers actually use.
+        self.lazy_estimates = true;
+    }
+
+    pub(crate) fn is_batch(&self) -> bool {
+        self.batch.is_some()
+    }
+
+    /// Publish a consolidated differential bag. Empty stages take ownership of the evaluator's
+    /// result tree; populated stages merge it. Indexes belong to a completed stage version, rather
+    /// than receiving one maintenance operation per output row on every previous probe shape.
+    pub(crate) fn apply_batch(&mut self, mut heads: BTreeMap<Row, i64>) -> ExprResult<()> {
+        heads.retain(|_, w| *w != 0);
+        if heads.is_empty() {
+            return Ok(());
+        }
+        if let Some(m) = &mut self.inspection {
+            m.batch_updates += heads.len() as u64;
+        }
+        let batch = self
+            .batch
+            .as_mut()
+            .ok_or_else(|| bug("batch write to ordinary store".into()))?;
+        let mut changes = Vec::new();
+        if batch.is_empty() {
+            if heads.values().any(|w| *w < 0) {
+                return Err(bug("negative support in an empty pipeline stage".into()));
+            }
+            changes.extend(heads.keys().cloned().map(|r| (r, true)));
+            *batch = heads;
+        } else {
+            for (row, w) in heads {
+                let before = batch.get(&row).copied().unwrap_or(0);
+                let after = before
+                    .checked_add(w)
+                    .ok_or_else(|| bug("pipeline support overflow".into()))?;
+                if after < 0 {
+                    return Err(bug(format!("the support of {row:?} went negative")));
+                }
+                if after == 0 {
+                    batch.remove(&row);
+                } else {
+                    batch.insert(row.clone(), after);
+                }
+                if (before > 0) != (after > 0) {
+                    changes.push((row, after > 0));
+                }
+            }
+        }
+        self.touched = true;
+        // Rebuild a completed version only when the changed batch is large enough to justify
+        // it. Small persistent updates keep their live indexes incrementally.
+        if !changes.is_empty() && changes.len().saturating_mul(2) >= self.present_len() {
+            if let Some(m) = &mut self.inspection {
+                m.bulk_clears += self.indexes.get_mut().len() as u64;
+            }
+            self.indexes.get_mut().clear();
+            self.estimate_samples.get_mut().clear();
+            self.index_epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        for (row, gained) in changes {
+            if gained {
+                self.show(row);
+            } else {
+                self.hide(&row);
+            }
+        }
+        Ok(())
     }
 
     pub fn make_boolean(&mut self) {
@@ -1072,12 +1156,35 @@ impl Store {
     /// Compile the physical support key once; lattice contributions retain full-row support.
     pub fn with_schema(mut self, schema: &blossom_ir::core::Schema, types: &blossom_value::TypeTable) -> Self {
         self.declared_key = Some(schema.key.iter().map(|c| c.index()).collect());
-        if self.cell.is_none()
+        if self.batch.is_none()
+            && self.cell.is_none()
             && let Some(layout) = crate::row_support::Layout::of(schema, types)
         {
             self.counts = crate::row_support::RowSupport::with_layout(layout);
         }
         self
+    }
+
+    pub(crate) fn physical_key(
+        &mut self,
+        schema: &blossom_ir::core::Schema,
+        key: &[usize],
+        types: &blossom_value::TypeTable,
+    ) {
+        if key.len() >= schema.key.len() || self.cell.is_some() {
+            return;
+        }
+        let mut physical = schema.clone();
+        physical.key = key.iter().map(|c| blossom_base::ColIdx::from_raw(*c as u32)).collect();
+        physical.payload = (0..schema.cols.len())
+            .filter(|c| !key.contains(c))
+            .map(|c| blossom_base::ColIdx::from_raw(c as u32))
+            .collect();
+        if let Some(layout) = crate::row_support::Layout::of(&physical, types) {
+            self.counts = crate::row_support::RowSupport::with_layout(layout);
+            // Used for costing only. Runtime key validation retains the source schema's original constraints.
+            self.declared_key = Some(key.to_vec());
+        }
     }
 
     /// An empty store of the same kind (a tiered store becomes the in-memory store of its table).
@@ -1098,7 +1205,11 @@ impl Store {
             ),
             bulk_rows: m.bulk_rows,
             bulk_clears: m.bulk_clears,
+            batch_updates: m.batch_updates,
         });
+        if self.batch.is_some() {
+            store.make_batch();
+        }
         if self.boolean.is_some() {
             store.make_boolean();
         }
@@ -1164,7 +1275,9 @@ impl Store {
         if self.tiered.is_some() {
             return Err(internal_error!("a tiered table's rows are read by probes, not held").into());
         }
-        Ok(if let Some(rows) = &self.boolean {
+        Ok(if let Some(rows) = &self.batch {
+            Present::Batch(rows.keys())
+        } else if let Some(rows) = &self.boolean {
             Present::Boolean(rows.iter())
         } else if self.cell.is_some() {
             Present::Lattice(self.merged_rows.iter())
@@ -1187,6 +1300,8 @@ impl Store {
     pub fn present_len(&self) -> usize {
         if let Some(t) = &self.tiered {
             t.len
+        } else if let Some(rows) = &self.batch {
+            rows.len()
         } else if let Some(rows) = &self.boolean {
             rows.len()
         } else if self.cell.is_some() {
@@ -1243,6 +1358,9 @@ impl Store {
     pub fn add(&mut self, row: Row, w: i64) -> ExprResult<()> {
         if w == 0 {
             return Ok(());
+        }
+        if self.batch.is_some() {
+            return self.apply_batch(BTreeMap::from([(row, w)]));
         }
         if self.boolean.is_some() {
             return Err(bug("counted write to a boolean native view".into()));
@@ -1530,7 +1648,9 @@ impl Store {
         if let Some(t) = &self.tiered {
             return Ok((!self.counts.is_empty() && self.counts.contains_key(row)) || t.carried(row)?);
         }
-        Ok(if self.cell.is_some() {
+        Ok(if let Some(rows) = &self.batch {
+            rows.contains_key(row)
+        } else if self.cell.is_some() {
             self.merged_rows.contains(row)
         } else {
             self.counts.contains_key(row)
@@ -1547,13 +1667,17 @@ impl Store {
         if self.cell.is_some() || self.tiered.is_some() {
             return Err(bug("a lattice or tiered store is never tick-scoped".into()));
         }
-        let n = self.boolean.as_ref().map_or_else(|| self.counts.len(), BTreeSet::len);
+        let n = self.present_len();
         if n == 0 {
             return Ok(());
         }
-        let rows = match &mut self.boolean {
-            Some(rows) => RetractedRows::Boolean(std::mem::take(rows).into_iter()),
-            None => RetractedRows::Counted(self.counts.drain()),
+        let rows = if let Some(rows) = &mut self.batch {
+            RetractedRows::Batch(std::mem::take(rows).into_keys())
+        } else {
+            match &mut self.boolean {
+                Some(rows) => RetractedRows::Boolean(std::mem::take(rows).into_iter()),
+                None => RetractedRows::Counted(self.counts.drain()),
+            }
         };
         self.touched = true;
         self.generation = self.generation.wrapping_add(n as u64);
@@ -1681,7 +1805,8 @@ impl Store {
 
     /// Exact key probes use the compact support map directly; range probes still maintain ordered indexes.
     pub fn support_has_key(&self, cols: &[usize]) -> bool {
-        self.cell.is_none() && self.tiered.is_none() && self.counts.has_key(cols)
+        (self.batch.is_some() && cols.iter().enumerate().all(|(i, c)| i == *c))
+            || (self.batch.is_none() && self.cell.is_none() && self.tiered.is_none() && self.counts.has_key(cols))
     }
 
     /// Builds the index on `cols` if there is none.
@@ -1694,12 +1819,15 @@ impl Store {
         if cols.is_empty()
             || self.tiered.is_some()
             || self.boolean.is_some()
+            || (self.batch.is_some() && cols.iter().enumerate().all(|(i, c)| i == *c))
             || self.indexes.borrow().contains_key(cols)
         {
             return;
         }
         let mut index = Index::new();
-        let rows = if self.cell.is_some() {
+        let rows = if let Some(rows) = &self.batch {
+            Present::Batch(rows.keys())
+        } else if self.cell.is_some() {
             Present::Lattice(self.merged_rows.iter())
         } else {
             Present::Set(self.counts.iter())
@@ -1746,7 +1874,9 @@ impl Store {
         if cols.is_empty() {
             return n;
         }
-        if let Some(keys) = self.counts.key_count(cols) {
+        if self.batch.is_none()
+            && let Some(keys) = self.counts.key_count(cols)
+        {
             return n.div_ceil(keys.max(1));
         }
         if !self.lazy_estimates {
@@ -1804,6 +1934,9 @@ impl Store {
     /// The present rows whose columns `cols` hold `values`.
     pub fn new_rows(&self, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
         self.settled()?;
+        if cols.len() != values.len() {
+            return Ok(Vec::new());
+        }
         if let Some(t) = &self.tiered {
             let matches = |r: &Row| holds(r, cols, values);
             let mut out = t.carried_rows(cols, values, None, matches)?;
@@ -1819,13 +1952,24 @@ impl Store {
             }
             return Ok(out);
         }
+        if let Some(rows) = &self.batch
+            && cols.iter().enumerate().all(|(i, c)| i == *c)
+        {
+            let prefix: Row = values.to_vec().into();
+            return Ok(rows
+                .range(prefix..)
+                .take_while(|(r, _)| r.get(..values.len()) == Some(values))
+                .map(|(r, _)| r.clone())
+                .collect());
+        }
         if let Some(rows) = &self.boolean {
             return Ok(rows.iter().filter(|r| holds(r, cols, values)).cloned().collect());
         }
         if cols.is_empty() {
             return Ok(self.present()?.cloned().collect());
         }
-        if self.cell.is_none()
+        if self.batch.is_none()
+            && self.cell.is_none()
             && let Some(rows) = self.counts.probe(cols, values)
         {
             return Ok(rows.map(|(r, _)| r.clone()).collect());
@@ -1857,13 +2001,23 @@ impl Store {
             return Ok(true);
         }
         let live = |r: &Row| !old || !self.ins.contains(r);
+        if let Some(rows) = &self.batch
+            && cols.iter().enumerate().all(|(i, c)| i == *c)
+        {
+            let prefix: Row = values.to_vec().into();
+            return Ok(rows
+                .range(prefix..)
+                .take_while(|(r, _)| r.get(..values.len()) == Some(values))
+                .any(|(r, _)| live(r)));
+        }
         if let Some(rows) = &self.boolean {
             return Ok(rows.iter().any(|r| holds(r, cols, values) && live(r)));
         }
         if cols.is_empty() {
             return Ok(self.present()?.any(live));
         }
-        if self.cell.is_none()
+        if self.batch.is_none()
+            && self.cell.is_none()
             && let Some(mut rows) = self.counts.probe(cols, values)
         {
             return Ok(rows.any(|(r, _)| live(r)));
@@ -1905,6 +2059,39 @@ impl Store {
         self.settled()?;
         if let Some(t) = &self.tiered {
             return self.tiered_range(t, old, cols, values, col, lo, hi);
+        }
+        if let Some(rows) = &self.batch
+            && col == cols.len()
+            && cols.iter().enumerate().all(|(i, c)| i == *c)
+        {
+            let mut prefix = values.to_vec();
+            if let Bound::Included(v) | Bound::Excluded(v) = &lo {
+                prefix.push(v.clone());
+            }
+            let start: Row = prefix.into();
+            let mut out: Vec<Row> = rows
+                .range(start..)
+                .take_while(|(r, _)| r.get(..values.len()) == Some(values))
+                .take_while(|(r, _)| match (&hi, r.get(col)) {
+                    (Bound::Included(h), Some(v)) => v <= h,
+                    (Bound::Excluded(h), Some(v)) => v < h,
+                    (Bound::Unbounded, _) => true,
+                    _ => false,
+                })
+                .filter(|(r, _)| {
+                    (!old || !self.ins.contains(*r)) && r.get(col).is_some_and(|v| within_bounds(v, &lo, &hi))
+                })
+                .map(|(r, _)| r.clone())
+                .collect();
+            if old {
+                self.visit_deleted(cols, values, |r| {
+                    if r.get(col).is_some_and(|v| within_bounds(v, &lo, &hi)) {
+                        out.push(r.clone());
+                    }
+                    false
+                });
+            }
+            return Ok(out);
         }
         if self.boolean.is_some() {
             return Ok(self
@@ -2038,6 +2225,111 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_pipeline_updates_keep_existing_non_prefix_indexes_exact() {
+        let mut store = Store::new(None, false);
+        store.make_batch();
+        store.measure_plan(true);
+        let row = |a, b| Row::from(vec![Value::u64(a), Value::u64(b)]);
+        store.apply_batch((0..100).map(|k| (row(k, k), 1)).collect()).unwrap();
+        store.ensure_index(&[1]);
+        store.clear_delta();
+        store
+            .apply_batch(BTreeMap::from([(row(4, 4), -1), (row(4, 400), 2)]))
+            .unwrap();
+        assert!(store.new_rows(&[1], &[Value::u64(4)]).unwrap().is_empty());
+        assert_eq!(store.new_rows(&[1], &[Value::u64(400)]).unwrap(), vec![row(4, 400)]);
+        assert_eq!(store.old_rows(&[1], &[Value::u64(4)]).unwrap(), vec![row(4, 4)]);
+        let m = store.inspection_operations().unwrap();
+        assert_eq!(m.secondary_index_build_rows, 100);
+        assert_eq!(m.secondary_index_row_updates, 2);
+    }
+
+    #[test]
+    fn pipeline_batches_preserve_counts_old_versions_ranges_and_index_versions() {
+        let mut reference = Store::new(None, false);
+        let mut candidate = Store::new(None, false);
+        candidate.make_batch();
+        candidate.measure_plan(true);
+        let row = |a, b| Row::from(vec![Value::u64(a), Value::u64(b)]);
+        for edits in [
+            vec![(row(1, 10), 2), (row(1, 20), 1), (row(2, 30), 1)],
+            vec![(row(1, 10), -1), (row(1, 20), -1), (row(2, 40), 3)],
+            vec![(row(1, 10), -1), (row(2, 40), -2)],
+            vec![(row(2, 30), -1), (row(2, 40), -1)],
+        ] {
+            reference.clear_delta();
+            candidate.clear_delta();
+            let mut heads = BTreeMap::new();
+            for (r, w) in edits {
+                reference.add(r.clone(), w).unwrap();
+                *heads.entry(r).or_default() += w;
+            }
+            candidate.apply_batch(heads).unwrap();
+            candidate.ensure_index(&[1]);
+            assert_eq!(reference.present_sorted().unwrap(), candidate.present_sorted().unwrap());
+            assert_eq!(
+                reference.delta().collect::<Vec<_>>(),
+                candidate.delta().collect::<Vec<_>>()
+            );
+            for old in [false, true] {
+                for k in 0..4 {
+                    let mut a = reference.rows(old, &[0], &[Value::u64(k)]).unwrap();
+                    let mut b = candidate.rows(old, &[0], &[Value::u64(k)]).unwrap();
+                    a.sort();
+                    b.sort();
+                    assert_eq!(a, b);
+                    assert_eq!(
+                        reference.any(old, &[0], &[Value::u64(k)]).unwrap(),
+                        candidate.any(old, &[0], &[Value::u64(k)]).unwrap()
+                    );
+                    let mut a = reference
+                        .range_rows(
+                            old,
+                            &[0],
+                            &[Value::u64(k)],
+                            1,
+                            Bound::Included(Value::u64(15)),
+                            Bound::Excluded(Value::u64(45)),
+                        )
+                        .unwrap();
+                    let mut b = candidate
+                        .range_rows(
+                            old,
+                            &[0],
+                            &[Value::u64(k)],
+                            1,
+                            Bound::Included(Value::u64(15)),
+                            Bound::Excluded(Value::u64(45)),
+                        )
+                        .unwrap();
+                    a.sort();
+                    b.sort();
+                    assert_eq!(a, b);
+                }
+            }
+        }
+        reference.clear_delta();
+        candidate.clear_delta();
+        let heads = BTreeMap::from([(row(3, 50), 2), (row(4, 60), 1)]);
+        for (r, w) in &heads {
+            reference.add(r.clone(), *w).unwrap();
+        }
+        candidate.apply_batch(heads).unwrap();
+        reference.retract_all().unwrap();
+        candidate.retract_all().unwrap();
+        assert_eq!(
+            reference.delta().collect::<Vec<_>>(),
+            candidate.delta().collect::<Vec<_>>()
+        );
+        assert!(candidate.present_sorted().unwrap().is_empty());
+        let counters = candidate.inspection_operations().unwrap();
+        assert_eq!(counters.secondary_index_row_updates, 0);
+        assert!(counters.batch_weight_updates > 0);
+        assert!(counters.secondary_index_build_rows > 0);
+        assert!(candidate.emptied().is_batch());
+    }
 
     #[test]
     fn indexed_buckets_preserve_support_old_versions_and_ranges_through_demotion() {

@@ -74,6 +74,10 @@ pub struct EngineConfig {
     pub map_cache_joins: bool,
     /// Estimate join candidates without creating indexes for rejected alternatives.
     pub lazy_indexes: bool,
+    /// Share consolidated bags between single-writer pipeline stages (experimental).
+    pub pipeline_batches: bool,
+    /// Infer physical keys for single-writer deterministic derived relations.
+    pub infer_keys: bool,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -485,6 +489,11 @@ impl Engine {
             .filter(|(id, _)| plans.contains_key(id))
             .map(|(id, _)| id)
             .collect();
+        let inferred_keys = if cfg.infer_keys {
+            crate::functional_keys::infer(p, &running.iter().copied().collect(), &recursive)
+        } else {
+            BTreeMap::new()
+        };
         let scoped_rels = tick_scoped(p, &running, &recursive);
         let mut scoped_derived = Vec::new();
         for id in &running {
@@ -537,10 +546,17 @@ impl Engine {
                 });
             }
         }
+        for (rel, key) in &inferred_keys {
+            if let (Some(store), Some(r)) = (stores.get_mut(&StoreKey::Main(*rel)), p.rels.get(*rel)) {
+                store.physical_key(&r.schema, key, &p.types);
+            }
+        }
         for store in stores.values_mut() {
             store.lazy_estimates(cfg.lazy_indexes);
         }
-        // Scoped identity views read their source directly. Stratification has already ruled out cycles;
+        // Identity stages share their source. Scoped views always qualify; the experimental pipeline
+        // also eliminates persistent identity stages over non-durable, non-lattice derived sources.
+        // Stratification has already ruled out cycles;
         // no facts, carry, second writer or lattice contribution can be hidden by this physical fusion.
         for s in &strata_list {
             if s.recursive {
@@ -549,8 +565,9 @@ impl Engine {
             for id in &s.rules {
                 let Some(rule) = p.rules.get(*id) else { continue };
                 let Some(plan) = plans.get(id) else { continue };
-                if plan.regime != Regime::Scoped
-                    || !scoped_derived.contains(&rule.head.rel)
+                let scoped_identity = plan.regime == Regime::Scoped && scoped_derived.contains(&rule.head.rel);
+                let persistent_identity = cfg.pipeline_batches && plan.regime == Regime::Delta;
+                if !(scoped_identity || persistent_identity)
                     || rule.head.mode != HeadMode::Insert
                     || p.rels
                         .get(rule.head.rel)
@@ -568,8 +585,45 @@ impl Engine {
                 let [Literal::Pos(a)] = rule.body.lits.as_slice() else {
                     continue;
                 };
+                if persistent_identity
+                    && !scoped_identity
+                    && p.rels
+                        .get(a.rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
+                {
+                    continue;
+                }
                 if crate::upsert::is_identity_atom(rule, a) {
                     stores.alias(plan.head, rule::atom_store(a))?;
+                }
+            }
+        }
+        if cfg.pipeline_batches {
+            for plan in plans.values() {
+                let Some(rule) = p.rules.get(plan.rule) else { continue };
+                let rel = rule.head.rel;
+                if rule.kind != RuleKind::Deductive
+                    || rule.head.mode != HeadMode::Insert
+                    || plan.aggregate
+                    || plan.frame.is_some()
+                    || plan.upsert_delete.is_some()
+                    || !matches!(plan.regime, Regime::Delta | Regime::Scoped)
+                    || recursive.contains(&rel)
+                    || stores.is_alias(plan.head)
+                    || p.rels
+                        .get(rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
+                    || p.facts.iter().any(|f| f.rel == rel)
+                    || p.rules
+                        .iter_enumerated()
+                        .filter(|(id, r)| plans.contains_key(id) && r.head.rel == rel)
+                        .count()
+                        != 1
+                {
+                    continue;
+                }
+                if let Some(store) = stores.get_mut(&plan.head) {
+                    store.make_batch();
                 }
             }
         }
@@ -725,8 +779,17 @@ impl Engine {
                 let Literal::Pos(atom) = rule.body.lits.get(*plan.atoms.first()?)? else {
                     return None;
                 };
-                crate::row_support::Layout::of(&p.rels.get(atom.rel)?.schema, &p.types)
-                    .map(|layout| (plan.rule, layout))
+                {
+                    let mut schema = p.rels.get(atom.rel)?.schema.clone();
+                    if let Some(key) = inferred_keys.get(&atom.rel) {
+                        schema.key = key.iter().map(|c| blossom_base::ColIdx::from_raw(*c as u32)).collect();
+                        schema.payload = (0..schema.cols.len())
+                            .filter(|c| !key.contains(c))
+                            .map(|c| blossom_base::ColIdx::from_raw(c as u32))
+                            .collect();
+                    }
+                    crate::row_support::Layout::of(&schema, &p.types).map(|layout| (plan.rule, layout))
+                }
             })
             .collect();
         let mut engine = Engine {
@@ -2354,6 +2417,12 @@ impl Engine {
             }
             return Ok(());
         }
+        if self.stores.get(&plan.head).is_some_and(Store::is_batch) {
+            return self
+                .store(plan.head)?
+                .apply_batch(terms.heads)
+                .map_err(|e| to_eval(e, tick, Some(rule)));
+        }
         let volatile = self.volatile_rules.contains(&rule.id);
         let store = self.store(plan.head)?;
         let mut writes = 0u64;
@@ -3137,10 +3206,16 @@ impl Engine {
                     .upsert_next
                     .get(&rule.head.rel)
                     .is_some_and(|(id, _)| *id == plan.rule);
-            let operator = if self.map_rules.contains(&plan.rule) {
-                "retained-map"
-            } else if eliminated {
+            let operator = if eliminated {
                 "alias"
+            } else if self.stores.get(&plan.head).is_some_and(Store::is_batch) {
+                if self.map_rules.contains(&plan.rule) {
+                    "retained-pipeline-batch"
+                } else {
+                    "pipeline-batch"
+                }
+            } else if self.map_rules.contains(&plan.rule) {
+                "retained-map"
             } else if plan.frame.is_some() && self.framed.contains_key(&rule.head.rel) {
                 "virtual-frame"
             } else if plan.upsert_delete.is_some() {
@@ -3237,6 +3312,8 @@ impl Engine {
                     indexes: store.inspection_indexes(),
                     reasons,
                     operations: store.inspection_operations(),
+                    physical_key: store.inspection_key(),
+                    batch_backed: store.is_batch(),
                 }
             })
             .collect();
