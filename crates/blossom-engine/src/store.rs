@@ -930,7 +930,9 @@ pub(crate) struct Store {
     indexes: RefCell<BTreeMap<Vec<usize>, Index>>,
     /// The tick's change to the present rows.
     pub ins: BTreeSet<Row>,
-    pub del: BTreeSet<Row>,
+    del: BTreeSet<Row>,
+    /// Old-version probes index only deletions matching their columns, instead of rescanning every delta.
+    deleted_by: RefCell<BTreeMap<Vec<usize>, RowsBy>>,
     /// Whether any support changed this tick, even where the present rows did not.
     pub touched: bool,
     /// For a relation whose rows can hold blobs: how many present rows hold each blob, kept with every change, so
@@ -1092,6 +1094,10 @@ impl Store {
         }
     }
 
+    pub fn deletions(&self) -> &BTreeSet<Row> {
+        &self.del
+    }
+
     pub fn changed(&self) -> bool {
         !self.ins.is_empty() || !self.del.is_empty()
     }
@@ -1099,7 +1105,29 @@ impl Store {
     pub fn clear_delta(&mut self) {
         self.ins.clear();
         self.del.clear();
+        self.deleted_by.get_mut().clear();
         self.touched = false;
+    }
+
+    /// Adjusts a row through one map lookup; zero support removes that same entry without rehashing the row.
+    fn change_count(&mut self, row: &Row, w: i64) -> (i64, i64) {
+        use blossom_base::det::Entry;
+        match self.counts.entry(row.clone()) {
+            Entry::Occupied(mut entry) => {
+                let before = *entry.get();
+                let after = before + w;
+                if after == 0 {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() = after;
+                }
+                (before, after)
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(w);
+                (0, w)
+            }
+        }
     }
 
     /// Adds `w` (non-zero) to the support of `row`.
@@ -1114,13 +1142,7 @@ impl Store {
             None => {}
         }
         let Some(spec) = self.cell.clone() else {
-            let count = self.counts.entry(row.clone()).or_insert(0);
-            let before = *count;
-            *count += w;
-            let after = *count;
-            if after == 0 {
-                self.counts.remove(&row);
-            }
+            let (before, after) = self.change_count(&row, w);
             if after < 0 {
                 return Err(bug(format!("the support of {row:?} went negative")));
             }
@@ -1135,13 +1157,7 @@ impl Store {
         if spec.is_bottom(&row)? {
             return Ok(());
         }
-        let count = self.counts.entry(row.clone()).or_insert(0);
-        let before = *count;
-        *count += w;
-        let after = *count;
-        if after == 0 {
-            self.counts.remove(&row);
-        }
+        let (before, after) = self.change_count(&row, w);
         if after < 0 {
             return Err(bug(format!("the support of {row:?} went negative")));
         }
@@ -1228,17 +1244,13 @@ impl Store {
         self.generation = self.generation.wrapping_add(1);
         self.ins = ins;
         self.del = del;
+        self.deleted_by.get_mut().clear();
     }
 
     /// A tiered store's support other than the carry (a program fact's).
     fn add_tiered(&mut self, row: Row, w: i64) -> ExprResult<()> {
         let was = self.contains(&row).map_err(ExprError::Eval)?;
-        let count = self.counts.entry(row.clone()).or_insert(0);
-        *count += w;
-        let after = *count;
-        if after == 0 {
-            self.counts.remove(&row);
-        }
+        let (_, after) = self.change_count(&row, w);
         if after < 0 {
             return Err(bug(format!("the support of {row:?} went negative")));
         }
@@ -1320,6 +1332,7 @@ impl Store {
             self.generation = self.generation.wrapping_add(1);
             self.ins = ins;
             self.del = BTreeSet::new();
+            self.deleted_by.get_mut().clear();
             return Ok(());
         }
         let (ins, del) = std::mem::take(&mut t.staged);
@@ -1340,6 +1353,7 @@ impl Store {
         }
         self.ins = ins;
         self.del = del;
+        self.deleted_by.get_mut().clear();
         Ok(())
     }
 
@@ -1440,6 +1454,7 @@ impl Store {
             .filter_map(|(row, _)| (!ins.remove(&row)).then_some(row))
             .collect();
         self.del.append(&mut deleted);
+        self.deleted_by.get_mut().clear();
         Ok(())
     }
 
@@ -1455,7 +1470,9 @@ impl Store {
         if self.cell.is_some() {
             self.merged_rows.insert(row.clone());
         }
-        if !self.del.remove(&row) {
+        if self.del.remove(&row) {
+            self.index_deleted(&row, false);
+        } else {
             self.ins.insert(row);
         }
     }
@@ -1478,9 +1495,58 @@ impl Store {
         if self.cell.is_some() {
             self.merged_rows.remove(row);
         }
-        if !self.ins.remove(row) {
-            self.del.insert(row.clone());
+        if !self.ins.remove(row) && self.del.insert(row.clone()) {
+            self.index_deleted(row, true);
         }
+    }
+
+    /// Keeps previously requested deletion indexes equal to the tick's net deletions.
+    fn index_deleted(&mut self, row: &Row, present: bool) {
+        for (cols, index) in self.deleted_by.get_mut() {
+            let values = key(row, cols);
+            if present {
+                index.entry(values).or_default().insert(row.clone());
+            } else if let Some(bucket) = index.get_mut(&values) {
+                bucket.remove(row);
+                if bucket.is_empty() {
+                    index.remove(&values);
+                }
+            }
+        }
+    }
+
+    /// Visits matching old-version deletions in the same row order as the delta set; stops on `true`.
+    fn visit_deleted(&self, cols: &[usize], values: &[Value], mut visit: impl FnMut(&Row) -> bool) -> bool {
+        if self.del.is_empty() {
+            return false;
+        }
+        if cols.len() != values.len() {
+            return false;
+        }
+        if cols.is_empty() {
+            return self.del.iter().any(visit);
+        }
+        // The delta set already orders rows by their leading columns. Seek to that prefix without duplicating
+        // it in another index, then stop as soon as the prefix changes.
+        if cols.iter().enumerate().all(|(i, c)| i == *c) {
+            let prefix: Row = Arc::from(values.to_vec());
+            return self
+                .del
+                .range(prefix..)
+                .take_while(|row| row.get(..values.len()) == Some(values))
+                .any(visit);
+        }
+        let mut by = self.deleted_by.borrow_mut();
+        let index = by.entry(cols.to_vec()).or_insert_with(|| {
+            let mut index = RowsBy::new();
+            for row in &self.del {
+                index.entry(key(row, cols)).or_default().insert(row.clone());
+            }
+            index
+        });
+        index
+            .get(values)
+            .is_some_and(|bucket| bucket.iter().any(|row| holds(row, cols, values) && visit(row)))
     }
 
     /// Builds the index on `cols` if there is none.
@@ -1571,12 +1637,11 @@ impl Store {
             let matches = |r: &Row| holds(r, cols, values);
             let live = |r: &Row| !old || !self.ins.contains(r);
             let excluded = if old { self.ins.len() } else { 0 };
-            return Ok((old && self.del.iter().any(matches))
+            return Ok((old && self.visit_deleted(cols, values, |_| true))
                 || self.counts.keys().any(|r| matches(r) && live(r))
                 || t.any_carried(cols, values, excluded, live)?);
         }
-        let matches = |r: &Row| holds(r, cols, values);
-        if old && self.del.iter().any(matches) {
+        if old && self.visit_deleted(cols, values, |_| true) {
             return Ok(true);
         }
         let live = |r: &Row| !old || !self.ins.contains(r);
@@ -1598,7 +1663,10 @@ impl Store {
             .into_iter()
             .filter(|r| !self.ins.contains(r))
             .collect();
-        out.extend(self.del.iter().filter(|r| holds(r, cols, values)).cloned());
+        self.visit_deleted(cols, values, |row| {
+            out.push(row.clone());
+            false
+        });
         Ok(out)
     }
 
@@ -1660,12 +1728,12 @@ impl Store {
             out.extend(bucket.iter().filter(|r| !old || !self.ins.contains(*r)).cloned());
         }
         if old {
-            out.extend(
-                self.del
-                    .iter()
-                    .filter(|r| holds(r, cols, values) && r.get(col).is_some_and(within))
-                    .cloned(),
-            );
+            self.visit_deleted(cols, values, |row| {
+                if row.get(col).is_some_and(within) {
+                    out.push(row.clone());
+                }
+                false
+            });
         }
         Ok(out)
     }
@@ -1713,7 +1781,12 @@ impl Store {
             if !self.ins.is_empty() {
                 out.retain(|r| !self.ins.contains(r));
             }
-            out.extend(self.del.iter().filter(|r| within(r)).cloned());
+            self.visit_deleted(cols, values, |row| {
+                if within(row) {
+                    out.push(row.clone());
+                }
+                false
+            });
         }
         Ok(out)
     }
@@ -2023,3 +2096,7 @@ mod tests {
 #[cfg(test)]
 #[path = "cold_existence_tests.rs"]
 mod cold_existence_tests;
+
+#[cfg(test)]
+#[path = "deleted_index_tests.rs"]
+mod deleted_index_tests;

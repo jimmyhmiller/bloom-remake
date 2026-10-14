@@ -1374,7 +1374,7 @@ impl Engine {
                         .stores
                         .get(&plan.head)
                         .ok_or_else(|| internal_error!("no next store"))?;
-                    (s.ins.iter().cloned().collect(), s.del.iter().cloned().collect())
+                    (s.ins.iter().cloned().collect(), s.deletions().iter().cloned().collect())
                 }
             };
             if !ins.is_empty() {
@@ -1510,7 +1510,7 @@ impl Engine {
             pending.deleted.get(&rel).into_iter().flatten().collect(),
         );
         let mut shown: Vec<Row> = s.ins.iter().filter(|r| !pins.contains(r)).cloned().collect();
-        let mut hidden: Vec<Row> = s.del.iter().filter(|r| !pdel.contains(r)).cloned().collect();
+        let mut hidden: Vec<Row> = s.deletions().iter().filter(|r| !pdel.contains(r)).cloned().collect();
         for r in &pdel {
             if s.contains(r)? {
                 shown.push((*r).clone());
@@ -1642,7 +1642,7 @@ impl Engine {
     pub fn changes_of(&self, rel: RelId) -> (Vec<Row>, Vec<Row>) {
         self.stores
             .get(&StoreKey::Main(rel))
-            .map(|s| (s.ins.iter().cloned().collect(), s.del.iter().cloned().collect()))
+            .map(|s| (s.ins.iter().cloned().collect(), s.deletions().iter().cloned().collect()))
             .unwrap_or_default()
     }
 
