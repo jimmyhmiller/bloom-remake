@@ -74,6 +74,8 @@ pub(crate) struct Stores {
     /// The slots written since `clear_deltas`, and a flag per slot.
     touched: Vec<usize>,
     flags: Vec<bool>,
+    /// Read-only identity relations with no physical support/index maintenance of their own.
+    aliases: Vec<Option<StoreKey>>,
 }
 
 impl Stores {
@@ -94,12 +96,44 @@ impl Stores {
         }
     }
 
+    fn physical(&self, mut key: StoreKey) -> StoreKey {
+        while let Some(Some(source)) = self.aliases.get(key.slot()) {
+            key = *source;
+        }
+        key
+    }
+
+    /// Install a proven acyclic, single-writer identity relation. Only its reads and index setup alias;
+    /// the defining rule and tick-local clearing are omitted by the planner.
+    pub fn alias(&mut self, key: StoreKey, source: StoreKey) -> Result<(), EvalError> {
+        let source = self.physical(source);
+        if source == key {
+            return Err(internal_error!("cyclic store alias {key:?}").into());
+        }
+        if self.aliases.len() <= key.slot() {
+            self.aliases.resize(key.slot() + 1, None);
+        }
+        let slot = self
+            .aliases
+            .get_mut(key.slot())
+            .ok_or_else(|| internal_error!("missing alias slot {key:?}"))?;
+        *slot = Some(source);
+        Ok(())
+    }
+
+    pub fn is_alias(&self, key: StoreKey) -> bool {
+        self.aliases.get(key.slot()).is_some_and(Option::is_some)
+    }
+
     pub fn get(&self, key: &StoreKey) -> Option<&Store> {
-        self.slots.get(key.slot()).and_then(Option::as_ref).map(|(_, s)| s)
+        self.slots
+            .get(self.physical(*key).slot())
+            .and_then(Option::as_ref)
+            .map(|(_, s)| s)
     }
 
     pub fn get_mut(&mut self, key: &StoreKey) -> Option<&mut Store> {
-        let i = key.slot();
+        let i = self.physical(*key).slot();
         self.touch(i);
         self.slots.get_mut(i).and_then(Option::as_mut).map(|(_, s)| s)
     }
@@ -119,7 +153,7 @@ impl Stores {
     /// Whether the store at `key` changed this tick (`Store::changed`); a store not written since the tick began
     /// did not, and is not read.
     pub fn changed(&self, key: &StoreKey) -> bool {
-        let i = key.slot();
+        let i = self.physical(*key).slot();
         self.flags.get(i).copied().unwrap_or(false) && self.get(key).is_some_and(Store::changed)
     }
 
@@ -137,11 +171,22 @@ impl Stores {
 
     /// Every store with its key.
     pub fn iter(&self) -> impl Iterator<Item = (StoreKey, &Store)> {
-        self.slots.iter().flatten().map(|(k, s)| (*k, s))
+        self.slots
+            .iter()
+            .flatten()
+            .filter_map(|(k, _)| self.get(k).map(|s| (*k, s)))
+    }
+
+    pub fn physical_iter(&self) -> impl Iterator<Item = (StoreKey, &Store)> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|(k, _)| !self.is_alias(*k))
+            .map(|(k, s)| (*k, s))
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Store> {
-        self.slots.iter().flatten().map(|(_, s)| s)
+        self.physical_iter().map(|(_, s)| s)
     }
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Store> {

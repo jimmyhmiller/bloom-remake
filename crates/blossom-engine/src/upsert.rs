@@ -153,6 +153,18 @@ pub(crate) fn is_identity_next(rule: &Rule, rel: RelId, staging: RelId) -> bool 
     {
         return false;
     }
+    is_identity_atom(rule, a)
+}
+
+pub(crate) fn is_identity_atom(rule: &Rule, a: &blossom_ir::core::Atom) -> bool {
+    if a.sender.is_some()
+        || a.principal.is_some()
+        || a.weight.is_some()
+        || a.spec.is_some()
+        || a.args.len() != rule.head.args.len()
+    {
+        return false;
+    }
     let mut seen = BTreeSet::new();
     a.args
         .iter()

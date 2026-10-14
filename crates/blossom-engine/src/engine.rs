@@ -522,6 +522,40 @@ impl Engine {
                 });
             }
         }
+        // Scoped identity views read their source directly. Stratification has already ruled out cycles;
+        // no facts, carry, second writer or lattice contribution can be hidden by this physical fusion.
+        for s in &strata_list {
+            if s.recursive {
+                continue;
+            }
+            for id in &s.rules {
+                let Some(rule) = p.rules.get(*id) else { continue };
+                let Some(plan) = plans.get(id) else { continue };
+                if plan.regime != Regime::Scoped
+                    || !scoped_derived.contains(&rule.head.rel)
+                    || rule.head.mode != HeadMode::Insert
+                    || p.rels
+                        .get(rule.head.rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable)
+                    || p.facts.iter().any(|f| f.rel == rule.head.rel)
+                    || p.rules
+                        .iter_enumerated()
+                        .filter(|(id, r)| plans.contains_key(id) && r.head.rel == rule.head.rel)
+                        .count()
+                        != 1
+                    || stores.get(&plan.head).is_none_or(|s| s.cell.is_some())
+                {
+                    continue;
+                }
+                let [Literal::Pos(a)] = rule.body.lits.as_slice() else {
+                    continue;
+                };
+                if crate::upsert::is_identity_atom(rule, a) {
+                    stores.alias(plan.head, rule::atom_store(a))?;
+                }
+            }
+        }
+        scoped_derived.retain(|rel| !stores.is_alias(StoreKey::Main(*rel)));
         let mut framed = BTreeMap::new();
         for id in inductive.iter() {
             if let Some(plan) = plans.get(id)
@@ -1740,6 +1774,9 @@ impl Engine {
     /// Brings one rule's output up to date.
     fn maintain(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+        if self.stores.is_alias(StoreKey::Main(rule.head.rel)) {
+            return Ok(());
+        }
         if self
             .upsert_next
             .get(&rule.head.rel)
@@ -2811,7 +2848,7 @@ impl Engine {
     pub fn resident_by_store(&self) -> Vec<(RelId, &'static str, usize)> {
         let mut out: Vec<(RelId, &'static str, usize)> = self
             .stores
-            .iter()
+            .physical_iter()
             .map(|(key, s)| {
                 let (rel, kind) = match key {
                     StoreKey::Main(r) if self.tiered.contains(&r) => (r, "tiered"),
