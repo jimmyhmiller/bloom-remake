@@ -1,0 +1,8 @@
+program compact_set version 1;
+input put(k: u64, v: Vec<u64>);
+input watch(k: u64);
+view current(k, v) = put(k, v);
+fn shift(old: Vec<u64>) -> Vec<u64> { old.map(|x| x + 1u64) }
+view shifted(k, v) = current(k, old), let v = shift(old);
+view missing(k) = watch(k), not current(k, _);
+view counts(k, n = count!(v)) = put(k, v);

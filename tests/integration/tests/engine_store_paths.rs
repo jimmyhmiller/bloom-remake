@@ -279,3 +279,25 @@ fn staged_next_state_is_read_without_duplicate_maintenance() {
         }
     }
 }
+
+#[test]
+fn compact_buckets_preserve_multiple_valid_set_rows_per_scalar_key() {
+    let u = |v| Value::Int(blossom_value::IntValue::U64(v));
+    let payload = |v| Value::Vec(Arc::from(vec![u(v); 16]));
+    assert!(!check_fixture(
+        "compact_set",
+        vec![
+            (0, "put", vec![u(1), payload(10)]),
+            (0, "put", vec![u(1), payload(20)]),
+            (0, "put", vec![u(2), payload(30)]),
+            (0, "watch", vec![u(1)]),
+            (1, "put", vec![u(1), payload(20)]),
+            (1, "put", vec![u(1), payload(40)]),
+            (1, "watch", vec![u(2)]),
+            (2, "put", vec![u(1), payload(40)]),
+            (2, "watch", vec![u(1)]),
+            (3, "watch", vec![u(1)]),
+        ],
+        5
+    ));
+}

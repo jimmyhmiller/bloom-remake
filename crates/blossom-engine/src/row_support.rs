@@ -12,7 +12,7 @@ pub(crate) struct Layout(Vec<(usize, TypeDef)>);
 
 impl Layout {
     pub(crate) fn of(schema: &Schema, types: &TypeTable) -> Option<Self> {
-        if schema.payload.is_empty() || !schema.lattice.is_empty() {
+        if !schema.lattice.is_empty() {
             return None;
         }
         let mut cols = Vec::new();
@@ -22,9 +22,16 @@ impl Layout {
                 ty,
                 TypeDef::Int(_) | TypeDef::Bool | TypeDef::Bytes | TypeDef::Duration | TypeDef::Instant
             ) {
-                return None;
+                continue;
             }
             cols.push((col.index(), ty));
+        }
+        // A physical bucket need not be unique. Complex key columns stay in the canonical row,
+        // and all rows sharing the compact prefix retain independent support in the ordered bucket.
+        // Avoid an unselective single bucket, or specializing an all-scalar set with no omitted payload.
+        if (cols.is_empty() && !schema.key.is_empty()) || (schema.payload.is_empty() && cols.len() == schema.key.len())
+        {
+            return None;
         }
         Some(Self(cols))
     }
