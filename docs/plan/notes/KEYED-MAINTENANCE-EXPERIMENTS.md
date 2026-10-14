@@ -23,7 +23,7 @@ Head writes: 89,280 → 63,744 at 64 keys; 1,428,480 → 1,019,904 at 1,024 keys
 
 ## Verification
 
-Twenty engine units, including randomized compact support/conflict/demotion/drain checks; seventeen planner tests, two scoped tests, five store-path tests, three Kafka produce tests, three database recovery tests, and five tiered storage tests pass. New tests check zero copy-rule writes and no duplicate resident next-state rows across reset, and oracle agreement when another next-state writer prevents fusion. Clippy all engine/integration targets denies warnings. Broker measurement is pending.
+Twenty engine units, including randomized compact support/conflict/demotion/drain checks; seventeen planner tests, two scoped tests, five store-path tests, three Kafka produce tests, three database recovery tests, and five tiered storage tests pass. New tests check zero copy-rule writes and no duplicate resident next-state rows across reset, and oracle agreement when another next-state writer prevents fusion. Clippy all engine/integration targets denies warnings. Completed broker measurements appear below.
 
 ## Remaining larger changes
 
@@ -81,4 +81,24 @@ Seven final interleaved optimized engine trials compare the frozen 37130747 impl
 | (Bytes, i32) | 64 | 102,522 | 72,192 | 29.6% |
 | (Bytes, i32) | 1,024 | 2,281,121 | 1,699,752 | 25.5% |
 
-The first scalar trial is slower for the new binary; all trials are included. Counted head writes decrease from 38,144 to 25,408 and 610,304 to 406,528; boolean membership updates still occur, so this is not a claim that all physical work disappeared. A preceding isolated boolean experiment reduced elapsed time by only 2–4%, supporting the focus on actual compound keys and borrowed hit paths. Raw outputs, copied executables, source fixtures and hashes: /tmp/blossom-maintenance-final-results/ and /tmp/blossom-parallel-results/. The final broker comparison is pending.
+The first scalar trial is slower for the new binary; all trials are included. Counted head writes decrease from 38,144 to 25,408 and 610,304 to 406,528; boolean membership updates still occur, so this is not a claim that all physical work disappeared. A preceding isolated boolean experiment reduced elapsed time by only 2–4%, supporting the focus on actual compound keys and borrowed hit paths. Raw outputs, copied executables, source fixtures and hashes: /tmp/blossom-maintenance-final-results/ and /tmp/blossom-parallel-results/. The final broker comparison follows.
+
+
+## Final broker result (bc13b2ce)
+
+Eight additional counterbalanced trials used the same 120-second configuration. All builds and benchmark processes have terminated; no background test remains running.
+
+| Comparison (execution order) | Reference records/s | Candidate records/s | Candidate change |
+|---|---:|---:|---:|
+| Final serial → retained | 14,319 | 14,608 | +2.0% |
+| Retained → final serial | 14,730 | 14,280 | -3.1% |
+| Final parallel → final serial | 13,961 | 15,066 | +7.9% |
+| Final serial → final parallel | 13,874 | 15,107 | +8.9% |
+
+The default serial path has no consistent capacity gain over the retained reference. Two workers improve both matched comparisons against the final serial path, using about 123% sampled broker CPU versus 104–107% serial. This is a modest observed gain over two pairs, not the large improvement requested. Default remains one worker; storage.eval_workers = 2 opts into the bounded evaluation pool. Fault acknowledgement p99 for the two parallel runs is 5,730 / 5,431 ms versus their serial comparisons' 6,177 / 7,148 ms. More trials would be needed for a general latency claim.
+
+All 18 trials in this iteration verified 37,171,619 records with zero loss, misplacement, duplication, present-unacknowledged or foreign records. Final reports, CSVs, logs, frozen binaries, SHA-256 hashes and source archives remain on the server under ~/soak-results/maintenance-final-*. Verified temporary databases were removed after each successful verification. Parsed results are retained locally at /tmp/blossom-maintenance-broker-results/summary.json.
+
+There is no fresh Kafka comparator. Approximately 15,100 records/s remains far below the previously measured Kafka 26,786 records/s and the requested 40,179 records/s target. The first stages of all three implementation areas are now present, but full pipeline fusion, packed expression/database execution and independently executing partition engines remain unimplemented. Neither microbenchmarks nor reduced counted writes establish that these remaining changes will close the gap.
+
+Final validation passes: 55 base units, 22 engine units, 13 runtime units; eight store-path, two parallel differential, seventeen planner, three scoped, two deletion and random-example integration tests; Kafka produce/recovery/tiered and runtime database/config checks; Kafka simulator, stream and livelock checks. Base/engine/runtime/integration all-target Clippy denies warnings; formatting and blossom-web WASM check pass. This iteration did not rerun all fourteen simulator suites or the server multi-process liveness/kafka3/raft3 suites. Temporary benchmark sources were removed from the repository; raw evidence is preserved outside it. The grouped-default compiler panic encountered while preparing a fixture is recorded in the project pad and remains open.
