@@ -18,6 +18,7 @@ mod row_bucket;
 mod rule;
 mod store;
 mod strata;
+mod upsert;
 
 pub use cold::{ColRange, ColdTables, Resume};
 pub use engine::{Engine, EngineConfig};

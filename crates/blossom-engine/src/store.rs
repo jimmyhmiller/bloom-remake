@@ -92,8 +92,9 @@ type Index = BTreeMap<Vec<Value>, RowBucket>;
 /// Rows by the values of some of their columns, hashed.
 type RowsBy = blossom_base::det::DetMap<Vec<Value>, RowBucket>;
 
-/// A probe's rows kept in the hot tier (sorted), and when they were last used.
-type Kept = (Arc<Vec<Row>>, u64);
+/// Cached rows (sorted), their last use, and whether they are a complete answer.
+/// An incomplete entry holds one existence witness and must never answer a full row probe.
+type Kept = (Arc<Vec<Row>>, u64, bool);
 
 /// How many rows an engine's tiered stores keep of their recent probes, together, by default
 /// (`EngineConfig::hot_rows`).
@@ -170,9 +171,20 @@ impl Hot {
 
     fn probe(&mut self, cols: &[usize], values: &[Value]) -> Option<Arc<Vec<Row>>> {
         let now = self.tick();
-        let (rows, used) = self.probes.get_mut(cols)?.get_mut(values)?;
+        let (rows, used, complete) = self.probes.get_mut(cols)?.get_mut(values)?;
+        if !*complete {
+            return None;
+        }
         *used = now;
         Some(rows.clone())
+    }
+
+    /// A positive witness cannot be used as a complete row-probe answer.
+    fn witness(&mut self, cols: &[usize], values: &[Value]) -> Option<Row> {
+        let now = self.tick();
+        let (rows, used, _) = self.probes.get_mut(cols)?.get_mut(values)?;
+        *used = now;
+        rows.first().cloned()
     }
 
     fn is_large(&mut self, cols: &[usize], values: &[Value]) -> bool {
@@ -202,13 +214,17 @@ impl Hot {
 
     /// Keeps a probe's rows (sorted).
     fn keep_probe(&mut self, cols: &[usize], values: &[Value], rows: Arc<Vec<Row>>) {
+        self.keep_answer(cols, values, rows, true);
+    }
+
+    fn keep_answer(&mut self, cols: &[usize], values: &[Value], rows: Arc<Vec<Row>>, complete: bool) {
         let now = self.tick();
         self.rows += rows.len();
-        if let Some((old, _)) = self
+        if let Some((old, _, _)) = self
             .probes
             .entry(cols.to_vec())
             .or_default()
-            .insert(values.to_vec(), (rows, now))
+            .insert(values.to_vec(), (rows, now, complete))
         {
             self.rows -= old.len();
         } else {
@@ -285,16 +301,25 @@ impl Hot {
         let largest = self.largest();
         for (cols, by_values) in self.probes.iter_mut() {
             let values = key(row, cols);
-            let Some((rows, used)) = by_values.get_mut(&values) else {
+            let Some((rows, used, complete)) = by_values.get_mut(&values) else {
                 continue;
             };
+            if !*complete {
+                // Never turn an incomplete answer into cached absence when its witness disappears.
+                if !present && rows.iter().any(|r| r == row) {
+                    self.rows -= rows.len();
+                    self.entries -= 1;
+                    by_values.remove(&values);
+                }
+                continue;
+            }
             match (rows.binary_search(row), present) {
                 (Err(at), true) => {
                     Arc::make_mut(rows).insert(at, row.clone());
                     self.rows += 1;
                     if rows.len() > largest {
                         let used = *used;
-                        if let Some((gone, _)) = by_values.remove(&values) {
+                        if let Some((gone, _, _)) = by_values.remove(&values) {
                             self.rows -= gone.len();
                             self.entries -= 1;
                         }
@@ -383,7 +408,7 @@ impl Hot {
         let mut uses: Vec<u64> = self
             .probes
             .values()
-            .flat_map(|m| m.values().map(|(_, u)| *u))
+            .flat_map(|m| m.values().map(|(_, u, _)| *u))
             .chain(self.contains.values().map(|(_, u)| *u))
             .chain(self.large.values().flat_map(|m| m.values().copied()))
             .chain(
@@ -396,7 +421,7 @@ impl Hot {
         let cut = uses.get(uses.len() / 2).copied().unwrap_or(0);
         let mut rows = 0usize;
         for by_values in self.probes.values_mut() {
-            by_values.retain(|_, (r, u)| {
+            by_values.retain(|_, (r, u, _)| {
                 let keep = *u > cut;
                 if keep {
                     rows += r.len();
@@ -784,14 +809,21 @@ impl Tiered {
         excluded: usize,
         live: impl Fn(&Row) -> bool,
     ) -> Result<bool, EvalError> {
-        let large = {
-            let mut hot = self.hot.borrow_mut();
-            hot.probe(cols, values).is_none() && hot.is_large(cols, values)
-        };
-        if !large {
-            let cold = self.cold_rows(cols, values, None, &|_| true)?;
+        let cached = self.hot.borrow_mut().probe(cols, values);
+        if let Some(cold) = cached {
             let (gone, added) = self.corrections(cols, values, &cold, |_| true);
             return Ok(cold.iter().enumerate().any(|(i, r)| !gone.contains(&i) && live(r)) || added.iter().any(live));
+        }
+        if let Some(row) = self.hot.borrow_mut().witness(cols, values)
+            && self.overlay.get(&row).is_none_or(|(support, _)| *support > 0)
+            && live(&row)
+        {
+            return Ok(true);
+        }
+        // A newly carried overlay can already contain rows before the database has a first version.
+        let (_, added) = self.corrections(cols, values, &[], |_| true);
+        if added.iter().any(&live) {
+            return Ok(true);
         }
         let Some(v) = self.cold.version()? else {
             return Ok(false);
@@ -801,10 +833,38 @@ impl Tiered {
             let (mut first, more) = self.cold.probe_some(self.rel, cols, values, v, n)?;
             first.sort_unstable();
             let (gone, added) = self.corrections(cols, values, &first, |_| true);
-            if first.iter().enumerate().any(|(i, r)| !gone.contains(&i) && live(r)) || added.iter().any(&live) {
+            if let Some(row) = first
+                .iter()
+                .enumerate()
+                .find_map(|(i, r)| (!gone.contains(&i) && live(r)).then(|| r.clone()))
+            {
+                if more {
+                    self.hot
+                        .borrow_mut()
+                        .keep_answer(cols, values, Arc::new(vec![row]), false);
+                } else {
+                    self.observe(cols, false, first.len());
+                    let mut hot = self.hot.borrow_mut();
+                    if first.len() <= hot.largest() {
+                        hot.keep_probe(cols, values, Arc::new(first));
+                    } else {
+                        hot.mark_large(cols, values);
+                        hot.keep_answer(cols, values, Arc::new(vec![row]), false);
+                    }
+                }
+                return Ok(true);
+            }
+            if added.iter().any(&live) {
                 return Ok(true);
             }
             if !more {
+                self.observe(cols, false, first.len());
+                let mut hot = self.hot.borrow_mut();
+                if first.len() <= hot.largest() {
+                    hot.keep_probe(cols, values, Arc::new(first));
+                } else {
+                    hot.mark_large(cols, values);
+                }
                 return Ok(false);
             }
             n = n.saturating_mul(2);
@@ -1959,3 +2019,7 @@ mod tests {
         assert_eq!(store.delta().count(), 300, "earlier deletions remain visible");
     }
 }
+
+#[cfg(test)]
+#[path = "cold_existence_tests.rs"]
+mod cold_existence_tests;

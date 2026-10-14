@@ -231,6 +231,7 @@ pub(crate) struct Plan {
     pub regime: Regime,
     /// When the rule only copies one atom's rows into its head: how, column by column.
     pub copy: Option<CopyPlan>,
+    pub upsert_delete: Option<crate::upsert::UpsertDelete>,
     /// A re-evaluated rule: when it may be left alone.
     pub skip: Skip,
     /// When the rule is a table's frame (`Persistence::Frame`): the stores its native operator reads.
@@ -300,6 +301,7 @@ pub(crate) struct CopyPlan {
     cols: Vec<ColCheck>,
     /// Where each head column comes from.
     head: Vec<HeadSrc>,
+    identity: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -348,11 +350,16 @@ impl CopyPlan {
                 _ => return None,
             });
         }
-        Some(CopyPlan { cols, head })
+        let identity = head.len() == cols.len()
+            && head
+                .iter()
+                .enumerate()
+                .all(|(i, src)| matches!(src, HeadSrc::Col(j) if i == *j));
+        Some(CopyPlan { cols, head, identity })
     }
 
     /// The head row `row` maps to, if it matches the atom.
-    pub(crate) fn row(&self, cx: &Ctx<'_>, row: &[Value]) -> ExprResult<Option<Row>> {
+    pub(crate) fn row(&self, cx: &Ctx<'_>, row: &Row) -> ExprResult<Option<Row>> {
         if row.len() != self.cols.len() {
             return Err(bug(format!("{} terms against {} values", self.cols.len(), row.len())));
         }
@@ -372,6 +379,9 @@ impl CopyPlan {
             if !ok {
                 return Ok(None);
             }
+        }
+        if self.identity {
+            return Ok(Some(row.clone()));
         }
         let mut out = Vec::with_capacity(self.head.len());
         for src in &self.head {
@@ -681,6 +691,7 @@ impl Plan {
             head,
             aggregate,
             copy,
+            upsert_delete: None,
             skip,
             frame: None,
         })

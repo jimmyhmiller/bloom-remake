@@ -748,3 +748,7 @@ The kernel code is not yet used by the engine and is not merged into scale-bench
 epoch/delta handling, tiered/lattice integration, word ingest and physical-plan execution remain. U32
 lanes/chunk arenas and specialized compound storage remain open. No new speedup/acceptance claim;
 the last tuned diagnostic remains 13,168 records/s. Next work must integrate the actual execution path.
+
+### Store microbenchmarks: two modest wins and one rejected design
+
+[Store experiments](STORE-MICROBENCHMARKS.md) implement bounded cold existence reads with cached witnesses, identity-copy row reuse, and a native evaluator for the exact generated upsert deletion join. Synthetic full-engine upsert trials show roughly 2–8% lower wall time; first large-prefix existence queries materialize one row instead of the whole prefix. The identity-ordered index-bucket prototype is removed: some updates improved, but a read case became 94.7× slower from restoring canonical order. Temporary benchmarks were discarded; semantic/recovery regressions remain. No full Kafka performance claim or promotion.

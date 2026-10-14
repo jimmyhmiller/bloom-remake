@@ -436,6 +436,7 @@ impl Engine {
                 continue;
             }
             let mut plan = Plan::new(rule)?;
+            plan.upsert_delete = crate::upsert::UpsertDelete::of(p, rule);
             plan.frame = p
                 .rels
                 .get(rule.head.rel)
@@ -1896,6 +1897,12 @@ impl Engine {
         let cx = self.ctx(p, input);
         let mut out = Terms::default();
         // A copy rule's changed rows map straight to head rows (a full evaluation takes the general way).
+        if let Some(upsert) = &plan.upsert_delete {
+            let (heads, examined) = upsert.run(&self.stores, &drivers)?;
+            out.heads = heads;
+            out.examined = examined;
+            return Ok(out);
+        }
         if let Some(copy) = &plan.copy {
             let mut rest = Vec::new();
             for (driver, pos) in drivers {
