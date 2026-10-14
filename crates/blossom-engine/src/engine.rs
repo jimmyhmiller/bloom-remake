@@ -129,6 +129,9 @@ pub struct Engine {
     /// to the next (docs/design/DATABASE.md §7). A lattice table's next state merges the frame's rows with the other
     /// contributions, so its `Next` store holds them all.
     framed: BTreeMap<RelId, rule::FramePlan>,
+    /// A framed table whose only other next-state writer is the generated identity copy of its upsert
+    /// staging relation. Read that contribution directly: it needs no second store or support maintenance.
+    upsert_next: BTreeMap<RelId, (RuleId, StoreKey)>,
     /// The framed tables that may be tiered (durable, and written by no rule but their next state's), with their key
     /// columns.
     tierable: BTreeMap<RelId, Vec<usize>>,
@@ -494,7 +497,10 @@ impl Engine {
         let mut stores = Stores::default();
         for (id, r) in p.rels.iter_enumerated() {
             let blobs = rel_holds_blobs(p, id);
-            stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?, blobs));
+            stores.insert(
+                StoreKey::Main(id),
+                Store::new(cell_spec(p, &kinds, id, 0)?, blobs).with_schema(&r.schema, &p.types),
+            );
             if matches!(r.class, RelClass::Channel(_)) {
                 stores.insert(StoreKey::Sent(id), Store::new(cell_spec(p, &kinds, id, 1)?, blobs));
             }
@@ -507,7 +513,13 @@ impl Engine {
                     .map(|r| r.head.rel)
                     .ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let spec = cell_spec(p, &kinds, rel, 0)?;
-                stores.insert_absent(plan.head, || Store::new(spec, rel_holds_blobs(p, rel)));
+                stores.insert_absent(plan.head, || {
+                    let store = Store::new(spec, rel_holds_blobs(p, rel));
+                    match p.rels.get(rel) {
+                        Some(r) => store.with_schema(&r.schema, &p.types),
+                        None => store,
+                    }
+                });
             }
         }
         let mut framed = BTreeMap::new();
@@ -517,6 +529,30 @@ impl Engine {
                 && stores.get(&plan.head).is_some_and(|s| s.cell.is_none())
             {
                 framed.insert(rel, frame.clone());
+            }
+        }
+        let mut upsert_next = BTreeMap::new();
+        for c in &p.constructs {
+            let ConstructKind::Upsert { rel, staging, .. } = c.kind else {
+                continue;
+            };
+            if !framed.contains_key(&rel) {
+                continue;
+            }
+            let writers: Vec<_> = inductive
+                .iter()
+                .filter_map(|id| {
+                    let plan = plans.get(id)?;
+                    (plan.head == StoreKey::Next(rel) && plan.frame.is_none()).then_some((*id, plan))
+                })
+                .collect();
+            let [(id, plan)] = writers.as_slice() else { continue };
+            let Some(rule) = p.rules.get(*id) else { continue };
+            if c.rules.contains(id)
+                && crate::upsert::is_identity_next(rule, rel, staging)
+                && plan.regime == Regime::Delta
+            {
+                upsert_next.insert(rel, (*id, StoreKey::Main(staging)));
             }
         }
         let deduced: BTreeSet<RelId> = p
@@ -591,6 +627,7 @@ impl Engine {
             fn_work: None,
             scoped: scoped_derived,
             framed,
+            upsert_next,
             tierable,
             tiered: BTreeSet::new(),
             hot_rows: cfg.hot_rows.unwrap_or(crate::store::HOT_ROWS),
@@ -639,7 +676,9 @@ impl Engine {
             wanted.insert((StoreKey::Main(*rel), cols.clone()));
         }
         for (key, cols) in wanted {
-            if let Some(s) = self.stores.get_mut(&key) {
+            if let Some(s) = self.stores.get_mut(&key)
+                && !s.support_has_key(&cols)
+            {
                 s.ensure_index(&cols);
             }
         }
@@ -1372,7 +1411,7 @@ impl Engine {
                 None => {
                     let s = self
                         .stores
-                        .get(&plan.head)
+                        .get(&self.next_source(rel))
                         .ok_or_else(|| internal_error!("no next store"))?;
                     (s.ins.iter().cloned().collect(), s.deletions().iter().cloned().collect())
                 }
@@ -1540,6 +1579,7 @@ impl Engine {
                     }
                     continue;
                 }
+                let s = self.stores.get(&self.next_source(rel)).unwrap_or(s);
                 for r in s.present()? {
                     next.insert(rel, r.clone());
                 }
@@ -1559,6 +1599,13 @@ impl Engine {
             .get(&StoreKey::Main(rel))
             .ok_or_else(|| internal_error!("no store for the tiered table {rel:?}"))?
             .present_sorted()
+    }
+
+    /// The physically maintained source of a table's non-frame next-state contribution.
+    fn next_source(&self, rel: RelId) -> StoreKey {
+        self.upsert_next
+            .get(&rel)
+            .map_or(StoreKey::Next(rel), |(_, source)| *source)
     }
 
     /// The stores a table's frame reads.
@@ -1595,7 +1642,10 @@ impl Engine {
         let (rel, del, keep) = self.frame_stores(frame)?;
         let next = self
             .stores
-            .get(next)
+            .get(&match next {
+                StoreKey::Next(rel) => self.next_source(*rel),
+                _ => *next,
+            })
             .ok_or_else(|| internal_error!("no store for {next:?}"))?;
         let mut rows: BTreeSet<&Row> = rel.delta().map(|(r, _)| r).collect();
         rows.extend(del.delta().map(|(r, _)| r));
@@ -1656,7 +1706,7 @@ impl Engine {
         }
         let mut rows = self
             .stores
-            .get(&StoreKey::Next(rel))
+            .get(&self.next_source(rel))
             .map(Store::present_sorted)
             .transpose()?
             .unwrap_or_default();
@@ -1690,6 +1740,13 @@ impl Engine {
     /// Brings one rule's output up to date.
     fn maintain(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+        if self
+            .upsert_next
+            .get(&rule.head.rel)
+            .is_some_and(|(copy, _)| *copy == id)
+        {
+            return Ok(());
+        }
         {
             // Most rules see no change in a tick: tell so without taking a handle on the plan.
             let plan = self

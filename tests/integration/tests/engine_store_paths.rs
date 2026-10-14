@@ -13,7 +13,11 @@ use blossom_value::{
 use std::{path::Path, sync::Arc};
 #[cfg(test)]
 fn check(inputs: Vec<(u64, &str, Vec<Value>)>, last: u64) -> bool {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/engine/native_upsert.bls");
+    check_fixture("native_upsert", inputs, last)
+}
+#[cfg(test)]
+fn check_fixture(fixture: &str, inputs: Vec<(u64, &str, Vec<Value>)>, last: u64) -> bool {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixtures/engine/{fixture}.bls"));
     let (result, _) = compile_file(
         path.to_str().unwrap(),
         &[NodeSpec {
@@ -172,6 +176,106 @@ fn an_identity_view_reuses_the_immutable_source_row() {
         if tick == 1 {
             assert_eq!(out.observed[&t].len(), 1);
             assert!(Arc::ptr_eq(&out.observed[&t][0], &out.observed[&view][0]));
+        }
+    }
+}
+
+#[test]
+fn upserts_with_another_next_state_writer_match_the_oracle() {
+    let u = |v| Value::Int(blossom_value::IntValue::U64(v));
+    let payload = |v| Value::Vec(Arc::from(vec![u(v)]));
+    assert!(!check_fixture(
+        "upsert_other_next",
+        vec![
+            (0, "put", vec![u(1), u(2), payload(3)]),
+            (0, "extra", vec![u(4), u(5), payload(6)]),
+            (1, "allow", vec![u(1), u(2)]),
+            (1, "allow", vec![u(4), u(5)]),
+            (1, "put", vec![u(1), u(2), payload(7)]),
+            (2, "allow", vec![u(1), u(2)]),
+            (2, "extra", vec![u(8), u(9), payload(10)]),
+            (3, "drop", vec![u(1), u(2)]),
+            (3, "allow", vec![u(8), u(9)]),
+        ],
+        6
+    ));
+}
+
+#[test]
+fn staged_next_state_is_read_without_duplicate_maintenance() {
+    use blossom_ir::core::{ConstructKind, RuleKind};
+    use blossom_value::time::Instant;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/engine/native_upsert.bls");
+    let artifact = compile_file(
+        path.to_str().unwrap(),
+        &[NodeSpec {
+            name: "n1".into(),
+            role: None,
+        }],
+    )
+    .0
+    .unwrap()
+    .0;
+    let program = artifact.program.get();
+    let copy = program
+        .constructs
+        .iter()
+        .find_map(|c| {
+            let ConstructKind::Upsert { .. } = c.kind else {
+                return None;
+            };
+            c.rules
+                .iter()
+                .copied()
+                .find(|id| program.rules.get(*id).is_some_and(|r| r.kind == RuleKind::Inductive))
+        })
+        .unwrap();
+    let t = artifact.rel_named("t").unwrap();
+    let mut engine = blossom_engine::Engine::new(
+        artifact.program.clone(),
+        NodeId(0),
+        blossom_engine::EngineConfig {
+            node_names: vec![Arc::from("n1")],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let u = |v| Value::Int(blossom_value::IntValue::U64(v));
+    for tick in 0..4 {
+        let events = if tick == 0 {
+            vec![(
+                artifact.rel_named("put").unwrap(),
+                Arc::from(vec![u(1), u(2), Value::Vec(Arc::from(vec![u(3)]))]),
+            )]
+        } else {
+            vec![(artifact.rel_named("allow").unwrap(), Arc::from(vec![u(1), u(2)]))]
+        };
+        engine
+            .step(
+                &blossom_ir::tick::StepInput {
+                    node: NodeId(0),
+                    incarnation: 1,
+                    tick: Tick(tick),
+                    now: Instant(tick as i64),
+                    events: &events,
+                    delivered: &[],
+                    ingress: &[],
+                    blobs: &blossom_value::NoBlobs,
+                },
+                &[],
+            )
+            .unwrap();
+        assert_eq!(engine.carried_rows(t).unwrap().len(), 1);
+        assert!(engine.work_by_rule().get(&copy).is_none_or(|w| w.writes == 0));
+        assert!(
+            !engine
+                .resident_by_store()
+                .iter()
+                .any(|(r, kind, _)| *r == t && *kind == "next")
+        );
+        if tick == 1 {
+            let carried = engine.carried_instance().unwrap();
+            engine.reset(carried).unwrap();
         }
     }
 }

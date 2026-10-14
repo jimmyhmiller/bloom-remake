@@ -915,7 +915,7 @@ pub(crate) struct Store {
     /// Set relation: the support of each row. Lattice relation: the support of each contribution. Hashed: a write
     /// costs one hash and one comparison, not a row comparison per tree level; nothing reads its order (readers whose
     /// output shows an order sort, [`Store::present_sorted`]).
-    counts: blossom_base::det::DetMap<Row, i64>,
+    counts: crate::row_support::RowSupport,
     /// Lattice relation: each cell's live contributions, and its merged row.
     contributions: BTreeMap<Vec<Value>, BTreeSet<Row>>,
     merged: BTreeMap<Vec<Value>, Row>,
@@ -954,7 +954,7 @@ fn holds(row: &[Value], cols: &[usize], values: &[Value]) -> bool {
 
 /// A store's present rows, in order.
 pub(crate) enum Present<'a> {
-    Set(blossom_base::det::Iter<'a, Row, i64>),
+    Set(crate::row_support::Iter<'a>),
     Lattice(std::collections::btree_set::Iter<'a, Row>),
 }
 
@@ -979,12 +979,24 @@ impl Store {
         }
     }
 
+    /// Compile the physical support key once; lattice contributions retain full-row support.
+    pub fn with_schema(mut self, schema: &blossom_ir::core::Schema, types: &blossom_value::TypeTable) -> Self {
+        if self.cell.is_none()
+            && let Some(layout) = crate::row_support::Layout::of(schema, types)
+        {
+            self.counts = crate::row_support::RowSupport::with_layout(layout);
+        }
+        self
+    }
+
     /// An empty store of the same kind (a tiered store becomes the in-memory store of its table).
     pub fn emptied(&self) -> Store {
-        Store::new(
+        let mut store = Store::new(
             self.cell.clone(),
             self.blob_refs.is_some() || self.tiered.as_ref().is_some_and(|t| t.blobs),
-        )
+        );
+        store.counts = self.counts.emptied();
+        store
     }
 
     /// A tiered store: a set table's rows on the cold side.
@@ -1110,24 +1122,11 @@ impl Store {
     }
 
     /// Adjusts a row through one map lookup; zero support removes that same entry without rehashing the row.
-    fn change_count(&mut self, row: &Row, w: i64) -> (i64, i64) {
-        use blossom_base::det::Entry;
-        match self.counts.entry(row.clone()) {
-            Entry::Occupied(mut entry) => {
-                let before = *entry.get();
-                let after = before + w;
-                if after == 0 {
-                    entry.remove();
-                } else {
-                    *entry.get_mut() = after;
-                }
-                (before, after)
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(w);
-                (0, w)
-            }
-        }
+    fn change_count(&mut self, row: &Row, w: i64) -> ExprResult<(i64, i64)> {
+        // Rows reaching an engine store have been checked against their relation schema.
+        self.counts
+            .change(row, w)
+            .ok_or_else(|| bug("support row does not match its compiled key layout".into()))
     }
 
     /// Adds `w` (non-zero) to the support of `row`.
@@ -1142,7 +1141,7 @@ impl Store {
             None => {}
         }
         let Some(spec) = self.cell.clone() else {
-            let (before, after) = self.change_count(&row, w);
+            let (before, after) = self.change_count(&row, w)?;
             if after < 0 {
                 return Err(bug(format!("the support of {row:?} went negative")));
             }
@@ -1157,7 +1156,7 @@ impl Store {
         if spec.is_bottom(&row)? {
             return Ok(());
         }
-        let (before, after) = self.change_count(&row, w);
+        let (before, after) = self.change_count(&row, w)?;
         if after < 0 {
             return Err(bug(format!("the support of {row:?} went negative")));
         }
@@ -1250,7 +1249,7 @@ impl Store {
     /// A tiered store's support other than the carry (a program fact's).
     fn add_tiered(&mut self, row: Row, w: i64) -> ExprResult<()> {
         let was = self.contains(&row).map_err(ExprError::Eval)?;
-        let (_, after) = self.change_count(&row, w);
+        let (_, after) = self.change_count(&row, w)?;
         if after < 0 {
             return Err(bug(format!("the support of {row:?} went negative")));
         }
@@ -1549,6 +1548,11 @@ impl Store {
             .is_some_and(|bucket| bucket.iter().any(|row| holds(row, cols, values) && visit(row)))
     }
 
+    /// Exact key probes use the compact support map directly; range probes still maintain ordered indexes.
+    pub fn support_has_key(&self, cols: &[usize]) -> bool {
+        self.cell.is_none() && self.tiered.is_none() && self.counts.has_key(cols)
+    }
+
     /// Builds the index on `cols` if there is none.
     /// (A tiered store keeps none: the cold side keeps its own.)
     pub fn ensure_index(&self, cols: &[usize]) {
@@ -1593,6 +1597,9 @@ impl Store {
         if cols.is_empty() {
             return n;
         }
+        if let Some(keys) = self.counts.key_count(cols) {
+            return n.div_ceil(keys.max(1));
+        }
         self.ensure_index(cols);
         let keys = self.indexes.borrow().get(cols).map_or(1, BTreeMap::len).max(1);
         n.div_ceil(keys)
@@ -1618,6 +1625,11 @@ impl Store {
         }
         if cols.is_empty() {
             return Ok(self.present()?.cloned().collect());
+        }
+        if self.cell.is_none()
+            && let Some(rows) = self.counts.probe(cols, values)
+        {
+            return Ok(rows.map(|(r, _)| r.clone()).collect());
         }
         self.ensure_index(cols);
         let indexes = self.indexes.borrow();
@@ -1647,6 +1659,11 @@ impl Store {
         let live = |r: &Row| !old || !self.ins.contains(r);
         if cols.is_empty() {
             return Ok(self.present()?.any(live));
+        }
+        if self.cell.is_none()
+            && let Some(mut rows) = self.counts.probe(cols, values)
+        {
+            return Ok(rows.any(|(r, _)| live(r)));
         }
         self.ensure_index(cols);
         let indexes = self.indexes.borrow();

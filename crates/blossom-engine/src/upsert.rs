@@ -134,3 +134,28 @@ impl UpsertDelete {
         Ok((heads, examined))
     }
 }
+
+/// Exact identity copy of staging into next state, recognized structurally and by construct membership
+/// at the caller. No predicate, repeated variable, sender or projected column can be hidden by fusion.
+pub(crate) fn is_identity_next(rule: &Rule, rel: RelId, staging: RelId) -> bool {
+    let [Literal::Pos(a)] = rule.body.lits.as_slice() else {
+        return false;
+    };
+    if rule.kind != RuleKind::Inductive
+        || rule.head.rel != rel
+        || rule.head.mode != HeadMode::Insert
+        || a.rel != staging
+        || a.sender.is_some()
+        || a.principal.is_some()
+        || a.weight.is_some()
+        || a.spec.is_some()
+        || a.args.len() != rule.head.args.len()
+    {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    a.args
+        .iter()
+        .zip(&rule.head.args)
+        .all(|(arg, head)| matches!(arg, Term::Var(v) if seen.insert(*v)) && head == &HeadArg::Term(arg.clone()))
+}

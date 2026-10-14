@@ -386,6 +386,7 @@ dependencies = [
  "blossom-kernel",
  "blossom-lattice",
  "blossom-value",
+ "smallvec",
 ]
 
 [[package]]
