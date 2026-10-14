@@ -24,8 +24,8 @@ Two matched live pairs, in reversed execution order, use 60-second max and 60-se
 
 | Pair | Reference records/s | Retained maps/joins records/s | Change |
 |---|---:|---:|---:|
-| Reference → candidate | 15,006 | 15,337 | +2.2% |
-| Candidate → reference | 13,326 | 14,645 | +9.9% |
+| Reference → candidate | 14,892 | 15,220 | +2.2% |
+| Candidate → reference | 13,219 | 14,536 | +10.0% |
 
 All four trials completed and verified 4,386,216 records, zero loss, misplacement, duplicates, present-unacknowledged or foreign records. Scratch databases were removed only after successful verification. This is not a substantial capacity improvement or a Kafka lead; defaults remain unchanged. Frozen source/binaries and reports are retained on the server under plan-*-source.tar, blossom-plan-* and retained-plan-*. The cache trials are terminal.
 
@@ -35,7 +35,7 @@ Store::estimate used ensure_index to obtain exact fan-out for every candidate co
 
 The experimental lazy_indexes strategy keeps costing separate from index construction. Existing indexes provide exact cardinality; probes covering a declared key have a one-row upper estimate; other candidates use a bounded deterministic sample and singleton frequency to estimate distinct keys heuristically. Sample statistics are cached by relation size class. Traversal can be skewed by storage layout; these estimates are not an unbiased statistical guarantee. Actual reads still create exact indexes on demand. New index construction advances the cached order's estimate epoch so later planning can use its exact statistics. No sampling result changes relation contents or predicate evaluation. Tiered stores retain their observed-probe estimates.
 
-Options: storage.lazy_indexes / replay --lazy-indexes / benchmark LAZY_INDEXES. Default false during comparison. A regression shows estimating three candidate key shapes creates no indexes, while executing one probe builds exactly that index; native map/join state and ghost-error comparisons also run with lazy costing. The instrumented checked window reduces built indexes 602 → 497 and secondary-index row updates 183,379 → 149,079 (18.7% fewer). Seven rotated trials with physical measurement off give reference median 0.611482 s, lazy costing 0.595045 s (2.7% less elapsed), and lazy costing plus retained maps/joins 0.508810 s (16.8% less elapsed). These counters do not imply equal CPU savings. Live combined-plan comparisons are pending.
+Options: storage.lazy_indexes / replay --lazy-indexes / benchmark LAZY_INDEXES. Default false during comparison. A regression shows estimating three candidate key shapes creates no indexes, while executing one probe builds exactly that index; native map/join state and ghost-error comparisons also run with lazy costing. The instrumented checked window reduces built indexes 602 → 497 and secondary-index row updates 183,379 → 149,079 (18.7% fewer). Seven rotated trials with physical measurement off give reference median 0.611482 s, lazy costing 0.595045 s (2.7% less elapsed), and lazy costing plus retained maps/joins 0.508810 s (16.8% less elapsed). These counters do not imply equal CPU savings. Completed combined-plan comparisons follow.
 
 
 ## Verification and limits
@@ -43,3 +43,25 @@ Options: storage.lazy_indexes / replay --lazy-indexes / benchmark LAZY_INDEXES. 
 Independent oracle comparisons cover simultaneous three-way changes, duplicate generators, negation, lattice lookup updates, ghost errors, actual arithmetic failures, eviction and reset. Tiered recovery/flush/compaction tests run with both operators enabled, along with two workers. A borrowed-query collision test checks exact selection under fixed and nonce hash states. A separate estimator regression checks that rejected candidates create no indexes, actual probes build exact indexes, and index construction invalidates cached join-order statistics.
 
 This iteration does not eliminate the hundreds of maintained relation heads, compile the expression executor, replace database decoding or independently commit partitions. It does not establish a semantic throughput ceiling or achieve the requested Kafka lead. New execution strategies remain explicit experimental settings during measurement.
+
+
+## Final combined broker result
+
+Eight additional trials use the same 60/60-second configuration, source, durability and assigned cores. Capacity is the aggregate report.csv/summary phase rate, not the sum of individually rounded producer rates (which uses slightly different completion denominators).
+
+| Comparison (execution order) | Reference records/s | Candidate records/s | Candidate change |
+|---|---:|---:|---:|
+| Combined serial → reference | 13,430 | 15,992 | +19.1% |
+| Reference → combined serial | 15,063 | 16,186 | +7.5% |
+| Combined parallel → combined serial | 16,084 | 16,862 | +4.8% |
+| Combined serial → combined parallel | 15,872 | 15,628 | -1.5% |
+
+Both matched serial comparisons improve, but the size varies substantially. Parallelism adds no repeatable further capacity gain: one pair improves and the reversed pair regresses, while sampled mean broker CPU increases from 106–107% serial to 115–122% parallel. Serial peak sampled RSS is 723/787 MiB versus reference 713/752 MiB; other serial comparison runs reach 704/771 MiB and parallel 756/761 MiB. No consistent memory or fault-latency improvement is established. Fault ack p99 for matched serial pairs: reference 6,394/6,590 ms; candidate 6,545/5,820 ms. Do not select only the favorable pair.
+
+These eight trials verified 9,491,814 records. All twelve live runs in this iteration verified 13,878,030 records with zero loss, misplacement, duplication, present-unacknowledged or foreign records. Every build, replay and benchmark job is terminal; verified scratch databases were removed. Frozen executables, source archives, SHA-256 hashes, client/resource logs and full reports remain at ~/soak-results/{plan-*,retained-plan-*,combined-plan-*}. Local parsed results: /tmp/blossom-plan-tooling/broker-results.json. The initial replay attempt before the lazy binary finished building failed immediately with a missing executable; it produced no valid timing and was rerun after build completion.
+
+The observed gain remains below the requested architectural improvement and far below 50% above the historical Kafka rate. No fresh Kafka comparison was run, and the shorter phases prevent direct capacity comparisons with the earlier 120/180-second runs. The retained operator avoids recomputation and preserves object identity; it does not remove intermediate head storage, most cold decoding or coordinator state updates. Costing stops rejected plans from adding indexes; necessary indexes still remain. The next larger backend change must remove those materialization/storage boundaries rather than claiming these savings will extrapolate to the target.
+
+Implementation is committed as 4e0c03c8 on store-experiments. Strategies remain opt-in: storage.map_cache_rows = 8192, storage.map_cache_joins = true, storage.lazy_indexes = true. Generic program defaults stay unchanged because these workload-specific measurements do not establish a universal improvement. Two workers are not recommended based on this experiment.
+
+Final checks pass: 56 base units, 25 engine units, four CLI tests, 13 runtime units; native store, planner, parallel, retained-map/oracle and runtime configuration integrations; database/tiered recovery (both alternatives enabled) and Kafka produce/crash verification. Clippy denies warnings; formatting, diff checks and WASM compilation pass. All fourteen simulator suites and the server multiprocess liveness/kafka3/raft3 suites were not rerun in this iteration. The explicit zero-arity cell lookup documentation/frontend mismatch found while preparing the regression is recorded in bloom-remake-engine-design and remains open.

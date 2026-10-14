@@ -760,3 +760,7 @@ the last tuned diagnostic remains 13,168 records/s. Next work must integrate the
 ## Larger engine changes, October 14, 2026
 
 [Keyed maintenance experiments](KEYED-MAINTENANCE-EXPERIMENTS.md) implement direct staged next-state reads, eligible identity-store fusion, compact schema support with borrowed compound keys, boolean private deletion views, and optional bounded read-only evaluation workers. Final serial capacity is mixed (+2.0% / -3.1%); two workers beat matched final serial runs by 7.9% / 8.9%, reaching 15,066 / 15,107 records/s. This is not the requested Kafka lead. All eighteen trials verified every record with zero verification errors, and every build/test/benchmark job is terminal. Full pipeline fusion, packed expression/database execution and independent partition engines remain.
+
+## Physical-plan execution experiments, October 14, 2026
+
+[Retained-plan experiments](RETAINED-PLAN-EXPERIMENTS.md) add bounded retained outputs for pure maps/joins and prevent costing rejected join alternatives from creating permanent indexes. Combined checked replay elapsed improves 16.8% over seven rotated trials; matched serial broker pairs improve 19.1% and 7.5%. Two-worker comparisons are +4.8% / -1.5%, so no further worker gain is established. All twelve live runs verified 13,878,030 records with zero errors; all processes are terminal. Strategies remain opt-in. The Kafka target is unmet, and intermediate head storage/cold decoding/coordinator updates remain.
