@@ -345,6 +345,10 @@ public class Soak {
     /// A phase of the soak: a name and its window, in seconds since the epoch.
     record Window(String name, double from, double to) {}
 
+    static String csvCell(String text) {
+        return "\"" + text.replace("\"", "\"\"") + "\"";
+    }
+
     static int report(Map<String, String> o) throws Exception {
         Path dir = Path.of(need(o, "dir"));
         // events.log: "<seconds since the soak began> <seconds since the epoch> <what>".
@@ -383,7 +387,7 @@ public class Soak {
             Histogram ack = merged(dir, producers, w);
             Histogram e2e = merged(dir, "consumer-live-", w);
             double secs = w.to() - w.from();
-            System.out.printf("%s,%.0f,%.0f,%s,%s,%s,%s,%.0f,%s,%s,%s,%s%n", w.name(), secs, ack.getTotalCount() / secs,
+            System.out.printf("%s,%.0f,%.0f,%s,%s,%s,%s,%.0f,%s,%s,%s,%s%n", csvCell(w.name()), secs, ack.getTotalCount() / secs,
                 ms(ack, 50), ms(ack, 99), ms(ack, 99.9), ms(ack, 100), e2e.getTotalCount() / secs, ms(e2e, 50),
                 ms(e2e, 99), ms(e2e, 99.9), ms(e2e, 100));
         }
