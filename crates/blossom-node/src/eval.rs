@@ -44,6 +44,14 @@ impl<E: Evaluator + ?Sized> Evaluator for &E {
 
 /// A stateful evaluator: what a node runs.
 pub trait Executor: Send {
+    /// Enable optional offline physical-plan measurement.
+    fn measure_plan(&mut self, _on: bool) -> bool {
+        false
+    }
+    /// Actual executor plan, when inspection is supported.
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        None
+    }
     /// Starts from `carried` (at boot: the recovered durable state). The next step continues from it.
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError>;
     /// Starts from the durable tables of `cold` (the node's database, at its newest version) and the volatile rows
@@ -200,6 +208,12 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
 }
 
 impl<X: Executor + ?Sized> Executor for Box<X> {
+    fn measure_plan(&mut self, on: bool) -> bool {
+        (**self).measure_plan(on)
+    }
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        (**self).plan_report()
+    }
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         (**self).reset(carried)
     }
@@ -254,6 +268,13 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
 }
 
 impl Executor for blossom_engine::Engine {
+    fn measure_plan(&mut self, on: bool) -> bool {
+        blossom_engine::Engine::measure_plan(self, on);
+        true
+    }
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        Some(blossom_engine::Engine::plan_report(self))
+    }
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         blossom_engine::Engine::reset(self, carried)
     }
@@ -574,6 +595,13 @@ impl CheckedExecutor {
 }
 
 impl Executor for CheckedExecutor {
+    fn measure_plan(&mut self, on: bool) -> bool {
+        self.engine.measure_plan(on);
+        true
+    }
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        Some(self.engine.plan_report())
+    }
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         self.oracle.reset(carried.clone())?;
         self.engine.reset(carried)

@@ -96,7 +96,7 @@ impl Stores {
         }
     }
 
-    fn physical(&self, mut key: StoreKey) -> StoreKey {
+    pub(crate) fn physical(&self, mut key: StoreKey) -> StoreKey {
         while let Some(Some(source)) = self.aliases.get(key.slot()) {
             key = *source;
         }

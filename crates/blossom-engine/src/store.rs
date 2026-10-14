@@ -912,6 +912,8 @@ impl Tiered {
 /// One relation's rows.
 #[derive(Debug, Default)]
 pub(crate) struct Store {
+    inspection: Option<InspectionCounters>,
+
     pub cell: Option<CellSpec>,
     /// Set relation: the support of each row. Lattice relation: the support of each contribution. Hashed: a write
     /// costs one hash and one comparison, not a row comparison per tree level; nothing reads its order (readers whose
@@ -989,7 +991,36 @@ impl Iterator for RetractedRows<'_> {
     }
 }
 
+#[derive(Debug, Default)]
+struct InspectionCounters {
+    probes: std::sync::atomic::AtomicU64,
+    membership: u64,
+    index_updates: u64,
+    index_build_rows: std::sync::atomic::AtomicU64,
+    bulk_rows: u64,
+    bulk_clears: u64,
+}
+
 impl Store {
+    pub(crate) fn measure_plan(&mut self, on: bool) {
+        self.inspection = on.then(InspectionCounters::default);
+    }
+    pub(crate) fn inspection_operations(&self) -> Option<crate::StoreOperations> {
+        self.inspection.as_ref().map(|m| crate::StoreOperations {
+            probe_calls: m.probes.load(std::sync::atomic::Ordering::Relaxed),
+            membership_changes: m.membership,
+            secondary_index_row_updates: m.index_updates,
+            secondary_index_build_rows: m.index_build_rows.load(std::sync::atomic::Ordering::Relaxed),
+            bulk_retracted_rows: m.bulk_rows,
+            bulk_index_clears: m.bulk_clears,
+        })
+    }
+    fn count_probe(&self) {
+        if let Some(m) = &self.inspection {
+            m.probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// A store; `blobs` when the relation's rows can hold blobs, which it then counts.
     pub fn new(cell: Option<CellSpec>, blobs: bool) -> Store {
         Store {
@@ -1047,6 +1078,16 @@ impl Store {
             self.blob_refs.is_some() || self.tiered.as_ref().is_some_and(|t| t.blobs),
         );
         store.counts = self.counts.emptied();
+        store.inspection = self.inspection.as_ref().map(|m| InspectionCounters {
+            probes: std::sync::atomic::AtomicU64::new(m.probes.load(std::sync::atomic::Ordering::Relaxed)),
+            membership: m.membership,
+            index_updates: m.index_updates,
+            index_build_rows: std::sync::atomic::AtomicU64::new(
+                m.index_build_rows.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            bulk_rows: m.bulk_rows,
+            bulk_clears: m.bulk_clears,
+        });
         if self.boolean.is_some() {
             store.make_boolean();
         }
@@ -1471,6 +1512,7 @@ impl Store {
     }
 
     pub fn contains(&self, row: &Row) -> Result<bool, EvalError> {
+        self.count_probe();
         if let Some(rows) = &self.boolean {
             return Ok(rows.contains(row));
         }
@@ -1504,6 +1546,11 @@ impl Store {
         };
         self.touched = true;
         self.generation = self.generation.wrapping_add(n as u64);
+        if let Some(m) = &mut self.inspection {
+            m.membership += n as u64;
+            m.bulk_rows += n as u64;
+            m.bulk_clears += self.indexes.get_mut().len() as u64;
+        }
         // Everything present goes away, so empty the secondary indexes and blob counts once. Keep the index
         // definitions: later inserts in this tick must maintain the same probes.
         for index in self.indexes.get_mut().values_mut() {
@@ -1523,6 +1570,10 @@ impl Store {
     }
 
     fn show(&mut self, row: Row) {
+        if let Some(m) = &mut self.inspection {
+            m.membership += 1;
+            m.index_updates += self.indexes.get_mut().len() as u64;
+        }
         self.generation = self.generation.wrapping_add(1);
         if let Some(t) = self.tiered.as_deref_mut() {
             t.len += 1;
@@ -1542,6 +1593,10 @@ impl Store {
     }
 
     fn hide(&mut self, row: &Row) {
+        if let Some(m) = &mut self.inspection {
+            m.membership += 1;
+            m.index_updates += self.indexes.get_mut().len() as u64;
+        }
         self.generation = self.generation.wrapping_add(1);
         if let Some(t) = self.tiered.as_deref_mut() {
             t.len = t.len.saturating_sub(1);
@@ -1620,6 +1675,10 @@ impl Store {
 
     /// Builds the index on `cols` if there is none.
     /// (A tiered store keeps none: the cold side keeps its own.)
+    pub(crate) fn inspection_indexes(&self) -> Vec<Vec<usize>> {
+        self.indexes.borrow().keys().cloned().collect()
+    }
+
     pub fn ensure_index(&self, cols: &[usize]) {
         if cols.is_empty()
             || self.tiered.is_some()
@@ -1636,6 +1695,10 @@ impl Store {
         };
         for row in rows {
             index.entry(key(row, cols)).or_default().insert(row.clone());
+        }
+        if let Some(m) = &self.inspection {
+            m.index_build_rows
+                .fetch_add(self.present_len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         self.indexes.borrow_mut().insert(cols.to_vec(), index);
     }
@@ -1719,6 +1782,7 @@ impl Store {
 
     /// Whether a row of one version has columns `cols` holding `values` (without collecting them).
     pub fn any(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<bool, EvalError> {
+        self.count_probe();
         self.settled()?;
         if let Some(t) = &self.tiered {
             let matches = |r: &Row| holds(r, cols, values);
@@ -1753,6 +1817,7 @@ impl Store {
 
     /// The rows that were present at the start of the tick with columns `cols` holding `values`.
     pub fn old_rows(&self, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
+        self.count_probe();
         let mut out: Vec<Row> = self
             .new_rows(cols, values)?
             .into_iter()
@@ -1895,6 +1960,7 @@ impl Store {
 
     /// The rows of one version whose columns `cols` hold `values`.
     pub fn rows(&self, old: bool, cols: &[usize], values: &[Value]) -> Result<Vec<Row>, EvalError> {
+        self.count_probe();
         if old {
             self.old_rows(cols, values)
         } else {
@@ -2202,3 +2268,34 @@ mod cold_existence_tests;
 #[cfg(test)]
 #[path = "deleted_index_tests.rs"]
 mod deleted_index_tests;
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+    #[test]
+    fn optional_measurement_counts_membership_and_secondary_index_work() {
+        let mut store = Store::new(None, false);
+        assert!(store.inspection_operations().is_none());
+        store.measure_plan(true);
+        let row: Row = std::sync::Arc::from([Value::u64(1)]);
+        store.add(row.clone(), 1).unwrap();
+        store.ensure_index(&[0]);
+        store.ensure_index(&[0]); // A hit must not count another build.
+        store.add(row.clone(), 1).unwrap(); // Support only; membership unchanged.
+        store.add(row.clone(), -1).unwrap();
+        store.add(row.clone(), -1).unwrap();
+        store.add(row.clone(), 1).unwrap();
+        assert_eq!(store.rows(false, &[0], &[Value::u64(1)]).unwrap(), vec![row]);
+        store.retract_all().unwrap();
+        let m = store.inspection_operations().unwrap();
+        assert_eq!(m.membership_changes, 4);
+        assert_eq!(m.secondary_index_build_rows, 1);
+        assert_eq!(m.secondary_index_row_updates, 2);
+        assert_eq!(m.bulk_retracted_rows, 1);
+        assert_eq!(m.bulk_index_clears, 1);
+        assert!(m.probe_calls > 0);
+        assert_eq!(store.emptied().inspection_operations(), Some(m));
+        store.measure_plan(false);
+        assert!(store.inspection_operations().is_none());
+    }
+}

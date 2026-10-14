@@ -285,6 +285,7 @@ dependencies = [
 name = "blossom-cli"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "blossom-analysis",
  "blossom-artifact",
  "blossom-base",
@@ -388,6 +389,7 @@ dependencies = [
  "blossom-value",
  "parking_lot",
  "rayon",
+ "serde",
  "smallvec",
 ]
 

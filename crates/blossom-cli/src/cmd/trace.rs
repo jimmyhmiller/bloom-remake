@@ -48,6 +48,24 @@ pub struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum TraceCommand {
+    /// Attach checked replay work to the actual engine plan, as JSON.
+    Plan {
+        /// Read-only evaluation workers; state mutation remains serial.
+        #[arg(long, default_value_t = 1)]
+        workers: usize,
+        /// Disable optional physical counters and per-rule timers to assess their overhead.
+        #[arg(long)]
+        no_measurement: bool,
+        #[command(flatten)]
+        common: Common,
+        /// First included tick (earlier ticks still replay to establish state).
+        #[arg(long)]
+        first: Option<u64>,
+        /// Last included tick, inclusive.
+        #[arg(long)]
+        last: Option<u64>,
+    },
+
     /// Replay a trace, checking every tick against the recording.
     Replay {
         #[command(flatten)]
@@ -164,6 +182,10 @@ pub fn run(args: Args, cx: &Context) -> ExitCode {
 }
 
 fn open(common: &Common) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), String> {
+    open_workers(common, 1)
+}
+
+fn open_workers(common: &Common, workers: usize) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), String> {
     let artifact = match (&common.deploy, &common.program) {
         (Some(deploy), _) => load(deploy).map_err(|_| "the deployment did not load".to_owned())?.1,
         (None, Some(program)) => Arc::new(compile_program(program, &common.nodes, &common.params)?),
@@ -171,7 +193,8 @@ fn open(common: &Common) -> Result<(Arc<BlsArtifact>, Replay<BufReader<File>>), 
     };
     let file = File::open(&common.trace).map_err(|e| format!("{}: {e}", common.trace.display()))?;
     let externs = crate::common::std_externs().map_err(|e| e.to_string())?;
-    let replay = Replay::open(&artifact, BufReader::new(file), externs).map_err(|e| e.to_string())?;
+    let replay =
+        Replay::open_with_workers(&artifact, BufReader::new(file), externs, workers).map_err(|e| e.to_string())?;
     Ok((artifact, replay))
 }
 
@@ -539,6 +562,13 @@ fn matches(pattern: &[Option<Value>], row: &[Value]) -> bool {
 
 fn drive(cmd: TraceCommand) -> Result<(), String> {
     match cmd {
+        TraceCommand::Plan {
+            common,
+            first,
+            last,
+            workers,
+            no_measurement,
+        } => plan_workload(common, first, last, workers, !no_measurement),
         TraceCommand::Replay { common, slow } => {
             let (artifact, mut replay) = open(&common)?;
             let names = Names { artifact: &artifact };
@@ -960,4 +990,234 @@ fn examine(replay: &mut Replay<BufReader<File>>, at: u64) -> Result<Replayed, St
 
 fn err(e: ReplayError) -> String {
     e.to_string()
+}
+
+/// Measurement clock affects only this offline report, never evaluation inputs or outcomes.
+#[allow(clippy::disallowed_methods)]
+fn plan_workload(
+    common: Common,
+    first: Option<u64>,
+    last: Option<u64>,
+    workers: usize,
+    measured: bool,
+) -> Result<(), String> {
+    let value = measured_plan(common, first, last, workers, measured)?;
+    println!("{}", serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Offline clocks do not enter the evaluator.
+#[allow(clippy::disallowed_methods)]
+fn measured_plan(
+    common: Common,
+    first: Option<u64>,
+    last: Option<u64>,
+    workers: usize,
+    measured: bool,
+) -> Result<serde_json::Value, String> {
+    if first.zip(last).is_some_and(|(a, b)| a > b) {
+        return Err("first tick exceeds last tick".into());
+    }
+    let (_, mut replay) = open_workers(&common, workers)?;
+    replay.profile(true).map_err(err)?;
+    let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
+    let mut ticks = 0u64;
+    let mut elapsed = 0u128;
+    while let Some(tick) = replay.peek_tick().map_err(err)? {
+        if last.is_some_and(|last| tick.0 > last) {
+            break;
+        }
+        if measured && ticks == 0 && first.is_none_or(|first| tick.0 >= first) && !replay.measure_plan(true) {
+            return Err("executor cannot measure plans".into());
+        }
+        let start = std::time::Instant::now();
+        let r = replay.next(false).map_err(err)?.ok_or("trace ended unexpectedly")?;
+        let duration = start.elapsed().as_nanos();
+        if first.is_some_and(|first| tick.0 < first) {
+            continue;
+        }
+        elapsed += duration;
+        ticks += 1;
+        for (id, n) in r.work {
+            let w = work.entry(id).or_default();
+            w.rows += n.rows;
+            w.steps += n.steps;
+            w.writes += n.writes;
+            w.evals += n.evals;
+        }
+    }
+    if replay.torn() {
+        return Err("trace ended in a torn record; refusing an incomplete workload report".into());
+    }
+    if ticks == 0 {
+        return Err("selected window contains no ticks".into());
+    }
+    let mut plan = replay
+        .plan_report()
+        .ok_or("executor does not support plan inspection")?;
+    for rule in &mut plan.rules {
+        let id = RuleId::from_raw(rule.id);
+        let w = work.get(&id).copied().unwrap_or_default();
+        rule.work = blossom_engine::WorkReport {
+            probe_rows: w.rows,
+            expression_steps: w.steps,
+            support_writes: w.writes,
+            evaluations: w.evals,
+        };
+    }
+    let mut hash = blake3::Hasher::new();
+    let mut file = File::open(&common.trace).map_err(|e| e.to_string())?;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hash.update(buffer.get(..n).ok_or("invalid read size")?);
+    }
+    let value = serde_json::json!({"report_version":1,"execution":{"workers":workers,"physical_measurement":measured},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
+    Ok(value)
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use blossom_engine::{Engine, EngineConfig};
+    use blossom_ir::tick::{Instance, StepInput};
+    use blossom_trace::node::{NodeRecord, NodeTraceHeader, TraceWriter, outcome_digest};
+    use blossom_value::{
+        Seed,
+        time::{Instant, Tick},
+    };
+
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn checked_plan_windows_workers_and_measurement_agree() {
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/integration/fixtures/engine/native_upsert.bls");
+        let artifact = compile_program(&source, &["n1".into()], &[]).unwrap();
+        let seed = Seed::from_u64(7);
+        let header = NodeTraceHeader {
+            format: blossom_trace::node::FORMAT,
+            program: Arc::from(artifact.program.get().meta.name.as_str()),
+            version: artifact.program.get().meta.version,
+            digest: artifact.program.digest().0,
+            nodes: vec![Arc::from("n1")],
+            node: NodeId(0),
+            incarnation: 1,
+            seed: seed.0,
+        };
+        let (scratch, file) = (0u64..)
+            .find_map(|n| {
+                let path = std::env::temp_dir().join(format!("blossom-plan-{}-{n}.blstrace", std::process::id()));
+                match blossom_trace::node::create_trace_file(&path) {
+                    Ok(file) => Some((Scratch(path), file)),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(e) => panic!("cannot create test trace: {e}"),
+                }
+            })
+            .unwrap();
+        let mut trace = TraceWriter::new(file, &header).unwrap();
+        trace.record(&NodeRecord::Boot { image: vec![] }).unwrap();
+        let mut engine = Engine::new(
+            artifact.program.clone(),
+            NodeId(0),
+            EngineConfig {
+                seed: Some(seed),
+                node_names: vec![Arc::from("n1")],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        engine.reset(Instance::default()).unwrap();
+        for tick in 0..6 {
+            let events = vec![
+                (
+                    artifact.rel_named("put").unwrap(),
+                    Arc::from([Value::u64(1), Value::u64(2), Value::Vec(Arc::from([Value::u64(tick)]))]),
+                ),
+                (
+                    artifact.rel_named("allow").unwrap(),
+                    Arc::from([Value::u64(1), Value::u64(2)]),
+                ),
+            ];
+            let input = StepInput {
+                node: NodeId(0),
+                incarnation: 1,
+                tick: Tick(tick),
+                now: Instant(tick as i64),
+                events: &events,
+                delivered: &[],
+                ingress: &[],
+                blobs: &blossom_value::NoBlobs,
+            };
+            trace
+                .record(&NodeRecord::Tick {
+                    tick: input.tick,
+                    now: input.now,
+                    events: events.clone(),
+                    delivered: vec![],
+                    ingress: vec![],
+                })
+                .unwrap();
+            let out = engine.step(&input, &[]).unwrap();
+            trace
+                .record(&NodeRecord::Outcome {
+                    tick: input.tick,
+                    digest: outcome_digest(&out.changes, &out.outbox, &out.egress, &out.host),
+                })
+                .unwrap();
+        }
+        trace.flush().unwrap();
+        drop(trace);
+        let common = || Common {
+            trace: scratch.0.clone(),
+            deploy: None,
+            program: Some(source.clone()),
+            nodes: vec!["n1".into()],
+            params: vec![],
+        };
+        let a = measured_plan(common(), Some(2), Some(4), 1, true).unwrap();
+        let b = measured_plan(common(), Some(2), Some(4), 2, true).unwrap();
+        let plain = measured_plan(common(), Some(2), Some(4), 1, false).unwrap();
+        assert_eq!(a["ticks"], 3);
+        let parsed: blossom_engine::PlanReport = serde_json::from_value(a["plan"].clone()).unwrap();
+        assert!(
+            parsed
+                .rules
+                .iter()
+                .any(|r| r.work.evaluations > 0 && r.elapsed_ns.is_some())
+        );
+        assert!(
+            parsed
+                .stores
+                .iter()
+                .filter_map(|s| s.operations.as_ref())
+                .any(|s| s.membership_changes > 0)
+        );
+        let comparison = crate::cmd::plan::compare(&a, &b).unwrap();
+        for row in comparison["totals"].as_array().unwrap() {
+            assert_eq!(row["reference"], row["candidate"]);
+        }
+        let comparison = crate::cmd::plan::compare(&a, &plain).unwrap();
+        for row in comparison["totals"].as_array().unwrap() {
+            assert_eq!(row["reference"], row["candidate"]);
+        }
+        assert!(parsed.dot().contains("digraph plan"));
+        let different = measured_plan(common(), Some(3), Some(4), 1, true).unwrap();
+        assert!(crate::cmd::plan::compare(&a, &different).is_err());
+        assert!(measured_plan(common(), Some(20), None, 1, true).is_err());
+        assert!(measured_plan(common(), None, None, 0, true).is_err());
+        // Corrupt a recorded outcome: profiling must not bypass normal replay verification.
+        let mut bytes = std::fs::read(&scratch.0).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        std::fs::write(&scratch.0, bytes).unwrap();
+        assert!(measured_plan(common(), None, None, 1, true).is_err());
+    }
 }

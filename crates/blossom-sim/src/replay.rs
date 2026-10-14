@@ -93,6 +93,19 @@ pub struct Replay<R: Read> {
 impl<R: Read> Replay<R> {
     /// Opens a replay of the trace `inp` of a node running `artifact` (compiled for the trace's deployment).
     pub fn open(artifact: &BlsArtifact, inp: R, externs: Arc<ExternRegistry>) -> Result<Replay<R>, ReplayError> {
+        Self::open_with_workers(artifact, inp, externs, 1)
+    }
+
+    /// Replay with a selected bounded evaluation pool, preserving outcome verification.
+    pub fn open_with_workers(
+        artifact: &BlsArtifact,
+        inp: R,
+        externs: Arc<ExternRegistry>,
+        workers: usize,
+    ) -> Result<Replay<R>, ReplayError> {
+        if workers == 0 {
+            return Err(ReplayError::Order("workers must be positive".into()));
+        }
         let reader = TraceReader::open(inp)?;
         let h: NodeTraceHeader = reader.header().clone();
         let program = artifact.program.get();
@@ -123,6 +136,7 @@ impl<R: Read> Replay<R> {
             externs,
             std::sync::Arc::new(members),
         )?;
+        let executors = executors.with_workers(workers);
         Ok(Replay {
             engine: executors.make(h.node)?,
             oracle: executors.oracle().clone(),
@@ -135,6 +149,15 @@ impl<R: Read> Replay<R> {
             observe: Vec::new(),
             profile: false,
         })
+    }
+
+    /// Snapshot of the actual replay executor, including cumulative work.
+    pub fn measure_plan(&mut self, on: bool) -> bool {
+        self.engine.measure_plan(on)
+    }
+
+    pub fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        self.engine.plan_report()
     }
 
     pub fn header(&self) -> &NodeTraceHeader {

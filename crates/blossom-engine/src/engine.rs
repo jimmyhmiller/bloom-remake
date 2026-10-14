@@ -86,6 +86,7 @@ pub struct Engine {
     workers: Option<rayon::ThreadPool>,
     parallel_rules: BTreeSet<RuleId>,
     parallel_terms: std::cell::Cell<u64>,
+    plan_times: Option<BTreeMap<RuleId, u64>>,
     strata: Arc<[Stratum]>,
     inductive: Arc<[RuleId]>,
     asynchronous: Arc<[RuleId]>,
@@ -700,6 +701,7 @@ impl Engine {
             workers,
             parallel_rules,
             parallel_terms: std::cell::Cell::new(0),
+            plan_times: None,
             strata: strata_list.into(),
             inductive: inductive.into(),
             asynchronous: asynchronous.into(),
@@ -1839,7 +1841,20 @@ impl Engine {
     }
 
     /// Brings one rule's output up to date.
+    /// Clock is used only by explicit offline plan measurement; it cannot affect evaluation.
+    #[allow(clippy::disallowed_methods)]
     fn maintain(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
+        let start = self.plan_times.as_ref().map(|_| std::time::Instant::now());
+        let result = self.maintain_inner(p, input, id);
+        if let (Some(start), Some(times)) = (start, &mut self.plan_times) {
+            let ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let entry = times.entry(id).or_default();
+            *entry = entry.saturating_add(ns);
+        }
+        result
+    }
+
+    fn maintain_inner(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
         if self.stores.is_alias(StoreKey::Main(rule.head.rel)) {
             return Ok(());
@@ -2976,6 +2991,154 @@ impl Engine {
             out.insert(rel, s.present_sorted()?.into_iter().collect());
         }
         Ok(out)
+    }
+
+    /// Enable/reset optional measurement. Ordinary execution never reads a measurement clock.
+    pub fn measure_plan(&mut self, on: bool) {
+        self.plan_times = on.then(BTreeMap::new);
+        for store in self.stores.values_mut() {
+            store.measure_plan(on);
+        }
+    }
+
+    /// Snapshot the selected physical execution structure and cumulative clock-free work.
+    pub fn plan_report(&self) -> crate::PlanReport {
+        use crate::inspection::{PlanReport, RuleReport, StoreReport, WorkReport};
+        let p = self.program.get();
+        let name = |key: StoreKey| {
+            let (rel, version) = match key {
+                StoreKey::Main(r) => (r, "main"),
+                StoreKey::Next(r) => (r, "next"),
+                StoreKey::Async(r) => (r, "async"),
+                StoreKey::Sent(r) => (r, "sent"),
+            };
+            format!(
+                "{}:{version}",
+                p.rels
+                    .get(rel)
+                    .map_or_else(|| format!("{rel:?}"), |r| r.name.to_string())
+            )
+        };
+        let mut rules = Vec::new();
+        for plan in self.plans.values() {
+            let Some(rule) = p.rules.get(plan.rule) else { continue };
+            let stratum = self
+                .strata
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.rules.contains(&plan.rule) || s.aggregates.contains(&plan.rule));
+            let eliminated = self.stores.is_alias(plan.head)
+                || self
+                    .upsert_next
+                    .get(&rule.head.rel)
+                    .is_some_and(|(id, _)| *id == plan.rule);
+            let operator = if eliminated {
+                "alias"
+            } else if plan.frame.is_some() && self.framed.contains_key(&rule.head.rel) {
+                "virtual-frame"
+            } else if plan.upsert_delete.is_some() {
+                "native-upsert-delete"
+            } else if plan.copy.is_some() {
+                "copy"
+            } else {
+                "generic-relational"
+            };
+            let work = self.examined_by.get(&plan.rule).copied().unwrap_or_default();
+            rules.push(RuleReport {
+                id: plan.rule.index() as u32,
+                text: blossom_ir::printer::rule_text(p, rule),
+                head: name(plan.head),
+                dependencies: plan.dep_keys.iter().map(|k| name(*k)).collect(),
+                regime: format!("{:?}", plan.regime),
+                operator: operator.into(),
+                phase: stratum.map_or_else(|| format!("{:?}", rule.kind), |(i, _)| format!("stratum-{i}")),
+                recursive: stratum.is_some_and(|(_, s)| s.recursive),
+                aggregate: plan.aggregate,
+                barriers: {
+                    let mut barriers = Vec::new();
+                    if plan.aggregate {
+                        barriers.push("aggregate requires completed input for each evaluated group".into());
+                    }
+                    if stratum.is_some_and(|(_, s)| s.recursive) {
+                        barriers.push("recursive component requires fixed-point completion".into());
+                    }
+                    if rule.body.lits.iter().any(|l| matches!(l, Literal::Neg(_))) {
+                        barriers.push("negation requires completed lower-stratum dependencies".into());
+                    }
+                    if !matches!(rule.kind, RuleKind::Deductive) {
+                        barriers.push("next-state and sends consume the completed deductive state".into());
+                    }
+                    if !self.parallel_rules.contains(&plan.rule) {
+                        barriers.push("not eligible for pure read-only workers".into());
+                    }
+                    barriers
+                },
+                parallel_eligible: self.parallel_rules.contains(&plan.rule),
+                elapsed_ns: self
+                    .plan_times
+                    .as_ref()
+                    .map(|times| times.get(&plan.rule).copied().unwrap_or(0)),
+                work: WorkReport {
+                    probe_rows: work.rows,
+                    expression_steps: work.steps,
+                    support_writes: work.writes,
+                    evaluations: work.evals,
+                },
+            });
+        }
+        let stores = self
+            .stores
+            .physical_iter()
+            .map(|(key, store)| {
+                let readers: Vec<u32> = self
+                    .plans
+                    .values()
+                    .filter(|p| p.dep_keys.iter().any(|k| self.stores.physical(*k) == key))
+                    .map(|p| p.rule.index() as u32)
+                    .collect();
+                let writers = self
+                    .plans
+                    .values()
+                    .filter(|p| {
+                        p.head == key
+                            && !self.stores.is_alias(p.head)
+                            && !rules.iter().any(|r| {
+                                r.id == p.rule.index() as u32
+                                    && (r.operator == "alias" || r.operator == "virtual-frame")
+                            })
+                    })
+                    .map(|p| p.rule.index() as u32)
+                    .collect();
+                let mut reasons =
+                    vec!["current backend materializes rule heads unless a native elimination applies".into()];
+                if readers.len() > 1 {
+                    reasons.push("multiple readers: fusion must preserve computation reuse".into());
+                }
+                if let StoreKey::Main(rel) = key {
+                    if self.scoped.contains(&rel) {
+                        reasons.push("tick-scoped: cleared and rebuilt each tick".into());
+                    }
+                    if p.rels.get(rel).is_some_and(|r| r.durable) {
+                        reasons.push("declared durable state".into());
+                    }
+                }
+                StoreReport {
+                    key: name(key),
+                    readers,
+                    writers,
+                    resident_rows: store.resident_len(),
+                    indexes: store.inspection_indexes(),
+                    reasons,
+                    operations: store.inspection_operations(),
+                }
+            })
+            .collect();
+        PlanReport { node:self.node.0, evaluation_workers:self.workers.as_ref().map_or(1, rayon::ThreadPool::current_num_threads), schema_version: 1, program_digest: format!("{:?}", self.program.digest()), rules, stores, limitations: vec![
+            "Join order is selected dynamically per driver; this snapshot reports rule structure, not an executed join-order trace.".into(),
+            "Support writes exclude some native membership operations and are not physical index updates.".into(),
+            "Resident rows exclude cold state; index lists exclude cold and specialized primary indexes.".into(),
+            "Materialization reasons describe current structure, not proof that storage is semantically necessary.".into(),
+        ] }
     }
 
     /// The work of each rule in the last tick (the rules that did any).
