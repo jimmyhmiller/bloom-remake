@@ -599,6 +599,44 @@ impl Engine {
             .filter(|(id, r)| plans.contains_key(id) && r.kind == RuleKind::Deductive)
             .map(|(_, r)| r.head.rel)
             .collect();
+        // The private upsert deletion view is only a boolean guard of its table's frame. A valid
+        // prior tick has at most one staged row and one carried row per key. Its join's support is
+        // therefore 0/1: keep membership/deltas directly, without a counted map or full-row index.
+        // Extra writers/readers, facts or same-tick table derivations retain the general implementation.
+        for c in &p.constructs {
+            let ConstructKind::Upsert { rel, del, .. } = c.kind else {
+                continue;
+            };
+            if !upsert_next.contains_key(&rel)
+                || deduced.contains(&rel)
+                || p.facts.iter().any(|f| f.rel == rel || f.rel == del)
+            {
+                continue;
+            }
+            let Some(frame) = framed.get(&rel) else { continue };
+            if frame.del != StoreKey::Main(del) {
+                continue;
+            }
+            let Some(id) = c
+                .rules
+                .iter()
+                .copied()
+                .find(|id| plans.get(id).is_some_and(|pl| pl.upsert_delete.is_some()))
+            else {
+                continue;
+            };
+            let sole = p.rules.iter_enumerated().all(|(rid, r)| {
+                if !plans.contains_key(&rid) {
+                    return true;
+                }
+                let Some(plan) = plans.get(&rid) else { return false };
+                (plan.head != StoreKey::Main(del) || rid == id)
+                    && (!plan.dep_keys.contains(&StoreKey::Main(del)) || (r.head.rel == rel && plan.frame.is_some()))
+            });
+            if sole && let Some(store) = stores.get_mut(&StoreKey::Main(del)) {
+                store.make_boolean();
+            }
+        }
         let tierable = framed
             .keys()
             .filter_map(|rel| {
@@ -1082,6 +1120,7 @@ impl Engine {
                     .get(**rel)
                     .is_some_and(|d| d.class == RelClass::Idb && !d.durable)
                     && !self.scoped.contains(rel)
+                    && !self.stores.get(&StoreKey::Main(**rel)).is_some_and(Store::is_boolean)
                     && !recursive.contains(rel)
                     && !facts.contains(rel)
                     && ids.iter().all(|id| {
@@ -2184,6 +2223,17 @@ impl Engine {
         if plan.aggregate {
             return self.apply_aggregates(p, rule, plan, terms.aggs, tick);
         }
+        if plan.upsert_delete.is_some() && self.stores.get(&plan.head).is_some_and(Store::is_boolean) {
+            let store = self.store(plan.head)?;
+            for (row, w) in terms.heads {
+                if w != 0 {
+                    store
+                        .change_boolean(row, w > 0)
+                        .map_err(|e| to_eval(e, tick, Some(rule)))?;
+                }
+            }
+            return Ok(());
+        }
         let volatile = self.volatile_rules.contains(&rule.id);
         let store = self.store(plan.head)?;
         let mut writes = 0u64;
@@ -3003,6 +3053,10 @@ struct Terms {
 
 // Avoid scheduling tiny copy/probe workloads. This is a scheduling grain, not a semantic limit.
 const PARALLEL_GRAIN: usize = 32;
+std::thread_local! {
+    // Take the buffers out while running: nested work cannot retain a RefCell borrow or alias scratch state.
+    static WORKER_BUFFERS: std::cell::RefCell<rule::TermBuffers> = std::cell::RefCell::new(rule::TermBuffers::default());
+}
 
 impl Terms {
     fn merge(&mut self, other: Self) {
@@ -3060,15 +3114,12 @@ impl ParallelRead<'_> {
             flips_at: std::cell::Cell::new(None),
             reads_time: std::cell::Cell::new(false),
         };
-        let terms = run_terms(
-            &cx,
-            self.stores,
-            rule,
-            plan,
-            drivers,
-            orders,
-            &mut rule::TermBuffers::default(),
-        )?;
+        let mut buffers = WORKER_BUFFERS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+        let result = run_terms(&cx, self.stores, rule, plan, drivers, orders, &mut buffers);
+        // Retain capacity, not rows, blobs or values from the last valuation.
+        buffers.clear();
+        WORKER_BUFFERS.with(|slot| *slot.borrow_mut() = buffers);
+        let terms = result?;
         Ok((terms, functions.into_inner()))
     }
 }

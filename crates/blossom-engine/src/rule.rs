@@ -1132,6 +1132,12 @@ pub(crate) struct TermBuffers {
     env: Vec<Option<Value>>,
     rows: Vec<Option<Row>>,
 }
+impl TermBuffers {
+    pub(crate) fn clear(&mut self) {
+        self.env.clear();
+        self.rows.clear();
+    }
+}
 
 /// Evaluates one term of `rule`'s delta query. `old(lit)` says whether dependency `lit` is read at its old version.
 /// Each valuation goes to `emit`; each runtime error to `error`, with the valuation's token.

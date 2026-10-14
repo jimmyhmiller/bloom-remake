@@ -917,6 +917,9 @@ pub(crate) struct Store {
     /// costs one hash and one comparison, not a row comparison per tree level; nothing reads its order (readers whose
     /// output shows an order sort, [`Store::present_sorted`]).
     counts: crate::row_support::RowSupport,
+    /// A construct-private boolean view whose support is proven to be at most one in valid ticks.
+    /// It needs only membership and deltas, with no counted support or maintained probe indexes.
+    boolean: Option<BTreeSet<Row>>,
     /// Lattice relation: each cell's live contributions, and its merged row.
     contributions: BTreeMap<Vec<Value>, BTreeSet<Row>>,
     merged: BTreeMap<Vec<Value>, Row>,
@@ -956,6 +959,7 @@ fn holds(row: &[Value], cols: &[usize], values: &[Value]) -> bool {
 /// A store's present rows, in order.
 pub(crate) enum Present<'a> {
     Set(crate::row_support::Iter<'a>),
+    Boolean(std::collections::btree_set::Iter<'a, Row>),
     Lattice(std::collections::btree_set::Iter<'a, Row>),
 }
 
@@ -965,7 +969,22 @@ impl<'a> Iterator for Present<'a> {
     fn next(&mut self) -> Option<&'a Row> {
         match self {
             Present::Set(it) => it.next().map(|(row, _)| row),
+            Present::Boolean(it) => it.next(),
             Present::Lattice(it) => it.next(),
+        }
+    }
+}
+
+enum RetractedRows<'a> {
+    Counted(crate::row_support::Drain<'a>),
+    Boolean(std::collections::btree_set::IntoIter<Row>),
+}
+impl Iterator for RetractedRows<'_> {
+    type Item = Row;
+    fn next(&mut self) -> Option<Row> {
+        match self {
+            Self::Counted(rows) => rows.next().map(|(r, _)| r),
+            Self::Boolean(rows) => rows.next(),
         }
     }
 }
@@ -978,6 +997,37 @@ impl Store {
             blob_refs: blobs.then(BTreeMap::new),
             ..Store::default()
         }
+    }
+
+    pub fn make_boolean(&mut self) {
+        self.boolean = Some(BTreeSet::new());
+    }
+
+    pub fn is_boolean(&self) -> bool {
+        self.boolean.is_some()
+    }
+
+    /// A proven boolean native's signed change: positive support establishes membership; negative removes it.
+    /// The caller proves the previous valid support was zero or one, so a negative change cannot leave it live.
+    pub fn change_boolean(&mut self, row: Row, gained: bool) -> ExprResult<()> {
+        let rows = self
+            .boolean
+            .as_mut()
+            .ok_or_else(|| bug("boolean update of a counted store".into()))?;
+        let changed = if gained {
+            rows.insert(row.clone())
+        } else {
+            rows.remove(&row)
+        };
+        if changed {
+            self.touched = true;
+            if gained {
+                self.show(row);
+            } else {
+                self.hide(&row);
+            }
+        }
+        Ok(())
     }
 
     /// Compile the physical support key once; lattice contributions retain full-row support.
@@ -997,6 +1047,9 @@ impl Store {
             self.blob_refs.is_some() || self.tiered.as_ref().is_some_and(|t| t.blobs),
         );
         store.counts = self.counts.emptied();
+        if self.boolean.is_some() {
+            store.make_boolean();
+        }
         store
     }
 
@@ -1059,7 +1112,9 @@ impl Store {
         if self.tiered.is_some() {
             return Err(internal_error!("a tiered table's rows are read by probes, not held").into());
         }
-        Ok(if self.cell.is_some() {
+        Ok(if let Some(rows) = &self.boolean {
+            Present::Boolean(rows.iter())
+        } else if self.cell.is_some() {
             Present::Lattice(self.merged_rows.iter())
         } else {
             Present::Set(self.counts.iter())
@@ -1080,6 +1135,8 @@ impl Store {
     pub fn present_len(&self) -> usize {
         if let Some(t) = &self.tiered {
             t.len
+        } else if let Some(rows) = &self.boolean {
+            rows.len()
         } else if self.cell.is_some() {
             self.merged_rows.len()
         } else {
@@ -1134,6 +1191,9 @@ impl Store {
     pub fn add(&mut self, row: Row, w: i64) -> ExprResult<()> {
         if w == 0 {
             return Ok(());
+        }
+        if self.boolean.is_some() {
+            return Err(bug("counted write to a boolean native view".into()));
         }
         self.touched = true;
         match self.tiered.as_deref() {
@@ -1411,6 +1471,9 @@ impl Store {
     }
 
     pub fn contains(&self, row: &Row) -> Result<bool, EvalError> {
+        if let Some(rows) = &self.boolean {
+            return Ok(rows.contains(row));
+        }
         if let Some(t) = &self.tiered {
             return Ok((!self.counts.is_empty() && self.counts.contains_key(row)) || t.carried(row)?);
         }
@@ -1431,11 +1494,16 @@ impl Store {
         if self.cell.is_some() || self.tiered.is_some() {
             return Err(bug("a lattice or tiered store is never tick-scoped".into()));
         }
-        if self.counts.is_empty() {
+        let n = self.boolean.as_ref().map_or_else(|| self.counts.len(), BTreeSet::len);
+        if n == 0 {
             return Ok(());
         }
+        let rows = match &mut self.boolean {
+            Some(rows) => RetractedRows::Boolean(std::mem::take(rows).into_iter()),
+            None => RetractedRows::Counted(self.counts.drain()),
+        };
         self.touched = true;
-        self.generation = self.generation.wrapping_add(self.counts.len() as u64);
+        self.generation = self.generation.wrapping_add(n as u64);
         // Everything present goes away, so empty the secondary indexes and blob counts once. Keep the index
         // definitions: later inserts in this tick must maintain the same probes.
         for index in self.indexes.get_mut().values_mut() {
@@ -1448,11 +1516,7 @@ impl Store {
         // takes the row allocations without another hash probe, and building/appending sorted sets avoids one
         // tree removal per index per row. Already-deleted rows remain in `del` for old-version readers.
         let ins = &mut self.ins;
-        let mut deleted: BTreeSet<Row> = self
-            .counts
-            .drain()
-            .filter_map(|(row, _)| (!ins.remove(&row)).then_some(row))
-            .collect();
+        let mut deleted: BTreeSet<Row> = rows.filter_map(|row| (!ins.remove(&row)).then_some(row)).collect();
         self.del.append(&mut deleted);
         self.deleted_by.get_mut().clear();
         Ok(())
@@ -1557,7 +1621,11 @@ impl Store {
     /// Builds the index on `cols` if there is none.
     /// (A tiered store keeps none: the cold side keeps its own.)
     pub fn ensure_index(&self, cols: &[usize]) {
-        if cols.is_empty() || self.tiered.is_some() || self.indexes.borrow().contains_key(cols) {
+        if cols.is_empty()
+            || self.tiered.is_some()
+            || self.boolean.is_some()
+            || self.indexes.borrow().contains_key(cols)
+        {
             return;
         }
         let mut index = Index::new();
@@ -1595,6 +1663,9 @@ impl Store {
     /// About how many present rows match a probe on `cols`: all of them, or the average bucket of the index.
     pub fn estimate(&self, cols: &[usize]) -> usize {
         let n = self.present_len();
+        if self.boolean.is_some() {
+            return n;
+        }
         if cols.is_empty() {
             return n;
         }
@@ -1623,6 +1694,9 @@ impl Store {
                 );
             }
             return Ok(out);
+        }
+        if let Some(rows) = &self.boolean {
+            return Ok(rows.iter().filter(|r| holds(r, cols, values)).cloned().collect());
         }
         if cols.is_empty() {
             return Ok(self.present()?.cloned().collect());
@@ -1658,6 +1732,9 @@ impl Store {
             return Ok(true);
         }
         let live = |r: &Row| !old || !self.ins.contains(r);
+        if let Some(rows) = &self.boolean {
+            return Ok(rows.iter().any(|r| holds(r, cols, values) && live(r)));
+        }
         if cols.is_empty() {
             return Ok(self.present()?.any(live));
         }
@@ -1702,6 +1779,13 @@ impl Store {
         self.settled()?;
         if let Some(t) = &self.tiered {
             return self.tiered_range(t, old, cols, values, col, lo, hi);
+        }
+        if self.boolean.is_some() {
+            return Ok(self
+                .rows(old, cols, values)?
+                .into_iter()
+                .filter(|r| r.get(col).is_some_and(|v| within_bounds(v, &lo, &hi)))
+                .collect());
         }
         let mut key_cols = cols.to_vec();
         key_cols.push(col);

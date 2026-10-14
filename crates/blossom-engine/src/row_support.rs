@@ -1,5 +1,6 @@
 //! Support indexed by schema keys, with compact scalar words and shared byte keys.
-//! Payloads are never hashed. Conflicting payloads remain distinct until the ordinary FD check rejects them.
+//! Compact layouts hash selected key fields. Every distinct payload retains independent support;
+//! declared FD conflicts are rejected by the ordinary key check. Unsupported layouts retain full-row hashing.
 
 use blossom_base::det::{DetMap, Entry};
 use blossom_ir::{core::Schema, tick::Row};
@@ -8,7 +9,74 @@ use smallvec::SmallVec;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug)]
-pub(crate) struct Layout(Vec<(usize, TypeDef)>);
+pub(crate) struct Layout(Vec<(usize, Field)>);
+
+#[derive(Clone, Debug)]
+enum Field {
+    Scalar(TypeDef),
+    Tuple(Vec<Field>),
+    Struct(Vec<Field>),
+}
+impl Field {
+    fn of(ty: &TypeDef, types: &TypeTable) -> Option<Self> {
+        match ty {
+            TypeDef::Int(_)
+            | TypeDef::Bool
+            | TypeDef::Bytes
+            | TypeDef::Duration
+            | TypeDef::Instant
+            | TypeDef::Conn
+            | TypeDef::Session
+            | TypeDef::Unit => Some(Self::Scalar(ty.clone())),
+            TypeDef::Tuple(fields) => Some(Self::Tuple(
+                fields
+                    .iter()
+                    .map(|id| Self::of(types.get(*id)?, types))
+                    .collect::<Option<_>>()?,
+            )),
+            TypeDef::Struct(def) => Some(Self::Struct(
+                def.fields
+                    .iter()
+                    .map(|f| Self::of(types.get(f.ty)?, types))
+                    .collect::<Option<_>>()?,
+            )),
+            _ => None,
+        }
+    }
+
+    fn pack<'a>(&self, value: &'a Value, key: &mut KeyRef<'a>) -> Option<()> {
+        match (self, value) {
+            (Self::Tuple(layout), Value::Tuple(fields)) | (Self::Struct(layout), Value::Struct(fields))
+                if layout.len() == fields.len() =>
+            {
+                for (field, value) in layout.iter().zip(fields.iter()) {
+                    field.pack(value, key)?;
+                }
+            }
+            (Self::Scalar(TypeDef::Bytes), Value::Bytes(v)) => key.bytes.push(v),
+            (Self::Scalar(TypeDef::Bool), Value::Bool(v)) => key.words.push(u64::from(*v)),
+            (Self::Scalar(TypeDef::Duration), Value::Duration(v)) => key.words.push(v.0 as u64),
+            (Self::Scalar(TypeDef::Instant), Value::Instant(v)) => key.words.push(v.0 as u64),
+            (Self::Scalar(TypeDef::Conn), Value::Conn(v)) => key.words.push(v.0),
+            (Self::Scalar(TypeDef::Session), Value::Session(v)) => key.words.push(v.0),
+            (Self::Scalar(TypeDef::Unit), Value::Unit) => {}
+            (Self::Scalar(TypeDef::Int(ty)), Value::Int(v)) if v.ty() == *ty => match v {
+                IntValue::U8(v) => key.words.push(*v as u64),
+                IntValue::U16(v) => key.words.push(*v as u64),
+                IntValue::U32(v) => key.words.push(*v as u64),
+                IntValue::U64(v) => key.words.push(*v),
+                IntValue::I8(v) => key.words.push(*v as u64),
+                IntValue::I16(v) => key.words.push(*v as u64),
+                IntValue::I32(v) => key.words.push(*v as u64),
+                IntValue::I64(v) => key.words.push(*v as u64),
+                IntValue::U128(v) => key.words.extend([*v as u64, (*v >> 64) as u64]),
+                IntValue::I128(v) => key.words.extend([*v as u64, (*v >> 64) as u64]),
+            },
+            _ => return None,
+        }
+        Some(())
+    }
+}
 
 impl Layout {
     pub(crate) fn of(schema: &Schema, types: &TypeTable) -> Option<Self> {
@@ -17,14 +85,10 @@ impl Layout {
         }
         let mut cols = Vec::new();
         for col in &schema.key {
-            let ty = types.get(schema.cols.get(col.index())?.ty)?.clone();
-            if !matches!(
-                ty,
-                TypeDef::Int(_) | TypeDef::Bool | TypeDef::Bytes | TypeDef::Duration | TypeDef::Instant
-            ) {
-                continue;
+            let ty = types.get(schema.cols.get(col.index())?.ty)?;
+            if let Some(field) = Field::of(ty, types) {
+                cols.push((col.index(), field));
             }
-            cols.push((col.index(), ty));
         }
         // A physical bucket need not be unique. Complex key columns stay in the canonical row,
         // and all rows sharing the compact prefix retain independent support in the ordered bucket.
@@ -36,32 +100,14 @@ impl Layout {
         Some(Self(cols))
     }
 
-    fn key(&self, row: &Row) -> Option<Key> {
+    fn key<'a>(&self, row: &'a Row) -> Option<KeyRef<'a>> {
         self.pack(self.0.iter().map(|(col, _)| row.get(*col)))
     }
 
-    fn pack<'a>(&self, values: impl Iterator<Item = Option<&'a Value>>) -> Option<Key> {
-        let mut key = Key::default();
+    fn pack<'a>(&self, values: impl Iterator<Item = Option<&'a Value>>) -> Option<KeyRef<'a>> {
+        let mut key = KeyRef::default();
         for ((_, ty), value) in self.0.iter().zip(values) {
-            match (ty, value?) {
-                (TypeDef::Bytes, Value::Bytes(v)) => key.bytes.push(v.clone()),
-                (TypeDef::Bool, Value::Bool(v)) => key.words.push(u64::from(*v)),
-                (TypeDef::Duration, Value::Duration(v)) => key.words.push(v.0 as u64),
-                (TypeDef::Instant, Value::Instant(v)) => key.words.push(v.0 as u64),
-                (TypeDef::Int(ty), Value::Int(v)) if v.ty() == *ty => match v {
-                    IntValue::U8(v) => key.words.push(*v as u64),
-                    IntValue::U16(v) => key.words.push(*v as u64),
-                    IntValue::U32(v) => key.words.push(*v as u64),
-                    IntValue::U64(v) => key.words.push(*v),
-                    IntValue::I8(v) => key.words.push(*v as u64),
-                    IntValue::I16(v) => key.words.push(*v as u64),
-                    IntValue::I32(v) => key.words.push(*v as u64),
-                    IntValue::I64(v) => key.words.push(*v as u64),
-                    IntValue::U128(v) => key.words.extend([*v as u64, (*v >> 64) as u64]),
-                    IntValue::I128(v) => key.words.extend([*v as u64, (*v >> 64) as u64]),
-                },
-                _ => return None,
-            }
+            ty.pack(value?, &mut key)?;
         }
         Some(key)
     }
@@ -71,6 +117,26 @@ impl Layout {
 pub(crate) struct Key {
     words: SmallVec<[u64; 3]>,
     bytes: SmallVec<[BytesValue; 1]>,
+}
+
+/// Queries borrow byte allocations. Read hits and occupied updates never increment/decrement their Arcs.
+#[derive(Default, Hash)]
+struct KeyRef<'a> {
+    words: SmallVec<[u64; 3]>,
+    bytes: SmallVec<[&'a BytesValue; 1]>,
+}
+impl KeyRef<'_> {
+    fn owns(&self, key: &Key) -> bool {
+        self.words == key.words
+            && self.bytes.len() == key.bytes.len()
+            && self.bytes.iter().zip(&key.bytes).all(|(a, b)| *a == b)
+    }
+    fn owned(&self) -> Key {
+        Key {
+            words: self.words.clone(),
+            bytes: self.bytes.iter().map(|b| (*b).clone()).collect(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -185,7 +251,7 @@ impl RowSupport {
             Storage::Generic(rows) => rows.contains_key(row),
             Storage::Keyed { layout, rows, .. } => layout
                 .key(row)
-                .and_then(|key| rows.get(&key))
+                .and_then(|key| rows.get_by(&key, |k, q| q.owns(k)))
                 .and_then(|b| b.get(row))
                 .is_some(),
         }
@@ -211,7 +277,10 @@ impl RowSupport {
             return None;
         };
         let key = layout.pack(values.iter().map(Some))?;
-        Some(rows.get(&key).map_or(BucketIter::One(None), Bucket::iter))
+        Some(
+            rows.get_by(&key, |k, q| q.owns(k))
+                .map_or(BucketIter::One(None), Bucket::iter),
+        )
     }
     pub(crate) fn change(&mut self, row: &Row, w: i64) -> Option<(i64, i64)> {
         match &mut self.0 {
@@ -233,7 +302,7 @@ impl RowSupport {
             }),
             Storage::Keyed { layout, rows, len } => {
                 let key = layout.key(row)?;
-                let (before, after) = match rows.entry(key) {
+                let (before, after) = match rows.entry_by(&key, |k, q| q.owns(k), || key.owned()) {
                     Entry::Vacant(entry) => {
                         entry.insert(Bucket::One(row.clone(), w));
                         (0, w)
@@ -355,7 +424,7 @@ mod tests {
     }
     #[test]
     fn support_conflicts_demotion_and_drains_match_full_row_counts() {
-        let mut support = RowSupport::with_layout(Layout(vec![(0, TypeDef::Int(IntTy::U64))]));
+        let mut support = RowSupport::with_layout(Layout(vec![(0, Field::Scalar(TypeDef::Int(IntTy::U64)))]));
         let mut oracle = BTreeMap::<Row, i64>::new();
         let mut random = 42u64;
         for step in 0..5000 {
@@ -396,9 +465,9 @@ mod tests {
     #[test]
     fn compact_keys_preserve_all_integer_bits_and_shared_bytes() {
         let layout = Layout(vec![
-            (2, TypeDef::Bytes),
-            (0, TypeDef::Int(IntTy::I128)),
-            (1, TypeDef::Int(IntTy::U64)),
+            (2, Field::Scalar(TypeDef::Bytes)),
+            (0, Field::Scalar(TypeDef::Int(IntTy::I128))),
+            (1, Field::Scalar(TypeDef::Int(IntTy::U64))),
         ]);
         let mut support = RowSupport::with_layout(layout);
         for (i, n) in [i128::MIN, -1, 0, i128::MAX].into_iter().enumerate() {
@@ -431,5 +500,67 @@ mod tests {
         assert_eq!(support.change(&row(1, 2), -1), Some((1, 0)));
         assert_eq!(support.change(&row(3, 4), -1), Some((1, 0)));
         assert!(support.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod borrowed_tests {
+    use super::*;
+    use std::hash::BuildHasher;
+    #[test]
+    fn borrowed_and_owned_keys_hash_identically_and_hits_keep_byte_references_borrowed() {
+        let small = BytesValue::from(b"topic".as_slice());
+        let large = BytesValue::from(vec![7u8; 1024]);
+        for n in [0, 3, 9] {
+            let query = KeyRef {
+                words: (0..n).collect(),
+                bytes: SmallVec::from_slice(&[&small, &large]),
+            };
+            let owned = query.owned();
+            for state in [blossom_base::DetState::fixed(), blossom_base::DetState::from_nonce(42)] {
+                assert_eq!(state.hash_one(&query), state.hash_one(&owned));
+            }
+            let mut rows = DetMap::default();
+            rows.insert(owned, 3u64);
+            let before = Arc::strong_count(small.shared());
+            assert_eq!(rows.get_by(&query, |k, q| q.owns(k)), Some(&3));
+            match rows.entry_by(&query, |k, q| q.owns(k), || panic!("a hit must not build an owned key")) {
+                Entry::Occupied(mut e) => *e.get_mut() += 1,
+                Entry::Vacant(_) => panic!("the equivalent key vanished"),
+            }
+            assert_eq!(Arc::strong_count(small.shared()), before);
+            assert_eq!(rows.get_by(&query, |k, q| q.owns(k)), Some(&4));
+        }
+    }
+    #[test]
+    fn composite_partition_keys_preserve_shapes_fields_and_all_payload_versions() {
+        let layout = Layout(vec![(
+            0,
+            Field::Tuple(vec![
+                Field::Scalar(TypeDef::Bytes),
+                Field::Scalar(TypeDef::Int(blossom_value::IntTy::I32)),
+            ]),
+        )]);
+        let mut support = RowSupport::with_layout(layout);
+        for partition in [-1, 0, 1] {
+            for payload in [0, 1] {
+                let r: Row = Arc::from(vec![
+                    Value::Tuple(Arc::from(vec![
+                        Value::bytes(b"topic"),
+                        Value::Int(IntValue::I32(partition)),
+                    ])),
+                    Value::Int(IntValue::U64(payload)),
+                ]);
+                assert_eq!(support.change(&r, 1), Some((0, 1)));
+                assert!(support.contains_key(&r));
+            }
+        }
+        let group = Value::Tuple(Arc::from(vec![Value::bytes(b"topic"), Value::Int(IntValue::I32(-1))]));
+        assert_eq!(support.probe(&[0], &[group]).unwrap().count(), 2);
+        let wrong: Row = Arc::from(vec![
+            Value::Struct(Arc::from(vec![Value::bytes(b"topic"), Value::Int(IntValue::I32(-1))])),
+            Value::Int(IntValue::U64(0)),
+        ]);
+        assert_eq!(support.change(&wrong, 1), None);
     }
 }

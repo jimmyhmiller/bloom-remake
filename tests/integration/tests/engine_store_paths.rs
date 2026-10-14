@@ -301,3 +301,60 @@ fn compact_buckets_preserve_multiple_valid_set_rows_per_scalar_key() {
         5
     ));
 }
+
+#[test]
+fn boolean_upsert_deletions_keep_helpers_guards_and_conflict_errors_observable() {
+    let u = |v| Value::Int(blossom_value::IntValue::U64(v));
+    let payload = |v| Value::Vec(Arc::from(vec![u(v); 16]));
+    assert!(!check_fixture(
+        "upsert_boolean",
+        vec![
+            (0, "put", vec![u(1), u(2), payload(10)]),
+            (1, "put", vec![u(1), u(2), payload(20)]),
+            (1, "same", vec![u(1), u(2), payload(20)]),
+            (1, "allow", vec![u(1), u(2)]),
+            (2, "same", vec![u(1), u(2), payload(20)]),
+            (2, "allow", vec![u(1), u(2)]),
+            (3, "watch", vec![u(1), u(2)]),
+            (4, "put", vec![u(1), u(2), payload(30)]),
+            (5, "allow", vec![u(1), u(2)]),
+        ],
+        7
+    ));
+    assert!(check_fixture(
+        "upsert_boolean",
+        vec![
+            (0, "put", vec![u(1), u(2), payload(10)]),
+            (1, "put", vec![u(1), u(2), payload(20)]),
+            (1, "same", vec![u(1), u(2), payload(30)]),
+            (1, "allow", vec![u(1), u(2)]),
+        ],
+        3
+    ));
+}
+
+#[test]
+fn tuple_and_struct_keys_match_the_oracle_through_updates_and_missing_probes() {
+    let u = |v| Value::Int(blossom_value::IntValue::U64(v));
+    let fields = |p| {
+        Arc::from(vec![
+            Value::bytes(b"topic"),
+            Value::Int(blossom_value::IntValue::I32(p)),
+        ])
+    };
+    let payload = |v| Value::Vec(Arc::from(vec![u(v); 16]));
+    assert!(!check_fixture(
+        "upsert_composite_type",
+        vec![
+            (0, "put_t", vec![Value::Tuple(fields(-1)), payload(10)]),
+            (0, "put_s", vec![Value::Struct(fields(0)), payload(20)]),
+            (0, "watch", vec![Value::Tuple(fields(1))]),
+            (1, "put_t", vec![Value::Tuple(fields(-1)), payload(30)]),
+            (1, "put_t", vec![Value::Tuple(fields(1)), payload(40)]),
+            (1, "put_s", vec![Value::Struct(fields(0)), payload(50)]),
+            (2, "watch", vec![Value::Tuple(fields(1))]),
+            (3, "watch", vec![Value::Tuple(fields(2))]),
+        ],
+        5
+    ));
+}

@@ -48,3 +48,37 @@ Worker differential checks include large batches, simultaneous changes, aggregat
 Full upsert deletion fusion, arbitrary producer pipelines and packed database/expression rows remain further work. The new worker path parallelizes read-only relational evaluation across partitions and other independent valuations; it does not create independently committing partition engines.
 
 The expanded set/view support layout has its own seven paired complete-engine trials against d6b88bf6: at 64 keys median 51,171 → 34,690 µs (32.2% less time); at 1,024 keys 986,894 → 714,104 (27.6%). Head-write/resident-row counts are identical between these two variants, separating cheaper representation from the earlier write elimination. The first expanded 64-key trial was nearly tied (50,443 vs 49,979); all later trials improved. Medians include all seven. These are additional measured micro improvements, not percentages to add to broker capacity.
+
+## Frozen expanded broker result (37130747)
+
+Eight counterbalanced trials used 120-second max phases to bound dataset size, otherwise the same configuration. Do not compare these rates directly with the 180-second pair: the report includes completion/drain time, so shorter runs have different startup/drain weighting.
+
+| Comparison (execution order) | Reference records/s | Candidate records/s | Candidate change |
+|---|---:|---:|---:|
+| Expanded serial → retained | 14,969 | 13,703 | -8.5% |
+| Retained → expanded serial | 14,020 | 13,825 | -1.4% |
+| Expanded parallel → expanded serial | 13,846 | 14,773 | +6.7% |
+| Expanded serial → expanded parallel | 14,465 | 14,398 | -0.5% |
+
+These trials do not establish a capacity gain. Expanded serial loses both matched pairs; parallel gains one and ties/slightly loses the other. Mean sampled broker CPU during the max phase rises from roughly 102–105% serial to 120–121% parallel, so workers are active, but consume more CPU without a repeatable capacity improvement. The large CPU-only micro benefit must not be substituted for this result. Default remains serial. These eight runs verified 15,670,276 records; with the initial pair this round verified 21,253,993 records, zero loss, misplacement, duplicates, present-unacknowledged or foreign records. Reports/binaries/source archives are preserved; all verified experiment databases were removed. Local parsed evidence: /tmp/blossom-maintenance-broker-results/summary.json. Server: ~/soak-results/maintenance-expanded-{serial,parallel,retained}-*/, maintenance-expanded-pairs.log.
+
+## Correcting the physical coverage and hit costs
+
+Kafka's group key `(Bytes, i32)` is a tuple, and append correlation keys contain connection ids. The first layout skipped both. Layout compilation now recursively handles tuples/structs of supported primitive fields, connection/session ids and unit, while preserving kind, arity and integer type checks. Unsupported compound fields stay on the generic path. Exact probes return the original canonical rows; secondary/range ordering is unchanged.
+
+Hit paths now use borrowed composite queries: byte allocations are borrowed for reads and occupied support updates. Owned byte references are constructed only on a new map key. DetMap's get_by/entry_by contract requires equivalent query/owned hashes; tests check identical hashes under fixed and nonce states, avoid constructing owned keys on hits, preserve byte strong-reference counts, and compare compound keys/versions with an oracle.
+
+Eligible private upsert deletion views now keep boolean membership/deltas directly. The previous valid tick has one staged tuple and one carried tuple per declared key, so the deletion join has support zero or one. A signed change therefore determines membership without counted support. New conflicting staged rows still reach the ordinary BLSR002 check. Eligibility additionally forbids target facts/same-tick deductions, other deletion writers, and readers beyond the native frame. Observations, delta reads and blob references remain; other shapes retain counted storage. Ordered membership remains, and bulk retraction moves its rows directly. This is not a Kafka-specific shortcut. Duplicate-write, guarded-carry, conflict and helper-observation oracle tests pass.
+
+Workers reuse per-thread scratch capacity rather than allocating fresh term buffers for every group. Scratch is taken out of its thread-local slot while running, so nested work cannot alias or retain a borrow; values/rows are cleared before returning capacity to the slot. Program results, profiling and error handling remain unchanged.
+
+Seven final interleaved optimized engine trials compare the frozen 37130747 implementation with these additions; separate Cargo targets and distinct hashes. The original scalar-key fixture and a `(Bytes, i32)` group-key fixture each update 64/1,024 keys over 200 ticks with sixteen-integer vectors:
+
+| Key shape | Keys/tick | Prior median µs | New median µs | Time reduction |
+|---|---:|---:|---:|---:|
+| u64 | 64 | 35,644 | 34,977 | 1.9% |
+| u64 | 1,024 | 723,873 | 716,911 | 1.0% |
+| (Bytes, i32) | 64 | 102,522 | 72,192 | 29.6% |
+| (Bytes, i32) | 1,024 | 2,281,121 | 1,699,752 | 25.5% |
+
+The first scalar trial is slower for the new binary; all trials are included. Counted head writes decrease from 38,144 to 25,408 and 610,304 to 406,528; boolean membership updates still occur, so this is not a claim that all physical work disappeared. A preceding isolated boolean experiment reduced elapsed time by only 2–4%, supporting the focus on actual compound keys and borrowed hit paths. Raw outputs, copied executables, source fixtures and hashes: /tmp/blossom-maintenance-final-results/ and /tmp/blossom-parallel-results/. The final broker comparison is pending.
