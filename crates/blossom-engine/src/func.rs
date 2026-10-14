@@ -673,7 +673,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                 return Err(bug("`Blob::of` of a non-Bytes value".into()));
             };
             let r = b.blob_ref();
-            cx.new_blobs.borrow_mut().entry(r).or_insert_with(|| b.into());
+            cx.create_blob(r, b.into())?;
             Ok(Value::Blob(r))
         }
         LibFn::BlobRead => {

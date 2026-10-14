@@ -537,6 +537,14 @@ fn storage_tiered_is_on_unless_a_deployment_opts_out() {
     let cache = format!("{text}hot_rows = 262144\n");
     assert_eq!(DeploymentSpec::parse(&cache, &dir).unwrap().hot_rows, Some(262144));
     assert!(DeploymentSpec::parse(&format!("{text}hot_rows = 0\n"), &dir).is_err());
+    assert_eq!(DeploymentSpec::parse(&text, &dir).unwrap().eval_workers, 1);
+    assert_eq!(
+        DeploymentSpec::parse(&format!("{text}eval_workers = 2\n"), &dir)
+            .unwrap()
+            .eval_workers,
+        2
+    );
+    assert!(DeploymentSpec::parse(&format!("{text}eval_workers = 0\n"), &dir).is_err());
     for bytes in [0, 32 * 1024 * 1024, 256 * 1024 * 1024] {
         assert_eq!(
             DeploymentSpec::parse(&format!("{text}cache_bytes = {bytes}\n"), &dir)

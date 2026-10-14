@@ -455,6 +455,12 @@ impl Executors {
         self
     }
 
+    /// Set the bounded read-only evaluation pool (one worker keeps serial evaluation).
+    pub fn with_workers(mut self, workers: usize) -> Executors {
+        self.engine.workers = workers;
+        self
+    }
+
     /// Whether the engines tier the durable tables they can (`EngineConfig::in_memory` when not).
     pub fn tiered(mut self, tiered: bool) -> Executors {
         self.engine.in_memory = !tiered;

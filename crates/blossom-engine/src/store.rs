@@ -17,10 +17,11 @@
 //! the carry (a program fact's), and the tick's change. Its reads probe the database and correct what they find
 //! with what memory holds.
 
-use std::cell::RefCell;
+use crate::probe_cache::ProbeCache;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use blossom_base::internal_error;
 use blossom_ir::tick::{EvalError, Row};
@@ -484,15 +485,15 @@ pub(crate) struct Tiered {
     by_tick: BTreeMap<u64, BTreeSet<Row>>,
     /// The overlay's rows by the values of the columns a probe asks for: built for a column list on its first probe
     /// and kept with every overlay change, so a probe's correction costs its rows, not the overlay's.
-    overlay_by: RefCell<BTreeMap<Vec<usize>, RowsBy>>,
+    overlay_by: ProbeCache<BTreeMap<Vec<usize>, RowsBy>>,
     /// The hot tier: recent probes' answers, kept with the cold side.
-    hot: RefCell<Hot>,
+    hot: ProbeCache<Hot>,
     /// What probes found, for the planner's estimates (the cold side keeps no statistics), as running averages in
     /// sixteenths of a row: by the probe's columns, the rows a prefix holds (`false`: an index's average bucket, as an
     /// in-memory store knows it), and the rows a range of a prefix gave (`true`).
-    seen: RefCell<BTreeMap<(Vec<usize>, bool), u64>>,
+    seen: ProbeCache<BTreeMap<(Vec<usize>, bool), u64>>,
     /// Moves whenever an average crosses a power of two: a join order planned on the old ones is planned again.
-    epoch: std::cell::Cell<u64>,
+    epoch: AtomicU64,
     /// The change to the present rows the last carry made: the next tick's change (`Store::ins`, `Store::del`).
     staged: (BTreeSet<Row>, BTreeSet<Row>),
     /// No tick has begun since the store was made (at a reset), and whether the current tick is the first: as after
@@ -542,13 +543,13 @@ impl Tiered {
             now: 0,
             changed: BTreeMap::new(),
             by_tick: BTreeMap::new(),
-            overlay_by: RefCell::new(BTreeMap::new()),
-            hot: RefCell::new(Hot {
+            overlay_by: ProbeCache::new(BTreeMap::new()),
+            hot: ProbeCache::new(Hot {
                 budget: hot_rows,
                 ..Hot::default()
             }),
-            seen: RefCell::new(BTreeMap::new()),
-            epoch: std::cell::Cell::new(0),
+            seen: ProbeCache::new(BTreeMap::new()),
+            epoch: AtomicU64::new(0),
             staged: (BTreeSet::new(), BTreeSet::new()),
             fresh,
             first: false,
@@ -640,7 +641,7 @@ impl Tiered {
             }
         };
         if crossed {
-            self.epoch.set(self.epoch.get().wrapping_add(1));
+            self.epoch.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -926,13 +927,13 @@ pub(crate) struct Store {
     /// Lattice relation: the present rows (the merged cells). A set relation's present rows are the keys of
     /// `counts` (a row is kept there only while its support is positive), so it keeps no second copy.
     merged_rows: BTreeSet<Row>,
-    /// Built lazily from `&self` (a node's engine runs on one thread).
-    indexes: RefCell<BTreeMap<Vec<usize>, Index>>,
+    /// Built lazily from `&self`; synchronized while read-only valuation workers share the store.
+    indexes: ProbeCache<BTreeMap<Vec<usize>, Index>>,
     /// The tick's change to the present rows.
     pub ins: BTreeSet<Row>,
     del: BTreeSet<Row>,
     /// Old-version probes index only deletions matching their columns, instead of rescanning every delta.
-    deleted_by: RefCell<BTreeMap<Vec<usize>, RowsBy>>,
+    deleted_by: ProbeCache<BTreeMap<Vec<usize>, RowsBy>>,
     /// Whether any support changed this tick, even where the present rows did not.
     pub touched: bool,
     /// For a relation whose rows can hold blobs: how many present rows hold each blob, kept with every change, so
@@ -1586,7 +1587,7 @@ impl Store {
     pub fn size_class(&self, small: usize) -> u64 {
         let bits = u64::from((usize::BITS - self.present_len().leading_zeros()).max(small.trailing_zeros()));
         match &self.tiered {
-            Some(t) => bits | (t.epoch.get() << 8),
+            Some(t) => bits | (t.epoch.load(Ordering::Relaxed) << 8),
             None => bits,
         }
     }

@@ -66,6 +66,8 @@ pub struct EngineConfig {
     /// Keep every durable table in memory even when started on the node's database ([`Engine::reset_on`] tiers
     /// none): a deployment's `storage.tiered = false`, for state that fits in memory and the in-memory engine's speed.
     pub in_memory: bool,
+    /// Bounded read-only evaluation workers (zero or one: serial). All state writes and tick release remain serial.
+    pub workers: usize,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -81,6 +83,9 @@ pub struct Engine {
     shared: Shared,
     node: NodeId,
     plans: Plans,
+    workers: Option<rayon::ThreadPool>,
+    parallel_rules: BTreeSet<RuleId>,
+    parallel_terms: std::cell::Cell<u64>,
     strata: Arc<[Stratum]>,
     inductive: Arc<[RuleId]>,
     asynchronous: Arc<[RuleId]>,
@@ -555,7 +560,6 @@ impl Engine {
                 }
             }
         }
-        scoped_derived.retain(|rel| !stores.is_alias(StoreKey::Main(*rel)));
         let mut framed = BTreeMap::new();
         for id in inductive.iter() {
             if let Some(plan) = plans.get(id)
@@ -621,6 +625,25 @@ impl Engine {
             .filter(|(id, r)| plans.contains_key(id) && matches!(r.head.mode, HeadMode::Violation { .. }))
             .map(|(id, _)| id)
             .collect();
+        let mut pure = BTreeMap::new();
+        let parallel_rules = p
+            .rules
+            .iter_enumerated()
+            .filter(|(id, r)| plans.contains_key(id) && crate::purity::rule_is_pure(p, r, &mut pure))
+            .map(|(id, _)| id)
+            .collect();
+        let workers = if cfg.workers > 1 {
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(cfg.workers)
+                    .stack_size(blossom_ir::depth::EVAL_STACK_BYTES)
+                    .thread_name(|i| format!("blossom-eval-{i}"))
+                    .build()
+                    .map_err(|e| internal_error!("starting evaluation workers: {e}"))?,
+            )
+        } else {
+            None
+        };
         let mut engine = Engine {
             shared: Shared {
                 params: cfg.params,
@@ -636,6 +659,9 @@ impl Engine {
             },
             node,
             plans,
+            workers,
+            parallel_rules,
+            parallel_terms: std::cell::Cell::new(0),
             strata: strata_list.into(),
             inductive: inductive.into(),
             asynchronous: asynchronous.into(),
@@ -1402,7 +1428,9 @@ impl Engine {
         self.inputs = now_inputs;
         // The derived tick-scoped relations start every tick empty: their rules derive this tick's rows afresh.
         for rel in self.scoped.clone() {
-            self.store(StoreKey::Main(rel))?.retract_all().map_err(wrap)?;
+            if !self.stores.is_alias(StoreKey::Main(rel)) {
+                self.store(StoreKey::Main(rel))?.retract_all().map_err(wrap)?;
+            }
         }
         self.settle(tick)?;
         let program = self.program.clone();
@@ -1765,7 +1793,7 @@ impl Engine {
             fn_work: self.fn_work.as_ref(),
             callee_steps: std::cell::Cell::new(0),
             blobs: input.blobs,
-            new_blobs: &self.new_blobs,
+            new_blobs: expr::NewBlobs::Mutable(&self.new_blobs),
             flips_at: std::cell::Cell::new(None),
             reads_time: std::cell::Cell::new(false),
         }
@@ -2014,6 +2042,32 @@ impl Engine {
             }
             drivers = rest;
         }
+        let parallel = self.workers.is_some() && self.parallel_rules.contains(&rule.id);
+        let mut pivot_rows = 0;
+        if parallel && matches!(drivers.as_slice(), [(Driver::Full, _)]) {
+            let cost = |lit: usize, cols: &[usize], range: bool| match rule.body.lits.get(lit) {
+                Some(Literal::Pos(a)) => self
+                    .stores
+                    .get(&rule::atom_store(a))
+                    .map_or(0, |s| s.estimate_probe(cols, range)),
+                _ => usize::MAX,
+            };
+            let order = plan.order_for(rule, None, &cost);
+            if let Some(lit) = order.steps.iter().find_map(|s| match s {
+                rule::Step::Atom { lit, .. } => Some(*lit),
+                _ => None,
+            }) && let Some(Literal::Pos(a)) = rule.body.lits.get(lit)
+                && let Some(store) = self.stores.get(&rule::atom_store(a))
+                && store.present_len() >= PARALLEL_GRAIN * 2
+            {
+                let rows = store.new_rows(&[], &[])?;
+                pivot_rows = rows.len() as u64;
+                drivers = rows
+                    .into_iter()
+                    .map(|row| (Driver::Atom { lit, row, sign: 1 }, usize::MAX))
+                    .collect();
+            }
+        }
         // The join order of each driver's terms, from the stores as they are now.
         let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
             let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else {
@@ -2054,67 +2108,60 @@ impl Engine {
             };
             orders.push((lit, order));
         }
+        if parallel
+            && drivers.len() >= PARALLEL_GRAIN * 2
+            && let Some(pool) = &self.workers
+        {
+            use rayon::prelude::*;
+            self.parallel_terms
+                .set(self.parallel_terms.get() + drivers.len() as u64);
+            let created = self.new_blobs.borrow();
+            let read = ParallelRead {
+                p,
+                input,
+                node: self.node,
+                shared: &self.shared,
+                stores: &self.stores,
+                created: &created,
+                profile: self.fn_work.is_some(),
+            };
+            // Indexed collection preserves driver-group order even when workers finish in another order.
+            let chunks: Vec<_> = pool.install(|| {
+                drivers
+                    .par_chunks(PARALLEL_GRAIN)
+                    .map(|chunk| read.run(rule, plan, chunk, &orders))
+                    .collect()
+            });
+            for chunk in chunks {
+                let (terms, functions) = chunk?;
+                out.merge(terms);
+                if let Some(profile) = &self.fn_work {
+                    let mut profile = profile.borrow_mut();
+                    for (id, w) in functions {
+                        let entry = profile.entry(id).or_default();
+                        entry.calls += w.calls;
+                        entry.steps += w.steps;
+                        entry.self_steps += w.self_steps;
+                    }
+                }
+            }
+            out.examined += pivot_rows;
+            return Ok(out);
+        }
         let mut buffers = self
             .buffers
             .try_borrow_mut()
             .map_err(|_| internal_error!("a rule evaluation inside another"))?;
-        for (driver, pos) in drivers {
-            let order = orders
-                .iter()
-                .find(|(l, _)| *l == driver.lit())
-                .map(|(_, o)| o)
-                .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
-            let old = |lit: usize| plan.dep_pos.get(lit).copied().flatten().is_some_and(|q| q > pos);
-            let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
-                if plan.aggregate {
-                    let mut group = Vec::new();
-                    let mut aggs = Vec::new();
-                    for a in &rule.head.args {
-                        match a {
-                            HeadArg::Term(t) => group.push(expr::term(&cx, f.env, t)?),
-                            HeadArg::Agg(agg) => {
-                                let mut tuple = Vec::with_capacity(agg.args.len());
-                                for t in &agg.args {
-                                    tuple.push(expr::term(&cx, f.env, t)?);
-                                }
-                                aggs.push(tuple);
-                            }
-                        }
-                    }
-                    for (col, tuple) in aggs.into_iter().enumerate() {
-                        *out.aggs.entry((group.clone(), col, tuple)).or_insert(0) += f.sign;
-                    }
-                } else {
-                    let row = rule::head_row(&cx, rule, f.env)?;
-                    *out.heads.entry(row).or_insert(0) += f.sign;
-                }
-                Ok(())
-            };
-            let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
-            let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
-            out.examined += rule::run_term(
-                &cx,
-                &self.stores,
-                rule,
-                plan,
-                order,
-                &driver,
-                &old,
-                &mut emit,
-                &mut error,
-                &mut buffers,
-            )?;
-            for (t, e, s) in errors {
-                let slot = out.errors.entry(t).or_insert((0, None));
-                slot.0 += s;
-                if slot.1.is_none() {
-                    slot.1 = Some(e);
-                }
-            }
-        }
-        out.steps = cx.steps.get();
-        out.flips_at = cx.flips_at.get();
-        out.reads_time = cx.reads_time.get();
+        out.merge(run_terms(
+            &cx,
+            &self.stores,
+            rule,
+            plan,
+            &drivers,
+            &orders,
+            &mut buffers,
+        )?);
+        out.examined += pivot_rows;
         Ok(out)
     }
 
@@ -2926,6 +2973,11 @@ impl Engine {
         w.evals += 1;
     }
 
+    /// Valuation terms evaluated on the bounded worker pool, cumulatively (zero in serial mode).
+    pub fn parallel_terms(&self) -> u64 {
+        self.parallel_terms.get()
+    }
+
     pub fn node(&self) -> NodeId {
         self.node
     }
@@ -2947,6 +2999,141 @@ struct Terms {
     /// read the time otherwise (`Ctx::reads_time`).
     flips_at: Option<blossom_value::time::Instant>,
     reads_time: bool,
+}
+
+// Avoid scheduling tiny copy/probe workloads. This is a scheduling grain, not a semantic limit.
+const PARALLEL_GRAIN: usize = 32;
+
+impl Terms {
+    fn merge(&mut self, other: Self) {
+        self.examined += other.examined;
+        self.steps += other.steps;
+        self.reads_time |= other.reads_time;
+        self.flips_at = self.flips_at.into_iter().chain(other.flips_at).min();
+        for (r, n) in other.heads {
+            *self.heads.entry(r).or_insert(0) += n;
+        }
+        for (r, n) in other.aggs {
+            *self.aggs.entry(r).or_insert(0) += n;
+        }
+        for (t, (n, e)) in other.errors {
+            let entry = self.errors.entry(t).or_insert((0, None));
+            entry.0 += n;
+            if entry.1.is_none() {
+                entry.1 = e;
+            }
+        }
+    }
+}
+
+struct ParallelRead<'a> {
+    p: &'a Program,
+    input: &'a StepInput<'a>,
+    node: NodeId,
+    shared: &'a Shared,
+    stores: &'a Stores,
+    created: &'a BTreeMap<blossom_value::BlobRef, Arc<[u8]>>,
+    profile: bool,
+}
+impl ParallelRead<'_> {
+    fn run(
+        &self,
+        rule: &Rule,
+        plan: &Plan,
+        drivers: &[(Driver, usize)],
+        orders: &[(Option<usize>, Arc<rule::Order>)],
+    ) -> Result<(Terms, BTreeMap<blossom_base::FnId, FnWork>), EvalError> {
+        let functions = std::cell::RefCell::new(BTreeMap::new());
+        let cx = Ctx {
+            program: self.p,
+            node: self.node,
+            incarnation: self.input.incarnation,
+            tick: self.input.tick,
+            now: self.input.now,
+            shared: self.shared,
+            fuel: crate::expr::Fuel::default(),
+            steps: std::cell::Cell::new(0),
+            fn_work: self.profile.then_some(&functions),
+            callee_steps: std::cell::Cell::new(0),
+            blobs: self.input.blobs,
+            new_blobs: expr::NewBlobs::Frozen(self.created),
+            flips_at: std::cell::Cell::new(None),
+            reads_time: std::cell::Cell::new(false),
+        };
+        let terms = run_terms(
+            &cx,
+            self.stores,
+            rule,
+            plan,
+            drivers,
+            orders,
+            &mut rule::TermBuffers::default(),
+        )?;
+        Ok((terms, functions.into_inner()))
+    }
+}
+
+/// Run a disjoint group of additive valuation terms against one immutable store snapshot.
+#[allow(clippy::too_many_arguments)]
+fn run_terms(
+    cx: &Ctx<'_>,
+    stores: &Stores,
+    rule: &Rule,
+    plan: &Plan,
+    drivers: &[(Driver, usize)],
+    orders: &[(Option<usize>, Arc<rule::Order>)],
+    buffers: &mut rule::TermBuffers,
+) -> Result<Terms, EvalError> {
+    let mut out = Terms::default();
+    for (driver, pos) in drivers {
+        let order = orders
+            .iter()
+            .find(|(l, _)| *l == driver.lit())
+            .map(|(_, o)| o)
+            .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
+        let old = |lit: usize| plan.dep_pos.get(lit).copied().flatten().is_some_and(|q| q > *pos);
+        let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
+            if plan.aggregate {
+                let mut group = Vec::new();
+                let mut aggs = Vec::new();
+                for a in &rule.head.args {
+                    match a {
+                        HeadArg::Term(t) => group.push(expr::term(cx, f.env, t)?),
+                        HeadArg::Agg(agg) => {
+                            let mut tuple = Vec::with_capacity(agg.args.len());
+                            for t in &agg.args {
+                                tuple.push(expr::term(cx, f.env, t)?);
+                            }
+                            aggs.push(tuple);
+                        }
+                    }
+                }
+                for (col, tuple) in aggs.into_iter().enumerate() {
+                    *out.aggs.entry((group.clone(), col, tuple)).or_insert(0) += f.sign;
+                }
+            } else {
+                let row = rule::head_row(cx, rule, f.env)?;
+                *out.heads.entry(row).or_insert(0) += f.sign;
+            }
+            Ok(())
+        };
+        let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
+        let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
+        out.examined += rule::run_term(
+            cx, stores, rule, plan, order, driver, &old, &mut emit, &mut error, buffers,
+        )?;
+        for (t, e, s) in errors {
+            let slot = out.errors.entry(t).or_insert((0, None));
+            slot.0 += s;
+            if slot.1.is_none() {
+                slot.1 = Some(e);
+            }
+        }
+    }
+    out.steps = cx.steps.get();
+    out.flips_at = cx.flips_at.get();
+    out.reads_time = cx.reads_time.get();
+    Ok(out)
 }
 
 /// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).

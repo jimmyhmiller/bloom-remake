@@ -86,7 +86,7 @@ impl Fixture {
         if let Some(rows) = hot_rows {
             executors = executors.with_hot_rows(rows);
         }
-        executors = executors.tiered(tiered);
+        executors = executors.tiered(tiered).with_workers(2);
         Fixture {
             schema: DurableSchema::of(artifact.program.get()),
             artifact,

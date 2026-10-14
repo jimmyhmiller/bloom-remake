@@ -27,6 +27,7 @@
 //! [storage]
 //! data_dir = "data"               # each node's store is <data_dir>/<node name>, relative to this file
 //! checkpoint_wal_bytes = 67108864
+//! eval_workers = 1                  # bounded read-only evaluation pool; writes and commit remain coordinated
 //! hot_rows = 65536                  # recent-probe rows across the engine's tiered stores
 //! cache_bytes = 33554432      # decoded database block retention; zero disables it
 //! history_ticks = 65536             # how far back a database query may read (docs/design/DATABASE.md §4)
@@ -158,6 +159,7 @@ struct RawStorage {
     history_ticks: Option<u64>,
     tiered: Option<bool>,
     hot_rows: Option<usize>,
+    eval_workers: Option<usize>,
     cache_bytes: Option<usize>,
     tail_certification: Option<String>,
 }
@@ -217,6 +219,8 @@ pub struct DeploymentSpec {
     pub tiered: bool,
     /// Recent-probe row budget across the engine's tiered stores (`None`: engine default).
     pub hot_rows: Option<usize>,
+    /// Bounded read-only engine valuation workers; state writes and commit remain coordinated.
+    pub eval_workers: usize,
     /// Database decoded-block retention budget (`None`: LSM default; zero disables retention).
     pub cache_bytes: Option<usize>,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
@@ -256,6 +260,9 @@ impl DeploymentSpec {
                 "format",
                 format!("{} is not a format this build reads (1)", raw.format),
             ));
+        }
+        if raw.storage.eval_workers == Some(0) {
+            return Err(invalid("storage.eval_workers", "must be positive"));
         }
         if raw.storage.hot_rows == Some(0) {
             return Err(invalid("storage.hot_rows", "must be positive"));
@@ -400,6 +407,7 @@ impl DeploymentSpec {
             history_ticks: raw.storage.history_ticks.unwrap_or(65_536),
             tiered: raw.storage.tiered.unwrap_or(true),
             hot_rows: raw.storage.hot_rows,
+            eval_workers: raw.storage.eval_workers.unwrap_or(1),
             cache_bytes: raw.storage.cache_bytes,
             tail_certification,
             stream_limits,

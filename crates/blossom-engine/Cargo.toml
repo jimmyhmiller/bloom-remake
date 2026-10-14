@@ -15,6 +15,8 @@ blossom-ir.workspace = true
 blossom-kernel.workspace = true
 blake3.workspace = true
 smallvec.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true

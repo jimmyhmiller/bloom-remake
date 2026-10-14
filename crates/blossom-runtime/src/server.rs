@@ -518,7 +518,8 @@ impl Server {
             cfg.externs.clone(),
             members.clone(),
         )?
-        .tiered(spec.tiered);
+        .tiered(spec.tiered)
+        .with_workers(spec.eval_workers);
         if let Some(rows) = spec.hot_rows {
             executors = executors.with_hot_rows(rows);
         }

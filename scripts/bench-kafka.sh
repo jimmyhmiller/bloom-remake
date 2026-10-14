@@ -53,6 +53,7 @@ blossom_up() {
     printf '["b3", 3, "127.0.0.1", 19094]]\n\n[security]\nmode = "insecure-dev"\n\n[storage]\ndata_dir = "data"\n'
     printf 'tail_certification = "%s"\n' "${TAIL_CERT:-strict}"
     printf 'tiered = %s\n' "${TIERED:-true}"
+    if [ -n "${EVAL_WORKERS:-}" ]; then printf 'eval_workers = %s\n' "$EVAL_WORKERS"; fi
     if [ -n "${HOT_ROWS:-}" ]; then printf 'hot_rows = %s\n' "$HOT_ROWS"; fi
     if [ -n "${BLOCK_CACHE_BYTES:-}" ]; then printf 'cache_bytes = %s\n' "$BLOCK_CACHE_BYTES"; fi
   } > "$d/deploy.toml"

@@ -13,6 +13,7 @@ mod cold;
 mod engine;
 mod expr;
 mod func;
+mod probe_cache;
 mod purity;
 mod row_bucket;
 mod row_support;
