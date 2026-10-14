@@ -54,6 +54,9 @@ blossom_up() {
     printf 'tail_certification = "%s"\n' "${TAIL_CERT:-strict}"
     printf 'tiered = %s\n' "${TIERED:-true}"
     if [ -n "${EVAL_WORKERS:-}" ]; then printf 'eval_workers = %s\n' "$EVAL_WORKERS"; fi
+    if [ -n "${MAP_CACHE_ROWS:-}" ]; then printf 'map_cache_rows = %s\n' "$MAP_CACHE_ROWS"; fi
+    if [ -n "${MAP_CACHE_JOINS:-}" ]; then printf 'map_cache_joins = %s\n' "$MAP_CACHE_JOINS"; fi
+    if [ -n "${LAZY_INDEXES:-}" ]; then printf 'lazy_indexes = %s\n' "$LAZY_INDEXES"; fi
     if [ -n "${HOT_ROWS:-}" ]; then printf 'hot_rows = %s\n' "$HOT_ROWS"; fi
     if [ -n "${BLOCK_CACHE_BYTES:-}" ]; then printf 'cache_bytes = %s\n' "$BLOCK_CACHE_BYTES"; fi
   } > "$d/deploy.toml"

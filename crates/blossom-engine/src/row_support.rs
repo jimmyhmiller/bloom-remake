@@ -100,7 +100,7 @@ impl Layout {
         Some(Self(cols))
     }
 
-    fn key<'a>(&self, row: &'a Row) -> Option<KeyRef<'a>> {
+    pub(crate) fn key<'a>(&self, row: &'a Row) -> Option<KeyRef<'a>> {
         self.pack(self.0.iter().map(|(col, _)| row.get(*col)))
     }
 
@@ -113,7 +113,7 @@ impl Layout {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Key {
     words: SmallVec<[u64; 3]>,
     bytes: SmallVec<[BytesValue; 1]>,
@@ -121,7 +121,7 @@ pub(crate) struct Key {
 
 /// Queries borrow byte allocations. Read hits and occupied updates never increment/decrement their Arcs.
 #[derive(Default, Hash)]
-struct KeyRef<'a> {
+pub(crate) struct KeyRef<'a> {
     words: SmallVec<[u64; 3]>,
     bytes: SmallVec<[&'a BytesValue; 1]>,
 }
@@ -131,7 +131,7 @@ impl KeyRef<'_> {
             && self.bytes.len() == key.bytes.len()
             && self.bytes.iter().zip(&key.bytes).all(|(a, b)| *a == b)
     }
-    fn owned(&self) -> Key {
+    pub(crate) fn owned(&self) -> Key {
         Key {
             words: self.words.clone(),
             bytes: self.bytes.iter().map(|b| (*b).clone()).collect(),

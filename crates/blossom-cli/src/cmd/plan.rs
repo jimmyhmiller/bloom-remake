@@ -67,8 +67,16 @@ fn drive(args: Args) -> Result<String, String> {
             serde_json::from_value(value.get("plan").unwrap_or(&value).clone()).map_err(|e| e.to_string())?;
         return render(&plan, args.dot, args.focus.as_deref(), args.depth);
     }
+    let mut physical = EngineConfig::default();
     let artifact = if let Some(deploy) = args.deploy {
-        crate::cmd::run::load(&deploy).map_err(|_| "deployment did not load")?.1
+        let (spec, artifact) = crate::cmd::run::load(&deploy).map_err(|_| "deployment did not load")?;
+        physical.workers = spec.eval_workers;
+        physical.map_cache_rows = spec.map_cache_rows;
+        physical.map_cache_joins = spec.map_cache_joins;
+        physical.lazy_indexes = spec.lazy_indexes;
+        physical.hot_rows = spec.hot_rows;
+        physical.in_memory = !spec.tiered;
+        artifact
     } else {
         let file = args
             .file
@@ -112,7 +120,7 @@ fn drive(args: Args) -> Result<String, String> {
             node_names: artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
             externs: crate::common::std_externs().map_err(|e| e.to_string())?,
             members: Arc::new(artifact.members()?),
-            ..EngineConfig::default()
+            ..physical
         },
     )
     .map_err(|e| e.to_string())?;
@@ -210,5 +218,53 @@ mod tests {
         let b = serde_json::json!({"report_version":1,"workload":"b","ticks":1});
         assert!(compare(&a, &b).is_err());
         assert!(compare(&serde_json::json!({}), &serde_json::json!({})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deployment_plan_tests {
+    use super::*;
+    #[test]
+    fn deployment_inspection_uses_the_selected_execution_options() {
+        let (path, file) = (0u64..)
+            .find_map(|n| {
+                let path = std::env::temp_dir().join(format!("blossom-plan-deploy-{}-{n}.toml", std::process::id()));
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                    Ok(file) => Some((path, file)),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                    Err(e) => panic!("cannot create test deployment: {e}"),
+                }
+            })
+            .unwrap();
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let scratch = Scratch(path);
+        use std::io::Write;
+        let mut file = file;
+        let source =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/integration/fixtures/engine/retained_map.bls");
+        writeln!(file,"format = 1\n[deployment]\nid = \"plan\"\nprogram = \"retained_map\"\nversion = 1\nsource = {:?}\n[[node]]\nname = \"n1\"\naddr = \"127.0.0.1:29999\"\nprincipal = \"spiffe://plan/n1\"\n[security]\nmode = \"insecure-dev\"\n[storage]\ndata_dir = \"plan-test-data\"\neval_workers = 2\nmap_cache_rows = 128\nmap_cache_joins = true\nlazy_indexes = true",source.to_str().unwrap()).unwrap();
+        drop(file);
+        let json = drive(Args {
+            file: None,
+            deploy: Some(scratch.0.clone()),
+            nodes: vec![],
+            node: None,
+            compare: vec![],
+            report: None,
+            dot: false,
+            focus: None,
+            depth: 1,
+        })
+        .unwrap();
+        let report: PlanReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report.evaluation_workers, 2);
+        assert_eq!(report.map_cache.row_budget, 128);
+        assert!(report.lazy_indexes);
+        assert!(report.rules.iter().any(|r| r.operator == "retained-map"));
     }
 }

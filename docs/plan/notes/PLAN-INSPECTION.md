@@ -45,3 +45,8 @@ First inspect an expensive measured path and its materialization fan-out, store 
 Not yet measured here: allocation counts/bytes, decoded bytes, cold-probe I/O/cache behavior, durability wait time, distinct partition keys, peak residency, or executed dynamic join-order traces. Those require additional hooks in their owning subsystems; no fabricated zeros or estimated speedups substitute for them. The first version supplies actual plan structure, store operations, elapsed attribution and checked comparison rather than a predictive cost model.
 
 Validation: an actual six-tick upsert trace is generated and replayed over a three-tick interior window using one/two workers and measurement on/off. Outcomes and logical work agree; differing windows, empty windows, zero workers and corrupted outcomes are rejected. Exact store-counter tests distinguish support-only changes, membership transitions, index build hits, row updates and bulk retraction. Engine units, CLI tests, planner/native-store/parallel differential suites, Clippy and formatting pass.
+
+
+## Experimental execution strategies
+
+Checked replay now accepts `--map-cache-rows N`, `--map-cache-joins`, and `--lazy-indexes`. Corresponding deployment storage settings select bounded retained output bags and non-materializing join cost estimates. `blossom plan --deploy` reflects the deployment's worker/storage/operator choices. Map-cache counters include the prefix since engine creation; ordinary work/timing and store counters describe the selected window. [Retained-plan experiments](RETAINED-PLAN-EXPERIMENTS.md) document eligibility, semantics and measured results. These switches select implemented strategies; they do not enable full pipeline fusion.

@@ -45,6 +45,11 @@ pub struct PlanReport {
     pub program_digest: String,
     pub node: u32,
     pub evaluation_workers: usize,
+    #[serde(default)]
+    pub lazy_indexes: bool,
+    /// Native map-cache counters since engine creation; residency is bounded in rows, not bytes.
+    #[serde(default)]
+    pub map_cache: crate::MapCacheReport,
     pub rules: Vec<RuleReport>,
     pub stores: Vec<StoreReport>,
     pub limitations: Vec<String>,

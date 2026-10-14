@@ -1120,6 +1120,7 @@ impl Driver {
 /// One valuation found by a term.
 pub(crate) struct Found<'e> {
     pub env: &'e [Option<Value>],
+    pub rows: &'e [Option<Row>],
     pub sign: i64,
 }
 
@@ -1359,7 +1360,7 @@ impl Search<'_, '_> {
                 (self.error)(token, e.duplicate(), sign);
                 return Ok(());
             }
-            return match (self.emit)(Found { env, sign }) {
+            return match (self.emit)(Found { env, rows, sign }) {
                 Ok(()) => Ok(()),
                 Err(ExprError::Eval(e)) => Err(e),
                 Err(e) => {

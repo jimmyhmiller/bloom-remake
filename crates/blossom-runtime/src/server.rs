@@ -519,7 +519,10 @@ impl Server {
             members.clone(),
         )?
         .tiered(spec.tiered)
-        .with_workers(spec.eval_workers);
+        .with_workers(spec.eval_workers)
+        .with_map_cache_rows(spec.map_cache_rows)
+        .with_map_cache_joins(spec.map_cache_joins)
+        .with_lazy_indexes(spec.lazy_indexes);
         if let Some(rows) = spec.hot_rows {
             executors = executors.with_hot_rows(rows);
         }

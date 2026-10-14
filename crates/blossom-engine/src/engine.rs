@@ -68,6 +68,12 @@ pub struct EngineConfig {
     pub in_memory: bool,
     /// Bounded read-only evaluation workers (zero or one: serial). All state writes and tick release remain serial.
     pub workers: usize,
+    /// Retained pure-map input/output rows, globally bounded. Zero disables this experimental operator.
+    pub map_cache_rows: usize,
+    /// Extend retained maps to pure joins, tracking other dependency deltas.
+    pub map_cache_joins: bool,
+    /// Estimate join candidates without creating indexes for rejected alternatives.
+    pub lazy_indexes: bool,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -87,6 +93,9 @@ pub struct Engine {
     parallel_rules: BTreeSet<RuleId>,
     parallel_terms: std::cell::Cell<u64>,
     plan_times: Option<BTreeMap<RuleId, u64>>,
+    map_rules: BTreeSet<RuleId>,
+    lazy_indexes: bool,
+    map_cache: std::cell::RefCell<crate::map_cache::MapCache>,
     strata: Arc<[Stratum]>,
     inductive: Arc<[RuleId]>,
     asynchronous: Arc<[RuleId]>,
@@ -528,6 +537,9 @@ impl Engine {
                 });
             }
         }
+        for store in stores.values_mut() {
+            store.lazy_estimates(cfg.lazy_indexes);
+        }
         // Scoped identity views read their source directly. Stratification has already ruled out cycles;
         // no facts, carry, second writer or lattice contribution can be hidden by this physical fusion.
         for s in &strata_list {
@@ -683,6 +695,40 @@ impl Engine {
         } else {
             None
         };
+        let mut map_purity = BTreeMap::new();
+        let map_rules: BTreeSet<RuleId> = plans
+            .values()
+            .filter_map(|plan| {
+                let rule = p.rules.get(plan.rule)?;
+                (cfg.map_cache_rows > 0
+                    && plan.regime == Regime::Delta
+                    && !plan.aggregate
+                    && plan.copy.is_none()
+                    && plan.frame.is_none()
+                    && plan.upsert_delete.is_none()
+                    && plan
+                        .atoms
+                        .first()
+                        .is_some_and(|primary| plan.dep_pos.get(*primary).copied().flatten() == Some(0))
+                    && (cfg.map_cache_joins || (plan.atoms.len() == 1 && plan.deps == plan.atoms))
+                    && !strata_list.iter().any(|s| s.recursive && s.rules.contains(&plan.rule))
+                    && crate::purity::rule_is_pure(p, rule, &mut map_purity)
+                    && crate::purity::benefits_from_retention(rule))
+                .then_some(plan.rule)
+            })
+            .collect();
+        let map_layouts = plans
+            .values()
+            .filter(|plan| map_rules.contains(&plan.rule))
+            .filter_map(|plan| {
+                let rule = p.rules.get(plan.rule)?;
+                let Literal::Pos(atom) = rule.body.lits.get(*plan.atoms.first()?)? else {
+                    return None;
+                };
+                crate::row_support::Layout::of(&p.rels.get(atom.rel)?.schema, &p.types)
+                    .map(|layout| (plan.rule, layout))
+            })
+            .collect();
         let mut engine = Engine {
             shared: Shared {
                 params: cfg.params,
@@ -702,6 +748,11 @@ impl Engine {
             parallel_rules,
             parallel_terms: std::cell::Cell::new(0),
             plan_times: None,
+            map_rules,
+            lazy_indexes: cfg.lazy_indexes,
+            map_cache: std::cell::RefCell::new(
+                crate::map_cache::MapCache::new(cfg.map_cache_rows).with_layouts(map_layouts),
+            ),
             strata: strata_list.into(),
             inductive: inductive.into(),
             asynchronous: asynchronous.into(),
@@ -788,6 +839,7 @@ impl Engine {
     /// Starts over from `carried` (at boot: the recovered durable state): every store is emptied, and the next tick
     /// sees the carried state, the facts and its inputs as new.
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+        self.map_cache.get_mut().clear();
         self.tiered.clear();
         self.views.clear();
         self.durable_aggs.clear();
@@ -2162,6 +2214,58 @@ impl Engine {
             };
             orders.push((lit, order));
         }
+        if self.map_rules.contains(&rule.id) && drivers.iter().all(|(d, _)| !matches!(d, Driver::Full)) {
+            let primary = plan
+                .atoms
+                .first()
+                .copied()
+                .ok_or_else(|| internal_error!("retained map without input"))?;
+            let mut buffers = self
+                .buffers
+                .try_borrow_mut()
+                .map_err(|_| internal_error!("nested map evaluation"))?;
+            for (driver, pos) in &drivers {
+                let primary_driver = matches!(driver,Driver::Atom{lit,..} if *lit==primary);
+                if let Driver::Atom { row, sign: -1, .. } = driver
+                    && primary_driver
+                    && let Some(outputs) = self.map_cache.borrow_mut().retract(rule.id, row)
+                {
+                    for (head, count) in outputs {
+                        *out.heads.entry(head).or_insert(0) -= count;
+                    }
+                    continue;
+                }
+                let mut update = |input: &Row, output: &Row, sign: i64| {
+                    self.map_cache.borrow_mut().update(rule.id, input, output, sign)
+                };
+                let capture = (!primary_driver).then_some(MapCapture {
+                    primary,
+                    update: &mut update,
+                });
+                let terms = run_terms(
+                    &self.ctx(p, input),
+                    &self.stores,
+                    rule,
+                    plan,
+                    &[(driver.clone(), *pos)],
+                    &orders,
+                    &mut buffers,
+                    capture,
+                )?;
+                if let Driver::Atom { row, sign: 1, .. } = driver
+                    && primary_driver
+                    && terms.errors.is_empty()
+                {
+                    self.map_cache.borrow_mut().insert(
+                        rule.id,
+                        row.clone(),
+                        terms.heads.iter().map(|(r, n)| (r.clone(), *n)).collect(),
+                    );
+                }
+                out.merge(terms);
+            }
+            return Ok(out);
+        }
         if parallel
             && drivers.len() >= PARALLEL_GRAIN * 2
             && let Some(pool) = &self.workers
@@ -2214,6 +2318,7 @@ impl Engine {
             &drivers,
             &orders,
             &mut buffers,
+            None,
         )?);
         out.examined += pivot_rows;
         Ok(out)
@@ -3032,7 +3137,9 @@ impl Engine {
                     .upsert_next
                     .get(&rule.head.rel)
                     .is_some_and(|(id, _)| *id == plan.rule);
-            let operator = if eliminated {
+            let operator = if self.map_rules.contains(&plan.rule) {
+                "retained-map"
+            } else if eliminated {
                 "alias"
             } else if plan.frame.is_some() && self.framed.contains_key(&rule.head.rel) {
                 "virtual-frame"
@@ -3133,7 +3240,7 @@ impl Engine {
                 }
             })
             .collect();
-        PlanReport { node:self.node.0, evaluation_workers:self.workers.as_ref().map_or(1, rayon::ThreadPool::current_num_threads), schema_version: 1, program_digest: format!("{:?}", self.program.digest()), rules, stores, limitations: vec![
+        PlanReport { lazy_indexes:self.lazy_indexes, map_cache:self.map_cache.borrow().report(), node:self.node.0, evaluation_workers:self.workers.as_ref().map_or(1, rayon::ThreadPool::current_num_threads), schema_version: 1, program_digest: format!("{:?}", self.program.digest()), rules, stores, limitations: vec![
             "Join order is selected dynamically per driver; this snapshot reports rule structure, not an executed join-order trace.".into(),
             "Support writes exclude some native membership operations and are not physical index updates.".into(),
             "Resident rows exclude cold state; index lists exclude cold and specialized primary indexes.".into(),
@@ -3278,13 +3385,18 @@ impl ParallelRead<'_> {
             reads_time: std::cell::Cell::new(false),
         };
         let mut buffers = WORKER_BUFFERS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
-        let result = run_terms(&cx, self.stores, rule, plan, drivers, orders, &mut buffers);
+        let result = run_terms(&cx, self.stores, rule, plan, drivers, orders, &mut buffers, None);
         // Retain capacity, not rows, blobs or values from the last valuation.
         buffers.clear();
         WORKER_BUFFERS.with(|slot| *slot.borrow_mut() = buffers);
         let terms = result?;
         Ok((terms, functions.into_inner()))
     }
+}
+
+struct MapCapture<'a> {
+    primary: usize,
+    update: &'a mut dyn FnMut(&Row, &Row, i64),
 }
 
 /// Run a disjoint group of additive valuation terms against one immutable store snapshot.
@@ -3297,6 +3409,7 @@ fn run_terms(
     drivers: &[(Driver, usize)],
     orders: &[(Option<usize>, Arc<rule::Order>)],
     buffers: &mut rule::TermBuffers,
+    mut capture: Option<MapCapture<'_>>,
 ) -> Result<Terms, EvalError> {
     let mut out = Terms::default();
     for (driver, pos) in drivers {
@@ -3327,6 +3440,14 @@ fn run_terms(
                 }
             } else {
                 let row = rule::head_row(cx, rule, f.env)?;
+                if let Some(MapCapture { primary, update }) = &mut capture {
+                    let input = f
+                        .rows
+                        .get(*primary)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| expr::bug("a map valuation lacks its primary input".into()))?;
+                    update(input, &row, f.sign);
+                }
                 *out.heads.entry(row).or_insert(0) += f.sign;
             }
             Ok(())

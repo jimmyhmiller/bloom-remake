@@ -14,6 +14,7 @@ mod engine;
 mod expr;
 mod func;
 mod inspection;
+mod map_cache;
 mod probe_cache;
 mod purity;
 mod row_bucket;
@@ -26,3 +27,5 @@ mod upsert;
 pub use cold::{ColRange, ColdTables, Resume};
 pub use engine::{Engine, EngineConfig};
 pub use inspection::{PlanReport, RuleReport, StoreOperations, StoreReport, WorkReport};
+
+pub use map_cache::MapCacheReport;

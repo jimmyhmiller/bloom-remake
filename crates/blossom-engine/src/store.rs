@@ -913,6 +913,10 @@ impl Tiered {
 #[derive(Debug, Default)]
 pub(crate) struct Store {
     inspection: Option<InspectionCounters>,
+    lazy_estimates: bool,
+    declared_key: Option<Vec<usize>>,
+    estimate_samples: ProbeCache<BTreeMap<Vec<usize>, (u32, usize)>>,
+    index_epoch: std::sync::atomic::AtomicU64,
 
     pub cell: Option<CellSpec>,
     /// Set relation: the support of each row. Lattice relation: the support of each contribution. Hashed: a write
@@ -1002,6 +1006,10 @@ struct InspectionCounters {
 }
 
 impl Store {
+    pub(crate) fn lazy_estimates(&mut self, on: bool) {
+        self.lazy_estimates = on;
+    }
+
     pub(crate) fn measure_plan(&mut self, on: bool) {
         self.inspection = on.then(InspectionCounters::default);
     }
@@ -1063,6 +1071,7 @@ impl Store {
 
     /// Compile the physical support key once; lattice contributions retain full-row support.
     pub fn with_schema(mut self, schema: &blossom_ir::core::Schema, types: &blossom_value::TypeTable) -> Self {
+        self.declared_key = Some(schema.key.iter().map(|c| c.index()).collect());
         if self.cell.is_none()
             && let Some(layout) = crate::row_support::Layout::of(schema, types)
         {
@@ -1078,6 +1087,8 @@ impl Store {
             self.blob_refs.is_some() || self.tiered.as_ref().is_some_and(|t| t.blobs),
         );
         store.counts = self.counts.emptied();
+        store.lazy_estimates = self.lazy_estimates;
+        store.declared_key = self.declared_key.clone();
         store.inspection = self.inspection.as_ref().map(|m| InspectionCounters {
             probes: std::sync::atomic::AtomicU64::new(m.probes.load(std::sync::atomic::Ordering::Relaxed)),
             membership: m.membership,
@@ -1701,6 +1712,9 @@ impl Store {
                 .fetch_add(self.present_len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
         self.indexes.borrow_mut().insert(cols.to_vec(), index);
+        if self.lazy_estimates {
+            self.index_epoch.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// About how many rows a probe on `cols` finds, with a range on one more column (a small fraction of the probe's
@@ -1719,7 +1733,7 @@ impl Store {
         let bits = u64::from((usize::BITS - self.present_len().leading_zeros()).max(small.trailing_zeros()));
         match &self.tiered {
             Some(t) => bits | (t.epoch.load(Ordering::Relaxed) << 8),
-            None => bits,
+            None => bits | (self.index_epoch.load(Ordering::Relaxed) << 8),
         }
     }
 
@@ -1735,8 +1749,55 @@ impl Store {
         if let Some(keys) = self.counts.key_count(cols) {
             return n.div_ceil(keys.max(1));
         }
-        self.ensure_index(cols);
-        let keys = self.indexes.borrow().get(cols).map_or(1, BTreeMap::len).max(1);
+        if !self.lazy_estimates {
+            self.ensure_index(cols);
+            let keys = self.indexes.borrow().get(cols).map_or(1, BTreeMap::len).max(1);
+            return n.div_ceil(keys);
+        }
+        // Costing must not materialize a rejected candidate's index.
+        if n == 0 {
+            return 0;
+        }
+        if let Some(index) = self.indexes.borrow().get(cols) {
+            return n.div_ceil(index.len().max(1));
+        }
+        if self
+            .declared_key
+            .as_ref()
+            .is_some_and(|key| key.iter().all(|k| cols.contains(k)))
+        {
+            return 1;
+        }
+        let class = usize::BITS - n.leading_zeros();
+        if let Some((at, keys)) = self.estimate_samples.borrow().get(cols).copied()
+            && at == class
+        {
+            return n.div_ceil(keys.max(1));
+        }
+        // A bounded deterministic sample; singleton frequency heuristically adjusts for unseen keys.
+        // Actual probes still build an exact index, whose statistics supersede the estimate.
+        let Ok(rows) = self.present() else {
+            return n;
+        };
+        let mut counts: BTreeMap<Vec<&Value>, usize> = BTreeMap::new();
+        let mut sampled = 0usize;
+        for row in rows.take(64) {
+            *counts
+                .entry(cols.iter().filter_map(|c| row.get(*c)).collect())
+                .or_default() += 1;
+            sampled += 1;
+        }
+        if sampled == 0 {
+            return n;
+        }
+        let singles = counts.values().filter(|n| **n == 1).count();
+        let keys = if singles == sampled {
+            n
+        } else {
+            counts.len().saturating_mul(sampled).div_ceil(sampled - singles).min(n)
+        }
+        .max(1);
+        self.estimate_samples.borrow_mut().insert(cols.to_vec(), (class, keys));
         n.div_ceil(keys)
     }
 
@@ -2297,5 +2358,33 @@ mod inspection_tests {
         assert_eq!(store.emptied().inspection_operations(), Some(m));
         store.measure_plan(false);
         assert!(store.inspection_operations().is_none());
+    }
+}
+
+#[cfg(test)]
+mod lazy_estimate_tests {
+    use super::*;
+    #[test]
+    fn estimating_rejected_candidates_never_builds_indexes() {
+        let mut store = Store::new(None, false);
+        store.lazy_estimates(true);
+        store.measure_plan(true);
+        for n in 0..100u64 {
+            store
+                .add(std::sync::Arc::from([Value::u64(n), Value::u64(n % 2)]), 1)
+                .unwrap();
+        }
+        let size = store.size_class(32);
+        assert_eq!(store.estimate(&[0]), 1);
+        assert_eq!(store.estimate(&[1]), 50);
+        assert_eq!(store.estimate(&[0, 1]), 1);
+        assert!(store.inspection_indexes().is_empty());
+        assert_eq!(store.inspection_operations().unwrap().secondary_index_build_rows, 0);
+        let rows = store.new_rows(&[1], &[Value::u64(1)]).unwrap();
+        assert_eq!(rows.len(), 50);
+        assert_eq!(store.inspection_indexes(), vec![vec![1]]);
+        assert!(store.size_class(32) > size);
+        assert_eq!(store.estimate(&[1]), 50);
+        assert_eq!(store.inspection_operations().unwrap().secondary_index_build_rows, 100);
     }
 }

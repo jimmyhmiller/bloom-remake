@@ -24,6 +24,25 @@ use blossom_value::blob::BlobMap;
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::{BlobRef, ExternRegistry, Seed};
 
+/// Explicit physical execution choices for checked comparisons.
+#[derive(Clone, Copy, Debug)]
+pub struct ReplayOptions {
+    pub workers: usize,
+    pub map_cache_rows: usize,
+    pub map_cache_joins: bool,
+    pub lazy_indexes: bool,
+}
+impl Default for ReplayOptions {
+    fn default() -> Self {
+        Self {
+            workers: 1,
+            map_cache_rows: 0,
+            map_cache_joins: false,
+            lazy_indexes: false,
+        }
+    }
+}
+
 /// Why a replay stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
@@ -103,7 +122,25 @@ impl<R: Read> Replay<R> {
         externs: Arc<ExternRegistry>,
         workers: usize,
     ) -> Result<Replay<R>, ReplayError> {
-        if workers == 0 {
+        Self::open_with_options(
+            artifact,
+            inp,
+            externs,
+            ReplayOptions {
+                workers,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Checked replay with explicit experimental map retention and worker budgets.
+    pub fn open_with_options(
+        artifact: &BlsArtifact,
+        inp: R,
+        externs: Arc<ExternRegistry>,
+        options: ReplayOptions,
+    ) -> Result<Replay<R>, ReplayError> {
+        if options.workers == 0 {
             return Err(ReplayError::Order("workers must be positive".into()));
         }
         let reader = TraceReader::open(inp)?;
@@ -136,7 +173,11 @@ impl<R: Read> Replay<R> {
             externs,
             std::sync::Arc::new(members),
         )?;
-        let executors = executors.with_workers(workers);
+        let executors = executors
+            .with_workers(options.workers)
+            .with_map_cache_rows(options.map_cache_rows)
+            .with_map_cache_joins(options.map_cache_joins)
+            .with_lazy_indexes(options.lazy_indexes);
         Ok(Replay {
             engine: executors.make(h.node)?,
             oracle: executors.oracle().clone(),

@@ -160,6 +160,9 @@ struct RawStorage {
     tiered: Option<bool>,
     hot_rows: Option<usize>,
     eval_workers: Option<usize>,
+    map_cache_rows: Option<usize>,
+    map_cache_joins: Option<bool>,
+    lazy_indexes: Option<bool>,
     cache_bytes: Option<usize>,
     tail_certification: Option<String>,
 }
@@ -221,6 +224,12 @@ pub struct DeploymentSpec {
     pub hot_rows: Option<usize>,
     /// Bounded read-only engine valuation workers; state writes and commit remain coordinated.
     pub eval_workers: usize,
+    /// Experimental retained pure-map input/output row budget; zero disables.
+    pub map_cache_rows: usize,
+    /// Track retained output bags through other pure join dependency changes.
+    pub map_cache_joins: bool,
+    /// Cost join candidates without speculatively constructing indexes.
+    pub lazy_indexes: bool,
     /// Database decoded-block retention budget (`None`: LSM default; zero disables retention).
     pub cache_bytes: Option<usize>,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
@@ -408,6 +417,9 @@ impl DeploymentSpec {
             tiered: raw.storage.tiered.unwrap_or(true),
             hot_rows: raw.storage.hot_rows,
             eval_workers: raw.storage.eval_workers.unwrap_or(1),
+            map_cache_rows: raw.storage.map_cache_rows.unwrap_or(0),
+            map_cache_joins: raw.storage.map_cache_joins.unwrap_or(false),
+            lazy_indexes: raw.storage.lazy_indexes.unwrap_or(false),
             cache_bytes: raw.storage.cache_bytes,
             tail_certification,
             stream_limits,

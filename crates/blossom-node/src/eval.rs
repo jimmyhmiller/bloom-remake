@@ -482,6 +482,24 @@ impl Executors {
         self
     }
 
+    /// Set the global retained-input/output row budget for pure differential maps.
+    pub fn with_map_cache_rows(mut self, rows: usize) -> Executors {
+        self.engine.map_cache_rows = rows;
+        self
+    }
+
+    /// Extend retained maps to track pure join outputs.
+    pub fn with_map_cache_joins(mut self, enabled: bool) -> Executors {
+        self.engine.map_cache_joins = enabled;
+        self
+    }
+
+    /// Keep cardinality estimation separate from physical index construction.
+    pub fn with_lazy_indexes(mut self, enabled: bool) -> Executors {
+        self.engine.lazy_indexes = enabled;
+        self
+    }
+
     /// Whether the engines tier the durable tables they can (`EngineConfig::in_memory` when not).
     pub fn tiered(mut self, tiered: bool) -> Executors {
         self.engine.in_memory = !tiered;

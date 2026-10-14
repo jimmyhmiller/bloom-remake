@@ -538,6 +538,13 @@ fn storage_tiered_is_on_unless_a_deployment_opts_out() {
     assert_eq!(DeploymentSpec::parse(&cache, &dir).unwrap().hot_rows, Some(262144));
     assert!(DeploymentSpec::parse(&format!("{text}hot_rows = 0\n"), &dir).is_err());
     assert_eq!(DeploymentSpec::parse(&text, &dir).unwrap().eval_workers, 1);
+    assert_eq!(DeploymentSpec::parse(&text, &dir).unwrap().map_cache_rows, 0);
+    assert_eq!(
+        DeploymentSpec::parse(&format!("{text}map_cache_rows = 4096\n"), &dir)
+            .unwrap()
+            .map_cache_rows,
+        4096
+    );
     assert_eq!(
         DeploymentSpec::parse(&format!("{text}eval_workers = 2\n"), &dir)
             .unwrap()
