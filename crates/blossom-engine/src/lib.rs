@@ -9,6 +9,7 @@
 //! compares the two at every tick. The word-level kernel, the planner's physical plans and generated code are later
 //! work.
 
+mod change_batch;
 mod cold;
 mod engine;
 mod expr;

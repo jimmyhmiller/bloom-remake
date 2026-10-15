@@ -14,6 +14,7 @@
 //!
 //! A tick that fails leaves the engine unusable until `reset`: in the node's semantics a failed tick is a crash.
 
+use crate::change_batch::ChangeBatch;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -2234,7 +2235,7 @@ impl Engine {
             let was = frame_holds(rel, del, keep, row, true)?;
             let is = frame_holds(rel, del, keep, row, false)?;
             if was != is {
-                out.heads.insert(row.clone(), if is { 1 } else { -1 });
+                out.heads.push(row.clone(), if is { 1 } else { -1 });
             }
         }
         Ok(out)
@@ -2265,7 +2266,7 @@ impl Engine {
                 match &driver {
                     Driver::Atom { row, sign, .. } => {
                         if let Some(h) = copy.row(&cx, row).map_err(|e| to_eval(e, input.tick, Some(rule)))? {
-                            *out.heads.entry(h).or_insert(0) += sign;
+                            out.heads.push(h, *sign);
                         }
                     }
                     _ => rest.push((driver, pos)),
@@ -2359,7 +2360,7 @@ impl Engine {
                     && let Some(outputs) = self.map_cache.borrow_mut().retract(rule.id, row)
                 {
                     for (head, count) in outputs {
-                        *out.heads.entry(head).or_insert(0) -= count;
+                        out.heads.push(head, -count);
                     }
                     continue;
                 }
@@ -2370,7 +2371,7 @@ impl Engine {
                     primary,
                     update: &mut update,
                 });
-                let terms = run_terms(
+                let mut terms = run_terms(
                     &self.ctx(p, input),
                     &self.stores,
                     rule,
@@ -2384,11 +2385,9 @@ impl Engine {
                     && primary_driver
                     && terms.errors.is_empty()
                 {
-                    self.map_cache.borrow_mut().insert(
-                        rule.id,
-                        row.clone(),
-                        terms.heads.iter().map(|(r, n)| (r.clone(), *n)).collect(),
-                    );
+                    let heads = std::mem::take(&mut terms.heads).into_sorted();
+                    self.map_cache.borrow_mut().insert(rule.id, row.clone(), heads.clone());
+                    terms.heads = ChangeBatch::from_sorted(heads);
                 }
                 out.merge(terms);
             }
@@ -2485,7 +2484,7 @@ impl Engine {
         if self.stores.get(&plan.head).is_some_and(Store::is_batch) {
             return self
                 .store(plan.head)?
-                .apply_batch(terms.heads)
+                .apply_batch(terms.heads.into_iter().collect())
                 .map_err(|e| to_eval(e, tick, Some(rule)));
         }
         let volatile = self.volatile_rules.contains(&rule.id);
@@ -2508,7 +2507,7 @@ impl Engine {
         p: &Program,
         rule: &Rule,
         plan: &Plan,
-        changes: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
+        changes: ChangeBatch<(Vec<Value>, usize, Vec<Value>)>,
         tick: Tick,
     ) -> Result<(), EvalError> {
         let naggs = rule.head.args.iter().filter(|a| matches!(a, HeadArg::Agg(_))).count();
@@ -2577,7 +2576,7 @@ impl Engine {
         rule: &Rule,
         plan: &Plan,
         shape: &AggShape,
-        changes: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
+        changes: ChangeBatch<(Vec<Value>, usize, Vec<Value>)>,
         tick: Tick,
     ) -> Result<(), EvalError> {
         let wrap = |e: ExprError| to_eval(e, tick, Some(rule));
@@ -3454,8 +3453,8 @@ struct Terms {
     /// The rows its atom probes returned, and the expression nodes it evaluated (the work it did).
     examined: u64,
     steps: u64,
-    heads: BTreeMap<Row, i64>,
-    aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
+    heads: ChangeBatch<Row>,
+    aggs: ChangeBatch<(Vec<Value>, usize, Vec<Value>)>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,
     /// When a comparison of `now()` it evaluated would come out the other way (`Ctx::flips_at`), and whether it
     /// read the time otherwise (`Ctx::reads_time`).
@@ -3476,12 +3475,8 @@ impl Terms {
         self.steps += other.steps;
         self.reads_time |= other.reads_time;
         self.flips_at = self.flips_at.into_iter().chain(other.flips_at).min();
-        for (r, n) in other.heads {
-            *self.heads.entry(r).or_insert(0) += n;
-        }
-        for (r, n) in other.aggs {
-            *self.aggs.entry(r).or_insert(0) += n;
-        }
+        self.heads.extend(other.heads);
+        self.aggs.extend(other.aggs);
         for (t, (n, e)) in other.errors {
             let entry = self.errors.entry(t).or_insert((0, None));
             entry.0 += n;
@@ -3578,7 +3573,7 @@ fn run_terms(
                     }
                 }
                 for (col, tuple) in aggs.into_iter().enumerate() {
-                    *out.aggs.entry((group.clone(), col, tuple)).or_insert(0) += f.sign;
+                    out.aggs.push((group.clone(), col, tuple), f.sign);
                 }
             } else {
                 let row = rule::head_row(cx, rule, f.env)?;
@@ -3590,7 +3585,7 @@ fn run_terms(
                         .ok_or_else(|| expr::bug("a map valuation lacks its primary input".into()))?;
                     update(input, &row, f.sign);
                 }
-                *out.heads.entry(row).or_insert(0) += f.sign;
+                out.heads.push(row, f.sign);
             }
             Ok(())
         };
