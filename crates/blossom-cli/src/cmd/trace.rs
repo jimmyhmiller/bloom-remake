@@ -808,6 +808,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             let names = Names { artifact: &artifact };
             replay.profile(true).map_err(err)?;
             let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
+            let mut compiled_start = BTreeMap::new();
             let mut fns: BTreeMap<FnId, FnWork> = BTreeMap::new();
             let mut ticks = 0u64;
             while let Some(r) = replay.next(false).map_err(err)? {
@@ -1104,11 +1105,17 @@ fn measured_plan_options(
     let (_, mut replay) = open_workers(&common, options)?;
     replay.profile(true).map_err(err)?;
     let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
+    let mut compiled_start = BTreeMap::new();
     let mut ticks = 0u64;
     let mut elapsed = 0u128;
     while let Some(tick) = replay.peek_tick().map_err(err)? {
         if last.is_some_and(|last| tick.0 > last) {
             break;
+        }
+        if ticks == 0 && first.is_none_or(|first| tick.0 >= first) {
+            if let Some(plan) = replay.plan_report() {
+                compiled_start = plan.rules.into_iter().map(|r| (r.id, r.work.compiled_terms)).collect();
+            }
         }
         if measured && ticks == 0 && first.is_none_or(|first| tick.0 >= first) && !replay.measure_plan(true) {
             return Err("executor cannot measure plans".into());
@@ -1142,6 +1149,10 @@ fn measured_plan_options(
         let id = RuleId::from_raw(rule.id);
         let w = work.get(&id).copied().unwrap_or_default();
         rule.work = blossom_engine::WorkReport {
+            compiled_terms: rule
+                .work
+                .compiled_terms
+                .saturating_sub(compiled_start.get(&rule.id).copied().unwrap_or(0)),
             probe_rows: w.rows,
             expression_steps: w.steps,
             support_writes: w.writes,
