@@ -14,8 +14,6 @@
 //!
 //! A tick that fails leaves the engine unusable until `reset`: in the node's semantics a failed tick is a crash.
 
-mod schedule;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -103,7 +101,6 @@ pub struct Engine {
     lazy_indexes: bool,
     map_cache: std::cell::RefCell<crate::map_cache::MapCache>,
     strata: Arc<[Stratum]>,
-    stages: Arc<[schedule::Stage]>,
     inductive: Arc<[RuleId]>,
     asynchronous: Arc<[RuleId]>,
     stores: Stores,
@@ -809,7 +806,6 @@ impl Engine {
                 crate::map_cache::MapCache::new(cfg.map_cache_rows).with_layouts(map_layouts),
             ),
             strata: strata_list.into(),
-            stages: Arc::from([]),
             inductive: inductive.into(),
             asynchronous: asynchronous.into(),
             stores,
@@ -867,9 +863,6 @@ impl Engine {
             engine.fuse_persistent_identities(&protected)?;
         }
         engine.build_indexes()?;
-        if engine.workers.is_some() {
-            engine.stages = engine.make_stages().into();
-        }
         Ok(engine)
     }
 
@@ -1663,32 +1656,28 @@ impl Engine {
         self.settle(tick)?;
         let program = self.program.clone();
         let p = program.get();
-        if self.workers.is_some() && self.plan_times.is_none() {
-            self.run_stages(p, input)?;
-        } else {
-            // 2. The strata.
-            let strata_list = self.strata.clone();
-            for s in strata_list.iter() {
-                if s.recursive {
-                    self.recursive_stratum(p, input, s)?;
-                } else {
-                    for id in &s.aggregates {
-                        self.maintain(p, input, *id)?;
-                    }
-                    self.settle(tick)?;
-                    for id in &s.rules {
-                        self.maintain(p, input, *id)?;
-                    }
+        // 2. The strata.
+        let strata_list = self.strata.clone();
+        for s in strata_list.iter() {
+            if s.recursive {
+                self.recursive_stratum(p, input, s)?;
+            } else {
+                for id in &s.aggregates {
+                    self.maintain(p, input, *id)?;
                 }
                 self.settle(tick)?;
-            }
-            // 3. The next tick's state and the tick's sends.
-            let (inductive, asynchronous) = (self.inductive.clone(), self.asynchronous.clone());
-            for id in inductive.iter().chain(asynchronous.iter()) {
-                self.maintain(p, input, *id)?;
+                for id in &s.rules {
+                    self.maintain(p, input, *id)?;
+                }
             }
             self.settle(tick)?;
         }
+        // 3. The next tick's state and the tick's sends.
+        let (inductive, asynchronous) = (self.inductive.clone(), self.asynchronous.clone());
+        for id in inductive.iter().chain(asynchronous.iter()) {
+            self.maintain(p, input, *id)?;
+        }
+        self.settle(tick)?;
         // 4. Keys and invariants.
         self.check_keys(p, tick)?;
         self.check_invariants(p, tick)?;
@@ -2047,8 +2036,49 @@ impl Engine {
 
     fn maintain_inner(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
-        if !self.rule_active(p, input, id)? {
+        if self.stores.is_alias(StoreKey::Main(rule.head.rel)) {
             return Ok(());
+        }
+        if self
+            .upsert_next
+            .get(&rule.head.rel)
+            .is_some_and(|(copy, _)| *copy == id)
+        {
+            return Ok(());
+        }
+        {
+            // Most rules see no change in a tick: tell so without taking a handle on the plan.
+            let plan = self
+                .plans
+                .get(&id)
+                .ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
+            // A framed table's frame writes nothing: its part of the next state is read where it is wanted.
+            if plan.frame.is_some() && self.framed.contains_key(&rule.head.rel) {
+                return Ok(());
+            }
+            if plan.regime == Regime::Scoped {
+                // No row in a scoped atom: no valuation, and the head was emptied at the start of the tick.
+                let live = plan
+                    .scoped
+                    .iter()
+                    .any(|k| self.stores.get(k).is_some_and(|s| s.present_len() > 0));
+                if !live {
+                    return Ok(());
+                }
+            }
+            let unchanged = !plan.dep_keys.iter().any(|k| self.stores.changed(k));
+            let rebuild = self.rebuilding && !self.view_rules.contains(&id);
+            if plan.regime == Regime::Delta && unchanged && !rebuild {
+                return Ok(());
+            }
+            if plan.regime == Regime::Recompute
+                && unchanged
+                && let Some(Some(flips)) = self.recomputed.get(id.index())
+                && plan.skip == rule::Skip::WhenUnchanged
+                && flips.is_none_or(|t| input.now < t)
+            {
+                return Ok(());
+            }
         }
         let plan = self
             .plans
@@ -2073,55 +2103,6 @@ impl Engine {
         }
     }
 
-    fn rule_active(&self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<bool, EvalError> {
-        let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
-        if self.stores.is_alias(StoreKey::Main(rule.head.rel)) {
-            return Ok(false);
-        }
-        if self
-            .upsert_next
-            .get(&rule.head.rel)
-            .is_some_and(|(copy, _)| *copy == id)
-        {
-            return Ok(false);
-        }
-        {
-            // Most rules see no change in a tick: tell so without taking a handle on the plan.
-            let plan = self
-                .plans
-                .get(&id)
-                .ok_or_else(|| internal_error!("rule {id:?} has no plan"))?;
-            // A framed table's frame writes nothing: its part of the next state is read where it is wanted.
-            if plan.frame.is_some() && self.framed.contains_key(&rule.head.rel) {
-                return Ok(false);
-            }
-            if plan.regime == Regime::Scoped {
-                // No row in a scoped atom: no valuation, and the head was emptied at the start of the tick.
-                let live = plan
-                    .scoped
-                    .iter()
-                    .any(|k| self.stores.get(k).is_some_and(|s| s.present_len() > 0));
-                if !live {
-                    return Ok(false);
-                }
-            }
-            let unchanged = !plan.dep_keys.iter().any(|k| self.stores.changed(k));
-            let rebuild = self.rebuilding && !self.view_rules.contains(&id);
-            if plan.regime == Regime::Delta && unchanged && !rebuild {
-                return Ok(false);
-            }
-            if plan.regime == Regime::Recompute
-                && unchanged
-                && let Some(Some(flips)) = self.recomputed.get(id.index())
-                && plan.skip == rule::Skip::WhenUnchanged
-                && flips.is_none_or(|t| input.now < t)
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// Evaluates a rule: every term of its delta query (`full` false), or a full evaluation.
     fn evaluate(
         &self,
@@ -2134,18 +2115,6 @@ impl Engine {
         if let (Some(frame), false) = (&plan.frame, full) {
             return self.frame_change(frame);
         }
-        let drivers = self.evaluation_drivers(p, input, rule, plan, full)?;
-        self.run_drivers(p, input, rule, plan, drivers)
-    }
-
-    fn evaluation_drivers(
-        &self,
-        p: &Program,
-        input: &StepInput<'_>,
-        rule: &Rule,
-        plan: &Plan,
-        full: bool,
-    ) -> Result<Vec<(Driver, usize)>, EvalError> {
         let cx = self.ctx(p, input);
         let mut drivers: Vec<(Driver, usize)> = Vec::new();
         if full {
@@ -2242,7 +2211,7 @@ impl Engine {
                 }
             }
         }
-        Ok(drivers)
+        self.run_drivers(p, input, rule, plan, drivers)
     }
 
     /// A table frame's change (`FramePlan`): for each row that changed in the table, its deletions or its guard this
@@ -2333,7 +2302,46 @@ impl Engine {
                     .collect();
             }
         }
-        let orders = self.driver_orders(rule, plan, &drivers);
+        // The join order of each driver's terms, from the stores as they are now.
+        let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
+            let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else {
+                return usize::MAX;
+            };
+            self.stores
+                .get(&rule::atom_store(a))
+                .map_or(0, |s| s.estimate_probe(cols, range))
+        };
+        // The orders are kept while every store stays within its power of two; stores below `SMALL_STORE` rows count
+        // as one size (they flip between a few rows from tick to tick, and any order joins them cheaply).
+        let sizes: Vec<u64> = plan
+            .atoms
+            .iter()
+            .map(|lit| match rule.body.lits.get(*lit) {
+                Some(Literal::Pos(a)) => self
+                    .stores
+                    .get(&rule::atom_store(a))
+                    .map_or(0, |s| s.size_class(SMALL_STORE)),
+                _ => 0,
+            })
+            .collect();
+        // A rule has few drivers' literals: a short list, searched.
+        let mut orders: Vec<(Option<usize>, Arc<rule::Order>)> = Vec::new();
+        for (driver, _) in &drivers {
+            let lit = driver.lit();
+            if orders.iter().any(|(l, _)| *l == lit) {
+                continue;
+            }
+            let mut cache = self.orders.borrow_mut();
+            let order = match cache.get(&(rule.id, lit)) {
+                Some((at, order)) if *at == sizes => order.clone(),
+                _ => {
+                    let order = Arc::new(plan.order_for(rule, lit, &cost));
+                    cache.insert((rule.id, lit), (sizes.clone(), order.clone()));
+                    order
+                }
+            };
+            orders.push((lit, order));
+        }
         if self.map_rules.contains(&rule.id) && drivers.iter().all(|(d, _)| !matches!(d, Driver::Full)) {
             let primary = plan
                 .atoms
@@ -2442,55 +2450,6 @@ impl Engine {
         )?);
         out.examined += pivot_rows;
         Ok(out)
-    }
-
-    fn driver_orders(
-        &self,
-        rule: &Rule,
-        plan: &Plan,
-        drivers: &[(Driver, usize)],
-    ) -> Vec<(Option<usize>, Arc<rule::Order>)> {
-        // The join order of each driver's terms, from the stores as they are now.
-        let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
-            let Some(Literal::Pos(a)) = rule.body.lits.get(lit) else {
-                return usize::MAX;
-            };
-            self.stores
-                .get(&rule::atom_store(a))
-                .map_or(0, |s| s.estimate_probe(cols, range))
-        };
-        // The orders are kept while every store stays within its power of two; stores below `SMALL_STORE` rows count
-        // as one size (they flip between a few rows from tick to tick, and any order joins them cheaply).
-        let sizes: Vec<u64> = plan
-            .atoms
-            .iter()
-            .map(|lit| match rule.body.lits.get(*lit) {
-                Some(Literal::Pos(a)) => self
-                    .stores
-                    .get(&rule::atom_store(a))
-                    .map_or(0, |s| s.size_class(SMALL_STORE)),
-                _ => 0,
-            })
-            .collect();
-        // A rule has few drivers' literals: a short list, searched.
-        let mut orders: Vec<(Option<usize>, Arc<rule::Order>)> = Vec::new();
-        for (driver, _) in drivers {
-            let lit = driver.lit();
-            if orders.iter().any(|(l, _)| *l == lit) {
-                continue;
-            }
-            let mut cache = self.orders.borrow_mut();
-            let order = match cache.get(&(rule.id, lit)) {
-                Some((at, order)) if *at == sizes => order.clone(),
-                _ => {
-                    let order = Arc::new(plan.order_for(rule, lit, &cost));
-                    cache.insert((rule.id, lit), (sizes.clone(), order.clone()));
-                    order
-                }
-            };
-            orders.push((lit, order));
-        }
-        orders
     }
 
     /// Applies a rule's evaluated change: raises the errors real valuations hit, then updates its head.
