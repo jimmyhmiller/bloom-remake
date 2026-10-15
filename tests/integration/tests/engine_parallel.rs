@@ -198,3 +198,100 @@ fn worker_errors_match_serial_and_reset_restores_evaluation() {
     }
     assert!(messages.windows(2).all(|w| w[0] == w[1]));
 }
+
+#[test]
+fn independent_small_rules_share_workers_and_publish_in_serial_error_order() {
+    let artifact = compile_file(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/engine/stage_schedule.bls")
+            .to_str()
+            .unwrap(),
+        &[NodeSpec {
+            name: "n1".into(),
+            role: None,
+        }],
+    )
+    .0
+    .unwrap()
+    .0;
+    let mut serial = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), Default::default()).unwrap();
+    let mut parallel = blossom_engine::Engine::new(
+        artifact.program.clone(),
+        NodeId(0),
+        blossom_engine::EngineConfig {
+            workers: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let observe: Vec<_> = artifact
+        .program
+        .get()
+        .rels
+        .iter_enumerated()
+        .map(|(id, _)| id)
+        .collect();
+    serial.set_profile_functions(true);
+    parallel.set_profile_functions(true);
+    let oracle = blossom_oracle::Oracle::new(artifact.program.clone()).unwrap();
+    for tick in 0..5 {
+        // Each rule sees fewer rows than the within-rule worker threshold. Only cross-rule scheduling
+        // can activate the pool here; the dependent join still runs after all three sources publish.
+        let events: Vec<_> = (0..40)
+            .map(|k| {
+                (
+                    artifact
+                        .rel_named(if tick == 3 { "divisors" } else { "values" })
+                        .unwrap(),
+                    Arc::from(vec![u(k), u(if tick == 3 { 0 } else { tick + k })]),
+                )
+            })
+            .collect();
+        let input = StepInput {
+            node: NodeId(0),
+            incarnation: 1,
+            tick: Tick(tick),
+            now: Instant(tick as i64),
+            events: &events,
+            delivered: &[],
+            ingress: &[],
+            blobs: &blossom_value::NoBlobs,
+        };
+        let a = serial.step(&input, &observe);
+        let b = parallel.step(&input, &observe);
+        if tick == 3 {
+            assert_eq!(a.unwrap_err().to_string(), b.unwrap_err().to_string());
+            serial.reset(Default::default()).unwrap();
+            parallel.reset(Default::default()).unwrap();
+        } else {
+            let (a, b) = (a.unwrap(), b.unwrap());
+            assert_eq!(a.observed, b.observed);
+            assert_eq!(a.changes, b.changes);
+            assert_eq!(serial.work_by_function(), parallel.work_by_function());
+            let o = oracle
+                .tick(&blossom_ir::tick::TickInput {
+                    node: input.node,
+                    incarnation: input.incarnation,
+                    tick: input.tick,
+                    now: input.now,
+                    carried: &Default::default(),
+                    events: &events,
+                    delivered: &[],
+                    ingress: &[],
+                    capture: false,
+                    blobs: &blossom_value::NoBlobs,
+                })
+                .unwrap();
+            for rel in &observe {
+                assert_eq!(
+                    b.observed.get(rel).unwrap(),
+                    &o.instance.rows(*rel).cloned().collect::<Vec<_>>()
+                );
+            }
+        }
+        if tick == 2 {
+            assert!(parallel.parallel_terms() >= 3, "independent stages did not use workers");
+        }
+    }
+    assert_eq!(serial.parallel_terms(), 0);
+}
