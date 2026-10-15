@@ -286,19 +286,6 @@ impl Hot {
         Some(*support)
     }
 
-    /// A complete key-probe answer also proves full-row membership. An incomplete witness cannot
-    /// prove absence, and membership does not give the multiplicity of a counted durable view.
-    fn table_support(&mut self, row: &Row, cols: &[usize]) -> Option<u64> {
-        let now = self.tick();
-        let by_values = self.probes.get_mut(cols)?;
-        let (rows, used, complete) = by_values.get_mut(&key(row, cols))?;
-        if !*complete {
-            return None;
-        }
-        *used = now;
-        Some(u64::from(rows.binary_search(row).is_ok()))
-    }
-
     fn keep_support(&mut self, row: &Row, support: u64) {
         let now = self.tick();
         if self.contains.insert(row.clone(), (support, now)).is_none() {
@@ -574,16 +561,8 @@ impl Tiered {
     /// `row`'s support on the cold side at its newest version (a table's: whether it is carried before any tick's
     /// change).
     fn cold_support(&self, row: &Row) -> Result<u64, EvalError> {
-        {
-            let mut hot = self.hot.borrow_mut();
-            if let Some(support) = hot.support(row) {
-                return Ok(support);
-            }
-            if !self.counted
-                && let Some(support) = hot.table_support(row, &self.key)
-            {
-                return Ok(support);
-            }
+        if let Some(support) = self.hot.borrow_mut().support(row) {
+            return Ok(support);
         }
         let support = match self.cold.version()? {
             Some(v) => self.cold.support(self.rel, row, v)?,
@@ -2485,93 +2464,6 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &again));
         assert_eq!(cold.ranged.load(Ordering::Relaxed), 1);
         assert_eq!(cold.bounded.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn complete_probe_answers_prove_table_membership_but_not_counted_support() {
-        use blossom_base::RelId;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        struct Cold {
-            row: Row,
-            reads: AtomicUsize,
-            count: u64,
-        }
-        impl ColdTables for Cold {
-            fn version(&self) -> Result<Option<u64>, EvalError> {
-                Ok(Some(0))
-            }
-            fn tables(&self) -> Vec<RelId> {
-                vec![RelId::from_raw(0)]
-            }
-            fn contains(&self, _: RelId, row: &Row, _: u64) -> Result<bool, EvalError> {
-                Ok(*row == self.row)
-            }
-            fn support(&self, _: RelId, row: &Row, _: u64) -> Result<u64, EvalError> {
-                self.reads.fetch_add(1, Ordering::Relaxed);
-                Ok(if *row == self.row { self.count } else { 0 })
-            }
-            fn open_views(&self, _: &[(RelId, [u8; 32])], _: bool) -> Result<bool, EvalError> {
-                Ok(true)
-            }
-            fn count(&self, _: RelId, _: u64) -> Result<usize, EvalError> {
-                Ok(1)
-            }
-            fn probe(
-                &self,
-                _: RelId,
-                cols: &[usize],
-                values: &[Value],
-                _: Option<ColRange<'_>>,
-                _: u64,
-            ) -> Result<Vec<Row>, EvalError> {
-                Ok(if holds(&self.row, cols, values) {
-                    vec![self.row.clone()]
-                } else {
-                    vec![]
-                })
-            }
-        }
-        let row: Row = Arc::from([Value::u64(1), Value::u64(10)]);
-        let replacement: Row = Arc::from([Value::u64(1), Value::u64(20)]);
-        for counted in [false, true] {
-            let cold = Arc::new(Cold {
-                row: row.clone(),
-                reads: AtomicUsize::new(0),
-                count: if counted { 7 } else { 1 },
-            });
-            let tier = Tiered::new(
-                RelId::from_raw(0),
-                cold.clone(),
-                vec![0],
-                false,
-                HOT_ROWS,
-                counted,
-                false,
-            )
-            .unwrap();
-            tier.read_cold(&[0], &[Value::u64(1)], None, &|_| true).unwrap();
-            assert_eq!(tier.cold_support(&row).unwrap(), cold.count);
-            assert_eq!(tier.cold_support(&replacement).unwrap(), 0);
-            assert_eq!(cold.reads.load(Ordering::Relaxed), if counted { 2 } else { 0 });
-            if !counted {
-                // Updating a complete cached answer changes the inferred answer without leaving a stale
-                // negative full-row cache entry. Incomplete witnesses never supply this inference.
-                let mut hot = tier.hot.borrow_mut();
-                hot.caught_up(&row, 0);
-                hot.caught_up(&replacement, 1);
-                drop(hot);
-                assert_eq!(tier.cold_support(&row).unwrap(), 0);
-                assert_eq!(tier.cold_support(&replacement).unwrap(), 1);
-                let mut hot = tier.hot.borrow_mut();
-                hot.keep_answer(&[0], &[Value::u64(1)], Arc::new(vec![row.clone()]), false);
-                assert_eq!(hot.table_support(&replacement, &[0]), None);
-                hot.keep_probe(&[0], &[Value::u64(2)], Arc::new(vec![]));
-                assert_eq!(
-                    hot.table_support(&Arc::from([Value::u64(2), Value::u64(30)]), &[0]),
-                    Some(0)
-                );
-            }
-        }
     }
 
     #[test]
