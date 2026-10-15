@@ -764,3 +764,10 @@ the last tuned diagnostic remains 13,168 records/s. Next work must integrate the
 ## Physical-plan execution experiments, October 14, 2026
 
 [Retained-plan experiments](RETAINED-PLAN-EXPERIMENTS.md) add bounded retained outputs for pure maps/joins and prevent costing rejected join alternatives from creating permanent indexes. Combined checked replay elapsed improves 16.8% over seven rotated trials; matched serial broker pairs improve 19.1% and 7.5%. Two-worker comparisons are +4.8% / -1.5%, so no further worker gain is established. All twelve live runs verified 13,878,030 records with zero errors; all processes are terminal. Strategies remain opt-in. The Kafka target is unmet, and intermediate head storage/cold decoding/coordinator updates remain.
+
+
+## Shared pipeline storage experiment, October 14, 2026 — not promoted
+
+[Pipeline fusion experiments](PIPELINE-FUSION-EXPERIMENTS.md) implement derived physical keys, direct result-bag stage storage and safe persistent identity aliases. The initial alias extension mishandled automatically durable views; a forward-alias regression fails in 0.04 seconds on the old extension and passes after ownership protection in a4318129. Initial candidate measurements are rejected.
+
+Corrected replay is tied (0.19% less elapsed); 52 stores are eliminated but window-end resident rows fall only 0.7%. Corrected matched broker pairs regress 4.1% and 1.4% (14378/14388 versus 14985/14585 records/s). Fresh Kafka reaches 24417/21789 records/s. The four corrected Blossom runs plus Kafka verify 7766857 records with zero errors. All ten trials, including rejected prototypes, verify 12529257. All jobs are terminal; only verified scratch databases were removed. Features remain experimental and disabled; full cross-rule computed-stage fusion and the Kafka performance target are still open.
