@@ -2323,7 +2323,7 @@ impl Engine {
                 _ => None,
             }) && let Some(Literal::Pos(a)) = rule.body.lits.get(lit)
                 && let Some(store) = self.stores.get(&rule::atom_store(a))
-                && store.present_len() >= PARALLEL_GRAIN * 2
+                && store.present_len() >= self.parallel_grain(rule.id, store.present_len()) * 2
             {
                 let rows = store.new_rows(&[], &[])?;
                 pivot_rows = rows.len() as u64;
@@ -2334,6 +2334,11 @@ impl Engine {
             }
         }
         let orders = self.driver_orders(rule, plan, &drivers);
+        let grain = if parallel {
+            self.parallel_grain(rule.id, drivers.len())
+        } else {
+            PARALLEL_GRAIN
+        };
         if self.map_rules.contains(&rule.id) && drivers.iter().all(|(d, _)| !matches!(d, Driver::Full)) {
             let primary = plan
                 .atoms
@@ -2354,7 +2359,7 @@ impl Engine {
             {
                 if parallel
                     && group.first().is_some_and(primary_insert)
-                    && group.len() >= PARALLEL_GRAIN * 2
+                    && group.len() >= grain * 2
                     && let Some(pool) = &self.workers
                 {
                     use rayon::prelude::*;
@@ -2371,7 +2376,7 @@ impl Engine {
                     };
                     let results: Vec<_> = pool.install(|| {
                         group
-                            .par_chunks(PARALLEL_GRAIN)
+                            .par_chunks(grain)
                             .map(|chunk| {
                                 chunk
                                     .iter()
@@ -2448,7 +2453,7 @@ impl Engine {
             return Ok(out);
         }
         if parallel
-            && drivers.len() >= PARALLEL_GRAIN * 2
+            && drivers.len() >= grain * 2
             && let Some(pool) = &self.workers
         {
             use rayon::prelude::*;
@@ -2467,7 +2472,7 @@ impl Engine {
             // Indexed collection preserves driver-group order even when workers finish in another order.
             let chunks: Vec<_> = pool.install(|| {
                 drivers
-                    .par_chunks(PARALLEL_GRAIN)
+                    .par_chunks(grain)
                     .map(|chunk| read.run(rule, plan, chunk, &orders))
                     .collect()
             });
@@ -3506,6 +3511,23 @@ impl Engine {
     /// [`Engine::rows_examined`], and expression nodes evaluated.
     pub fn work_by_rule(&self) -> &BTreeMap<RuleId, RuleWork> {
         &self.examined_by
+    }
+
+    /// The existing work counters estimate computation per invocation. A small number of expensive
+    /// inputs should share workers too; use deterministic expression work, never a measurement clock.
+    /// Ordinary low-work rules retain the row grain. Estimates affect execution cost only.
+    fn parallel_grain(&self, rule: RuleId, drivers: usize) -> usize {
+        const STEPS_PER_CHUNK: u64 = 4096;
+        let Some(work) = self.examined_by.get(&rule) else {
+            return PARALLEL_GRAIN;
+        };
+        let average_steps = work.steps / work.evals.max(1);
+        if average_steps == 0 {
+            return PARALLEL_GRAIN;
+        }
+        usize::try_from(STEPS_PER_CHUNK.saturating_mul(drivers as u64).div_ceil(average_steps))
+            .unwrap_or(PARALLEL_GRAIN)
+            .clamp(1, PARALLEL_GRAIN)
     }
 
     /// Starts (afresh) or stops counting each function's work.

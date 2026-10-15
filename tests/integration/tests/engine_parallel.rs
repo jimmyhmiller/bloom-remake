@@ -295,3 +295,61 @@ fn independent_small_rules_share_workers_and_publish_in_serial_error_order() {
     }
     assert_eq!(serial.parallel_terms(), 0);
 }
+
+#[test]
+fn expensive_small_retained_batches_use_workers_after_learning_their_work() {
+    let artifact = compile_file(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/engine/parallel_cost.bls")
+            .to_str()
+            .unwrap(),
+        &[NodeSpec {
+            name: "n1".into(),
+            role: None,
+        }],
+    )
+    .0
+    .unwrap()
+    .0;
+    let cfg = blossom_engine::EngineConfig {
+        map_cache_rows: 256,
+        ..Default::default()
+    };
+    let mut serial = blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), cfg.clone()).unwrap();
+    let mut parallel = blossom_engine::Engine::new(
+        artifact.program.clone(),
+        NodeId(0),
+        blossom_engine::EngineConfig { workers: 2, ..cfg },
+    )
+    .unwrap();
+    serial.set_profile_functions(true);
+    parallel.set_profile_functions(true);
+    let observe = [artifact.rel_named("results").unwrap()];
+    for tick in 0..3 {
+        let events: Vec<_> = (0..8)
+            .map(|k| (artifact.rel_named("values").unwrap(), Arc::from([u(k), u(tick + k)])))
+            .collect();
+        let input = StepInput {
+            node: NodeId(0),
+            incarnation: 1,
+            tick: Tick(tick),
+            now: Instant(tick as i64),
+            events: &events,
+            delivered: &[],
+            ingress: &[],
+            blobs: &blossom_value::NoBlobs,
+        };
+        let a = serial.step(&input, &observe).unwrap();
+        let b = parallel.step(&input, &observe).unwrap();
+        assert_eq!(a.observed, b.observed);
+        assert_eq!(serial.work_by_function(), parallel.work_by_function());
+        if tick == 0 {
+            assert_eq!(parallel.parallel_terms(), 0);
+        } else {
+            assert!(
+                parallel.parallel_terms() >= 8,
+                "expensive short batch never used workers"
+            );
+        }
+    }
+}
