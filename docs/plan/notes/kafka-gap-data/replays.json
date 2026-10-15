@@ -1,0 +1,5912 @@
+[
+  {
+    "window": "fixed-measured",
+    "ticks": 799,
+    "recorded_time_bounds_ns": [
+      1792088409093572053,
+      1792088414091498976
+    ],
+    "replay_ns": 5790117969,
+    "timing_ns": {
+      "engine_step": 2430854699,
+      "other": 1733898008,
+      "prepare": 1625365262
+    },
+    "rule_maintenance_ns": 1955616828,
+    "batches_inserted": 2960,
+    "work": {
+      "compiled_terms": 361361,
+      "evaluations": 126263,
+      "expression_steps": 11302079,
+      "probe_rows": 1326470,
+      "support_writes": 845243
+    },
+    "operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 2221,
+      "bulk_retracted_rows": 68431,
+      "membership_changes": 984251,
+      "probe_calls": 3244625,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 669341
+    },
+    "work_per_batch": {
+      "compiled_terms": 122.08141891891891,
+      "evaluations": 42.65641891891892,
+      "expression_steps": 3818.2699324324326,
+      "probe_rows": 448.1317567567568,
+      "support_writes": 285.55506756756756
+    },
+    "operations_per_batch": {
+      "batch_weight_updates": 0.0,
+      "bulk_index_clears": 0.7503378378378378,
+      "bulk_retracted_rows": 23.118581081081082,
+      "membership_changes": 332.5172297297297,
+      "probe_calls": 1096.1570945945946,
+      "secondary_index_build_rows": 0.0,
+      "secondary_index_row_updates": 226.12871621621622
+    },
+    "operators": {
+      "compiled-relational": {
+        "rules": 305,
+        "elapsed_ns": 289572744,
+        "support_writes": 173523,
+        "compiled_terms": 359039
+      },
+      "copy": {
+        "rules": 503,
+        "elapsed_ns": 186913943,
+        "support_writes": 246744,
+        "compiled_terms": 2322
+      },
+      "generic-relational": {
+        "rules": 492,
+        "elapsed_ns": 951477199,
+        "support_writes": 304072,
+        "compiled_terms": 0
+      },
+      "virtual-frame": {
+        "rules": 65,
+        "elapsed_ns": 3157797,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "native-upsert-delete": {
+        "rules": 48,
+        "elapsed_ns": 54039119,
+        "support_writes": 28105,
+        "compiled_terms": 0
+      },
+      "alias": {
+        "rules": 65,
+        "elapsed_ns": 2361921,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "retained-map": {
+        "rules": 262,
+        "elapsed_ns": 468069549,
+        "support_writes": 92799,
+        "compiled_terms": 0
+      },
+      "fused-observation": {
+        "rules": 1,
+        "elapsed_ns": 24556,
+        "support_writes": 0,
+        "compiled_terms": 0
+      }
+    },
+    "boundary_rows": {
+      "deleted": {
+        "acked_at": 3536,
+        "answering": 577,
+        "applied_d": 2662,
+        "behind": 599,
+        "commit": 2669,
+        "committed": 119,
+        "frame_start": 577,
+        "heard_at": 3744,
+        "heard_commit": 1730,
+        "log_end": 2661,
+        "match_idx": 1870,
+        "materialize_to": 2666,
+        "placed": 1032,
+        "produce_reply": 1032,
+        "produce_started": 292,
+        "producer": 2826,
+        "queued": 577,
+        "quiesced": 447,
+        "quiet": 233,
+        "quorum_heard": 647,
+        "received": 581,
+        "repl_wait": 1991,
+        "rsent": 2112,
+        "segment": 2661
+      },
+      "delivered": {
+        "ack": 4309,
+        "beat": 2261,
+        "entries": 1888,
+        "quiesce": 448
+      },
+      "events": {
+        "broker": 2397,
+        "cmd_resend": 10,
+        "fetch_wake": 440,
+        "kafka.data": 581,
+        "quorum_check": 17,
+        "raft_heartbeat": 100,
+        "raft_poll": 250
+      },
+      "host": {
+        "kafka.write": 577
+      },
+      "inserted": {
+        "acked_at": 3536,
+        "answering": 577,
+        "applied_d": 2662,
+        "batch": 2960,
+        "batch_chunk": 2994,
+        "behind": 599,
+        "commit": 2669,
+        "committed": 119,
+        "frame_start": 581,
+        "heard_at": 3744,
+        "heard_commit": 1730,
+        "log_end": 2661,
+        "match_idx": 1870,
+        "materialize_to": 2666,
+        "placed": 1033,
+        "produce_reply": 1033,
+        "produce_started": 292,
+        "producer": 2944,
+        "queued": 581,
+        "quiesced": 448,
+        "quiet": 234,
+        "quorum_heard": 641,
+        "received": 581,
+        "repl_wait": 1991,
+        "rlog": 2969,
+        "rsent": 2112,
+        "segment": 2661,
+        "time_index": 2843
+      },
+      "sent": {
+        "ack": 4127,
+        "beat": 2322,
+        "entries": 1991,
+        "missed": 4,
+        "quiesce": 468
+      }
+    },
+    "top_rules": [
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "fetch_part:main",
+          "batch_chunk:main",
+          "batch:main",
+          "readable_batch:main"
+        ],
+        "elapsed_ns": 53404067,
+        "head": "fetch_first:main",
+        "id": 1493,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-457",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_first(c, j, base) :- fetch_part(c, j, tid, p, off, _pmax, end, _start), ch := (off Div Int(I64(256))), batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob), (off Lt end), (base Le off), (last Ge off), notin readable_batch(tid, p, off, _, _, _).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 451,
+          "expression_steps": 317963,
+          "probe_rows": 69232,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "data_rlog:main"
+        ],
+        "elapsed_ns": 48461946,
+        "head": "data_entry:main",
+        "id": 1375,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-54",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "data_entry(tid, p, i, base, last, max_ts, h, data) :- data_rlog(tid, p, i, base, data), Variant<Option<BatchHeader>>#1(h) := batch_header(entry_bytes(data)), last := (base Add $as_i64(h.6)), max_ts := h.8.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 228,
+          "expression_steps": 583884,
+          "probe_rows": 0,
+          "support_writes": 2979
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "fetch_entry:main",
+          "topic_by_id:main",
+          "led:main",
+          "high_watermark:main",
+          "log_start:main",
+          "tail_end:main"
+        ],
+        "elapsed_ns": 37761689,
+        "head": "fetch_part:main",
+        "id": 1491,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-455",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_part(c, j, tid, p, off, pmax, end, start) :- fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), p := fp.0, (p Ge Int(I32(0))), (p Lt parts), led(tid, p, epoch), (leader_epoch_error(fp.1, epoch) Eq (Option(None): Option<i16>)), high_watermark(tid, p, end), log_start(tid, p, start), tail_end(tid, p, leo), off := fp.2, (off Ge start), (off Le leo), pmax := $as_i64(fp.3).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 451,
+          "expression_steps": 287606,
+          "probe_rows": 50154,
+          "support_writes": 7540
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "produce_entry:main",
+          "mtopic:main",
+          "topic_limits:main",
+          "led:main",
+          "isr_of:main",
+          "produce_started:main"
+        ],
+        "elapsed_ns": 32721349,
+        "head": "entry_check:main",
+        "id": 1384,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-168",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "entry_check(c, i, j, tid, p, o, checked) :- produce_entry(c, i, j, name, p, records, req, o), (produce_request_error(req) Eq (Option(None): Option<(i16, String)>)), mtopic(name, tid, parts, _cfg), topic_limits(tid, limits), led(tid, p, _), g := (Bytes, i32)(tid, p), isr_of(g, isr), (p Ge Int(I32(0))), (p Lt parts), checked := check_entry(records, req.1, limits, $len(isr)), (name Ne Str(\"__consumer_offsets\")), notin produce_started(c, i).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 147,
+          "expression_steps": 932432,
+          "probe_rows": 9367,
+          "support_writes": 2080
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "applied_d:main",
+          "partition_commit:main",
+          "data_entry:main",
+          "installing:main"
+        ],
+        "elapsed_ns": 30448302,
+        "head": "pending_batch:main",
+        "id": 1450,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-451",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "pending_batch(tid, p, base, last, max_ts, blob) :- applied_d(tid, p, a), partition_commit(tid, p, c), data_entry(tid, p, i, base, last, max_ts, _h, blob), (i Gt a), (i Le c), notin installing(tid, p).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 470,
+          "expression_steps": 71757,
+          "probe_rows": 19560,
+          "support_writes": 5925
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_materialize:main",
+          "producer:main"
+        ],
+        "elapsed_ns": 29737225,
+        "head": "materialized_producer:main",
+        "id": 1462,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-596",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "materialized_producer(tid, p, e) :- to_materialize(tid, p, xs), $contains(producers_in(xs), pid), producer(tid, p, pid, epoch, recent), Variant<Option<ProducerEntry>>#1(e) := tail_state(Option<ProducerEntry>#1(ProducerEntry(pid, epoch, recent)), producer_batches(xs, pid)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 385,
+          "expression_steps": 646090,
+          "probe_rows": 19551,
+          "support_writes": 5652
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "head:main"
+        ],
+        "elapsed_ns": 29025334,
+        "head": "fetch_req:main",
+        "id": 1487,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-445",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_req(c, i, req) :- head(c, i, _seq, key, _version, _corr, fr, _at), (key Eq Int(I16(1))), Variant<Option<Cur>>#1(body) := request_body(fr), Variant<Option<FetchRequest>>#1(req) := decode_fetch(body).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 189,
+          "expression_steps": 1108101,
+          "probe_rows": 0,
+          "support_writes": 570
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "raft_poll:main",
+          "eff:main",
+          "mine:main",
+          "election_due:main",
+          "leader:main",
+          "granted_now:main",
+          "heard_leader:main",
+          "leader_alive:main",
+          "round_open:main"
+        ],
+        "elapsed_ns": 28575061,
+        "head": "timed_out:main",
+        "id": 1012,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-96",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "timed_out(g, t) :- raft_poll(_, _), eff(g, t), mine(g), election_due(g, d), ($Now Ge d), notin leader(g, t), notin granted_now(g), notin heard_leader(g), notin leader_alive(g), notin round_open(g).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 250,
+          "expression_steps": 94705,
+          "probe_rows": 63220,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "leader:main",
+          "rsent:main",
+          "match_idx:main",
+          "repl_wait:main",
+          "acked_new:main",
+          "missed_now:main"
+        ],
+        "elapsed_ns": 27704026,
+        "head": "stalled:main",
+        "id": 1052,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-235",
+        "recursive": false,
+        "regime": "Recompute",
+        "text": "stalled(g, f) :- leader(g, _), rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, at, w, _b), (m Lt s), ($Now Ge (at Add w)), notin acked_new(g, f), notin missed_now(g, f).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 382,
+          "expression_steps": 83133,
+          "probe_rows": 75679,
+          "support_writes": 344
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "commit$cand:main",
+          "commit$ext:main",
+          "commit$pmin:main"
+        ],
+        "elapsed_ns": 18127838,
+        "head": "commit:next",
+        "id": 21,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit(X0, X1)@next :- commit$cand(X0, X1), commit$ext(X0, X1), commit$pmin(X0, P), (P Eq $prio<commit::resolve>(((Bytes, i32))(X0), (u64)(X1))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 385,
+          "expression_steps": 112098,
+          "probe_rows": 24021,
+          "support_writes": 5338
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "fetch_entry:main",
+          "topic_by_id:main",
+          "led:main",
+          "high_watermark:main",
+          "log_start:main",
+          "tail_end:main"
+        ],
+        "elapsed_ns": 17381576,
+        "head": "fetch_answer:main",
+        "id": 1506,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-463",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_answer(c, j, a, pmax) :- fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), p := fp.0, led(tid, p, epoch), (leader_epoch_error(fp.1, epoch) Eq (Option(None): Option<i16>)), high_watermark(tid, p, end), log_start(tid, p, start), tail_end(tid, p, leo), a := FetchAnswer(Int(I16(1)), end, start, (Vec([]): Vec<Blob>)), pmax := Int(I64(0)), (fp.0 Ge Int(I32(0))), (fp.0 Lt parts), ((fp.2 Lt start) Or (fp.2 Gt leo)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 451,
+          "expression_steps": 196456,
+          "probe_rows": 50154,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "commit$cand:main",
+          "commit$ext:main"
+        ],
+        "elapsed_ns": 17007349,
+        "head": "commit$pmin:main",
+        "id": 20,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-688",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$pmin(X0, Min<P>) :- commit$cand(X0, X1), commit$ext(X0, X1), P := $prio<commit::resolve>(((Bytes, i32))(X0), (u64)(X1)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 385,
+          "expression_steps": 53365,
+          "probe_rows": 5338,
+          "support_writes": 5338
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "rlog:main"
+        ],
+        "elapsed_ns": 16952963,
+        "head": "term_at:main",
+        "id": 1045,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-231",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "term_at(g, i, it) :- rlog(g, i, it, _, _, _, _).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 228,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 2983
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "match_idx$cand:main",
+          "match_idx$ext:main"
+        ],
+        "elapsed_ns": 16401478,
+        "head": "match_idx$pmin:main",
+        "id": 30,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-714",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "match_idx$pmin(X0, X1, Min<P>) :- match_idx$cand(X0, X1, X2), match_idx$ext(X0, X1, X2), P := $prio<match_idx::resolve>(((Bytes, i32), Node<Broker>)(X0, X1), (u64)(X2)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 379,
+          "expression_steps": 56952,
+          "probe_rows": 3740,
+          "support_writes": 3740
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "head:main"
+        ],
+        "elapsed_ns": 16104231,
+        "head": "produce_req:main",
+        "id": 1380,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-159",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "produce_req(c, i, req) :- head(c, i, _seq, key, _version, _corr, fr, _at), (key Eq Int(I16(0))), Variant<Option<Cur>>#1(body) := request_body(fr), Variant<Option<ProduceRequest>>#1(req) := decode_produce(body).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 189,
+          "expression_steps": 524817,
+          "probe_rows": 0,
+          "support_writes": 584
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_apply_d:main",
+          "data_entry:main"
+        ],
+        "elapsed_ns": 15894429,
+        "head": "to_materialize$u:main",
+        "id": 1458,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-592",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "to_materialize$u(tid, p, a, c, i, base, last, max_ts, h, data) :- to_apply_d(tid, p, a, c), data_entry(tid, p, i, base, last, max_ts, h, data), (i Gt a), (i Le c).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 507,
+          "expression_steps": 49471,
+          "probe_rows": 5974,
+          "support_writes": 5920
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "answer_fetch$when:main"
+        ],
+        "elapsed_ns": 15701808,
+        "head": "reply:main",
+        "id": 858,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-579",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "reply(c, i, $0) :- answer_fetch$when(c, i, corr, req, answers), $0 := fetch_response_parts(corr, Int(I16(0)), req, answers).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 146,
+          "expression_steps": 464031,
+          "probe_rows": 0,
+          "support_writes": 570
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rsent$cand:main",
+          "rsent$ext:main"
+        ],
+        "elapsed_ns": 15301194,
+        "head": "rsent$pmin:main",
+        "id": 35,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-730",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsent$pmin(X0, X1, Min<P>) :- rsent$cand(X0, X1, X2), rsent$ext(X0, X1, X2), P := $prio<rsent::resolve>(((Bytes, i32), Node<Broker>)(X0, X1), (u64)(X2)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 271,
+          "expression_steps": 50076,
+          "probe_rows": 4224,
+          "support_writes": 4224
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "deadline:main",
+          "last_heard:main",
+          "election_span:main"
+        ],
+        "elapsed_ns": 15098593,
+        "head": "election_due:main",
+        "id": 1010,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-74",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "election_due(g, d) :- deadline(g, d0), last_heard(g, h), election_span(g, s), d := if ((h Add s) Gt d0) then (h Add s) else d0.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 292,
+          "expression_steps": 67662,
+          "probe_rows": 15036,
+          "support_writes": 7518
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rsent$cand:main",
+          "rsent$ext:main",
+          "rsent$pmin:main"
+        ],
+        "elapsed_ns": 14516273,
+        "head": "rsent:next",
+        "id": 36,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsent(X0, X1, X2)@next :- rsent$cand(X0, X1, X2), rsent$ext(X0, X1, X2), rsent$pmin(X0, X1, P), (P Eq $prio<rsent::resolve>(((Bytes, i32), Node<Broker>)(X0, X1), (u64)(X2))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 271,
+          "expression_steps": 69520,
+          "probe_rows": 15026,
+          "support_writes": 4224
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "leader:main",
+          "match_idx:main",
+          "match_idx:main",
+          "members:main"
+        ],
+        "elapsed_ns": 14233924,
+        "head": "support$u:main",
+        "id": 1069,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-250",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "support$u(g, i, f, m) :- leader(g, _), match_idx(g, _, i), match_idx(g, f, m), members(g, f), (m Ge i).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 140,
+          "expression_steps": 34816,
+          "probe_rows": 25704,
+          "support_writes": 7004
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "fetch_part:main",
+          "fetch_batches:main"
+        ],
+        "elapsed_ns": 14138611,
+        "head": "fetch_answer:main",
+        "id": 1507,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-463",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_answer(c, j, a, pmax) :- fetch_part(c, j, _tid, _p, _off, pmax, end, start), fetch_batches(c, j, bs), a := FetchAnswer(Int(I16(0)), end, start, blobs_of(bs)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 220,
+          "expression_steps": 46944,
+          "probe_rows": 5610,
+          "support_writes": 7540
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "appends:main",
+          "tail_end:main",
+          "part_producers:main"
+        ],
+        "elapsed_ns": 13847762,
+        "head": "sequenced:main",
+        "id": 1398,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-183",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "sequenced(tid, p, s) :- appends(tid, p, xs), tail_end(tid, p, end), part_producers(tid, p, ps), s := sequence_appends(xs, end, ps).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 294,
+          "expression_steps": 411158,
+          "probe_rows": 1844,
+          "support_writes": 1857
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "match_idx$cand:main",
+          "match_idx$ext:main",
+          "match_idx$pmin:main"
+        ],
+        "elapsed_ns": 13775846,
+        "head": "match_idx:next",
+        "id": 31,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "match_idx(X0, X1, X2)@next :- match_idx$cand(X0, X1, X2), match_idx$ext(X0, X1, X2), match_idx$pmin(X0, X1, P), (P Eq $prio<match_idx::resolve>(((Bytes, i32), Node<Broker>)(X0, X1), (u64)(X2))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 379,
+          "expression_steps": 59840,
+          "probe_rows": 13090,
+          "support_writes": 3740
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "out_end:main",
+          "out_rows:main"
+        ],
+        "elapsed_ns": 13668752,
+        "head": "out_batch$u:main",
+        "id": 1063,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-245",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_batch$u(g, f, from, _e, i, et, k, pos, data, b) :- out_end(g, f, from, _e), out_rows(g, f, from, i, et, k, pos, data), b := log_bytes(data).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 240,
+          "expression_steps": 39942,
+          "probe_rows": 2219,
+          "support_writes": 4438
+        }
+      }
+    ],
+    "top_functions": [
+      {
+        "calls": 5059,
+        "id": 505,
+        "inclusive_steps": 885325,
+        "name": "BatchHeader::decode",
+        "self_steps": 885325
+      },
+      {
+        "calls": 4294,
+        "id": 118,
+        "inclusive_steps": 404594,
+        "name": "after_append",
+        "self_steps": 335890
+      },
+      {
+        "calls": 594,
+        "id": 146,
+        "inclusive_steps": 310752,
+        "name": "trim_to",
+        "self_steps": 277836
+      },
+      {
+        "calls": 2850,
+        "id": 569,
+        "inclusive_steps": 379050,
+        "name": "FetchPartition::decode",
+        "self_steps": 265050
+      },
+      {
+        "calls": 22212,
+        "id": 134,
+        "inclusive_steps": 259362,
+        "name": "producers_in",
+        "self_steps": 259362
+      },
+      {
+        "calls": 2661,
+        "id": 127,
+        "inclusive_steps": 287260,
+        "name": "segment_appends",
+        "self_steps": 252637
+      },
+      {
+        "calls": 20179,
+        "id": 1285,
+        "inclusive_steps": 221969,
+        "name": "format$left",
+        "self_steps": 221969
+      },
+      {
+        "calls": 8920,
+        "id": 1292,
+        "inclusive_steps": 356800,
+        "name": "format$skip_tags",
+        "self_steps": 205160
+      },
+      {
+        "calls": 2080,
+        "id": 79,
+        "inclusive_steps": 168480,
+        "name": "split_batches",
+        "self_steps": 168480
+      },
+      {
+        "calls": 285,
+        "id": 151,
+        "inclusive_steps": 463746,
+        "name": "fetch_response_parts",
+        "self_steps": 151866
+      },
+      {
+        "calls": 9344,
+        "id": 143,
+        "inclusive_steps": 140160,
+        "name": "leader_epoch_error",
+        "self_steps": 140160
+      },
+      {
+        "calls": 2850,
+        "id": 153,
+        "inclusive_steps": 134688,
+        "name": "fetch_partition_parts",
+        "self_steps": 128988
+      },
+      {
+        "calls": 2080,
+        "id": 100,
+        "inclusive_steps": 170560,
+        "name": "batch_error",
+        "self_steps": 128960
+      },
+      {
+        "calls": 6506,
+        "id": 1286,
+        "inclusive_steps": 195180,
+        "name": "format$bytes",
+        "self_steps": 123614
+      },
+      {
+        "calls": 285,
+        "id": 1297,
+        "inclusive_steps": 102885,
+        "name": "by_topic<FetchAnswer>",
+        "self_steps": 102885
+      },
+      {
+        "calls": 2850,
+        "id": 573,
+        "inclusive_steps": 624150,
+        "name": "FetchTopic$d1",
+        "self_steps": 102600
+      },
+      {
+        "calls": 2080,
+        "id": 102,
+        "inclusive_steps": 829920,
+        "name": "check_records",
+        "self_steps": 101920
+      },
+      {
+        "calls": 6327,
+        "id": 110,
+        "inclusive_steps": 100232,
+        "name": "seq_add",
+        "self_steps": 100232
+      },
+      {
+        "calls": 13673,
+        "id": 1288,
+        "inclusive_steps": 232441,
+        "name": "format$check",
+        "self_steps": 82038
+      },
+      {
+        "calls": 8,
+        "id": 218,
+        "inclusive_steps": 77928,
+        "name": "last_per_partition",
+        "self_steps": 77928
+      }
+    ],
+    "plan_rules": 1741,
+    "physical_stores": 1332,
+    "declared_durable_main_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 0,
+      "bulk_retracted_rows": 0,
+      "membership_changes": 33756,
+      "probe_calls": 468022,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 71286
+    },
+    "scoped_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 2221,
+      "bulk_retracted_rows": 68431,
+      "membership_changes": 136713,
+      "probe_calls": 159621,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 24182
+    }
+  },
+  {
+    "window": "max-early-measured",
+    "ticks": 96,
+    "recorded_time_bounds_ns": [
+      1792088348330971200,
+      1792088353242362385
+    ],
+    "replay_ns": 1850529353,
+    "timing_ns": {
+      "engine_step": 1638650660,
+      "other": 141043962,
+      "prepare": 70834731
+    },
+    "rule_maintenance_ns": 1323083532,
+    "batches_inserted": 4320,
+    "work": {
+      "compiled_terms": 215324,
+      "evaluations": 15428,
+      "expression_steps": 9430441,
+      "probe_rows": 1085872,
+      "support_writes": 607221
+    },
+    "operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 335,
+      "bulk_retracted_rows": 66563,
+      "membership_changes": 746477,
+      "probe_calls": 2114507,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 496046
+    },
+    "work_per_batch": {
+      "compiled_terms": 49.84351851851852,
+      "evaluations": 3.571296296296296,
+      "expression_steps": 2182.9724537037036,
+      "probe_rows": 251.35925925925926,
+      "support_writes": 140.56041666666667
+    },
+    "operations_per_batch": {
+      "batch_weight_updates": 0.0,
+      "bulk_index_clears": 0.0775462962962963,
+      "bulk_retracted_rows": 15.408101851851852,
+      "membership_changes": 172.79560185185184,
+      "probe_calls": 489.46921296296296,
+      "secondary_index_build_rows": 0.0,
+      "secondary_index_row_updates": 114.82546296296296
+    },
+    "operators": {
+      "compiled-relational": {
+        "rules": 305,
+        "elapsed_ns": 190650427,
+        "support_writes": 114121,
+        "compiled_terms": 214951
+      },
+      "copy": {
+        "rules": 503,
+        "elapsed_ns": 132190984,
+        "support_writes": 181687,
+        "compiled_terms": 373
+      },
+      "generic-relational": {
+        "rules": 492,
+        "elapsed_ns": 652634885,
+        "support_writes": 216757,
+        "compiled_terms": 0
+      },
+      "virtual-frame": {
+        "rules": 65,
+        "elapsed_ns": 503699,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "native-upsert-delete": {
+        "rules": 48,
+        "elapsed_ns": 40341634,
+        "support_writes": 21695,
+        "compiled_terms": 0
+      },
+      "alias": {
+        "rules": 65,
+        "elapsed_ns": 488531,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "retained-map": {
+        "rules": 262,
+        "elapsed_ns": 306270528,
+        "support_writes": 72961,
+        "compiled_terms": 0
+      },
+      "fused-observation": {
+        "rules": 1,
+        "elapsed_ns": 2844,
+        "support_writes": 0,
+        "compiled_terms": 0
+      }
+    },
+    "boundary_rows": {
+      "deleted": {
+        "acked_at": 2121,
+        "answering": 76,
+        "applied_d": 1081,
+        "behind": 120,
+        "commit": 1081,
+        "committed": 120,
+        "frame_start": 68,
+        "heard_at": 3006,
+        "heard_commit": 762,
+        "log_end": 1080,
+        "match_idx": 720,
+        "materialize_to": 1121,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4320,
+        "queued": 76,
+        "quiesced": 361,
+        "quiet": 120,
+        "quorum_heard": 1000,
+        "received": 68,
+        "repl_wait": 920,
+        "rsent": 1040,
+        "segment": 1080
+      },
+      "delivered": {
+        "ack": 5480,
+        "beat": 5972,
+        "entries": 923,
+        "quiesce": 361
+      },
+      "events": {
+        "broker": 288,
+        "cmd_resend": 10,
+        "fetch_wake": 322,
+        "kafka.data": 68,
+        "quorum_check": 17,
+        "raft_heartbeat": 101,
+        "raft_poll": 252
+      },
+      "host": {
+        "kafka.write": 76
+      },
+      "inserted": {
+        "acked_at": 2121,
+        "answering": 76,
+        "applied_d": 1081,
+        "batch": 4320,
+        "batch_chunk": 4569,
+        "behind": 120,
+        "commit": 1081,
+        "committed": 120,
+        "frame_start": 68,
+        "heard_at": 3006,
+        "heard_commit": 762,
+        "log_end": 1080,
+        "match_idx": 720,
+        "materialize_to": 1121,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4320,
+        "queued": 68,
+        "quiesced": 361,
+        "quiet": 120,
+        "quorum_heard": 1000,
+        "received": 68,
+        "repl_wait": 920,
+        "rlog": 4324,
+        "rsent": 1040,
+        "segment": 1080,
+        "time_index": 940
+      },
+      "sent": {
+        "ack": 6895,
+        "beat": 4480,
+        "entries": 840,
+        "quiesce": 240
+      }
+    },
+    "top_rules": [
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "fetch_part:main",
+          "batch_chunk:main",
+          "batch:main",
+          "readable_batch:main"
+        ],
+        "elapsed_ns": 56527615,
+        "head": "fetch_first:main",
+        "id": 1493,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-457",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_first(c, j, base) :- fetch_part(c, j, tid, p, off, _pmax, end, _start), ch := (off Div Int(I64(256))), batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob), (off Lt end), (base Le off), (last Ge off), notin readable_batch(tid, p, off, _, _, _).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 53,
+          "expression_steps": 1181034,
+          "probe_rows": 193689,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "data_rlog:main"
+        ],
+        "elapsed_ns": 43242567,
+        "head": "data_entry:main",
+        "id": 1375,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-54",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "data_entry(tid, p, i, base, last, max_ts, h, data) :- data_rlog(tid, p, i, base, data), Variant<Option<BatchHeader>>#1(h) := batch_header(entry_bytes(data)), last := (base Add $as_i64(h.6)), max_ts := h.8.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 23,
+          "expression_steps": 846720,
+          "probe_rows": 0,
+          "support_writes": 4320
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "produce_entry:main",
+          "mtopic:main",
+          "topic_limits:main",
+          "led:main",
+          "isr_of:main",
+          "produce_started:main"
+        ],
+        "elapsed_ns": 38513120,
+        "head": "entry_check:main",
+        "id": 1384,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-168",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "entry_check(c, i, j, tid, p, o, checked) :- produce_entry(c, i, j, name, p, records, req, o), (produce_request_error(req) Eq (Option(None): Option<(i16, String)>)), mtopic(name, tid, parts, _cfg), topic_limits(tid, limits), led(tid, p, _), g := (Bytes, i32)(tid, p), isr_of(g, isr), (p Ge Int(I32(0))), (p Lt parts), checked := check_entry(records, req.1, limits, $len(isr)), (name Ne Str(\"__consumer_offsets\")), notin produce_started(c, i).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 16,
+          "expression_steps": 1146944,
+          "probe_rows": 11520,
+          "support_writes": 2560
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "out_end:main",
+          "out_rows:main"
+        ],
+        "elapsed_ns": 31278430,
+        "head": "out_batch$u:main",
+        "id": 1063,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-245",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_batch$u(g, f, from, _e, i, et, k, pos, data, b) :- out_end(g, f, from, _e), out_rows(g, f, from, i, et, k, pos, data), b := log_bytes(data).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 25,
+          "expression_steps": 63360,
+          "probe_rows": 3360,
+          "support_writes": 7040
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "applied_d:main",
+          "partition_commit:main",
+          "data_entry:main",
+          "installing:main"
+        ],
+        "elapsed_ns": 27026632,
+        "head": "pending_batch:main",
+        "id": 1450,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-451",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "pending_batch(tid, p, base, last, max_ts, blob) :- applied_d(tid, p, a), partition_commit(tid, p, c), data_entry(tid, p, i, base, last, max_ts, _h, blob), (i Gt a), (i Le c), notin installing(tid, p).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 48,
+          "expression_steps": 83208,
+          "probe_rows": 17524,
+          "support_writes": 8800
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_materialize:main",
+          "producer:main"
+        ],
+        "elapsed_ns": 24588950,
+        "head": "materialized_producer:main",
+        "id": 1462,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-596",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "materialized_producer(tid, p, e) :- to_materialize(tid, p, xs), $contains(producers_in(xs), pid), producer(tid, p, pid, epoch, recent), Variant<Option<ProducerEntry>>#1(e) := tail_state(Option<ProducerEntry>#1(ProducerEntry(pid, epoch, recent)), producer_batches(xs, pid)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 44,
+          "expression_steps": 760320,
+          "probe_rows": 4320,
+          "support_writes": 8640
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "sequenced:main",
+          "led:main"
+        ],
+        "elapsed_ns": 23969612,
+        "head": "data_proposals:main",
+        "id": 1401,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-184",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "data_proposals(g, x) :- sequenced(tid, p, s), led(tid, p, epoch), g := (Bytes, i32)(tid, p), pb in placed_all(s), x := (u8, i64, Blob)(Int(U8(1)), pb.0, $lib_BlobOf(restamp(pb.3, pb.0, epoch))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 16,
+          "expression_steps": 82560,
+          "probe_rows": 2560,
+          "support_writes": 2560
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_apply_d:main",
+          "data_entry:main"
+        ],
+        "elapsed_ns": 17815734,
+        "head": "to_materialize$u:main",
+        "id": 1458,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-592",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "to_materialize$u(tid, p, a, c, i, base, last, max_ts, h, data) :- to_apply_d(tid, p, a, c), data_entry(tid, p, i, base, last, max_ts, h, data), (i Gt a), (i Le c).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 48,
+          "expression_steps": 64324,
+          "probe_rows": 9280,
+          "support_writes": 8640
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "out_from:main",
+          "rlog:main",
+          "behind_snapshot:main"
+        ],
+        "elapsed_ns": 14530349,
+        "head": "out_sizes$u:main",
+        "id": 1056,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-239",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_sizes$u(g, f, from, i, data, n) :- out_from(g, f, from), rlog(g, i, _, _, _, _, data), n := $len(data), (i Gt from), (i Le (from Add Int(U64(64)))), notin behind_snapshot(g, from).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 39,
+          "expression_steps": 81768,
+          "probe_rows": 7040,
+          "support_writes": 7040
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "appends:main",
+          "tail_end:main",
+          "part_producers:main"
+        ],
+        "elapsed_ns": 13868890,
+        "head": "sequenced:main",
+        "id": 1398,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-183",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "sequenced(tid, p, s) :- appends(tid, p, xs), tail_end(tid, p, end), part_producers(tid, p, ps), s := sequence_appends(xs, end, ps).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 30,
+          "expression_steps": 527360,
+          "probe_rows": 960,
+          "support_writes": 640
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "to_materialize$u:main"
+        ],
+        "elapsed_ns": 13195725,
+        "head": "to_materialize:main",
+        "id": 1459,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-593",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "to_materialize(tid, p, CollectVec<$0, tid, p, a, c, i, base, last, max_ts, h, data>) :- to_materialize$u(tid, p, a, c, i, base, last, max_ts, h, data), $0 := (u64, i64, i64, i64, Blob, BatchHeader)(i, base, last, max_ts, data, h).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 44,
+          "expression_steps": 60480,
+          "probe_rows": 0,
+          "support_writes": 2160
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "raft_poll:main",
+          "eff:main",
+          "mine:main",
+          "election_due:main",
+          "leader:main",
+          "granted_now:main",
+          "heard_leader:main",
+          "leader_alive:main",
+          "round_open:main"
+        ],
+        "elapsed_ns": 13027916,
+        "head": "timed_out:main",
+        "id": 1012,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-96",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "timed_out(g, t) :- raft_poll(_, _), eff(g, t), mine(g), election_due(g, d), ($Now Ge d), notin leader(g, t), notin granted_now(g), notin heard_leader(g), notin leader_alive(g), notin round_open(g).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 81,
+          "expression_steps": 61584,
+          "probe_rows": 41126,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "placed:main",
+          "partition_commit:main",
+          "isr_lacks:main"
+        ],
+        "elapsed_ns": 12952245,
+        "head": "placed_done:main",
+        "id": 1418,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-424",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "placed_done(c, i, j) :- placed(c, i, j, tid, p, idx, _e, _b, _last, _s), partition_commit(tid, p, cm), g := (Bytes, i32)(tid, p), (cm Ge idx), notin isr_lacks(g, idx).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 37,
+          "expression_steps": 150646,
+          "probe_rows": 42906,
+          "support_writes": 2720
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "follow$in#67a0c5ac:main"
+        ],
+        "elapsed_ns": 12899804,
+        "head": "ack:async",
+        "id": 418,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Async",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "ack(@l, g, t, p, $0)@async :- follow$in#67a0c5ac(g, l, t, p, sent), $0 := Option<Instant>#1(sent).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 59,
+          "expression_steps": 24050,
+          "probe_rows": 0,
+          "support_writes": 12025
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "out_end:main",
+          "rlog:main"
+        ],
+        "elapsed_ns": 12117702,
+        "head": "out_rows:main",
+        "id": 1062,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-244",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_rows(g, f, from, i, et, k, pos, data) :- out_end(g, f, from, e), rlog(g, i, et, _pt, k, pos, data), (i Gt from), (i Le e).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 39,
+          "expression_steps": 50088,
+          "probe_rows": 7040,
+          "support_writes": 7040
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "deadline:main",
+          "last_heard:main",
+          "election_span:main"
+        ],
+        "elapsed_ns": 11868653,
+        "head": "election_due:main",
+        "id": 1010,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-74",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "election_due(g, d) :- deadline(g, d0), last_heard(g, h), election_span(g, s), d := if ((h Add s) Gt d0) then (h Add s) else d0.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 52,
+          "expression_steps": 55566,
+          "probe_rows": 12348,
+          "support_writes": 6174
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "producer$ups:main",
+          "producer:main"
+        ],
+        "elapsed_ns": 11619313,
+        "head": "producer$del:main",
+        "id": 809,
+        "operator": "native-upsert-delete",
+        "parallel_eligible": true,
+        "phase": "stratum-1004",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "producer$del($0, $1, $2, $3, $4) :- producer$ups($0, $1, $2, _, _), producer($0, $1, $2, $3, $4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 44,
+          "expression_steps": 0,
+          "probe_rows": 8640,
+          "support_writes": 8640
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "raft_heartbeat:main",
+          "leader:main",
+          "match_idx:main",
+          "term_at:main",
+          "commit_of:main",
+          "rsent:main",
+          "idle:main"
+        ],
+        "elapsed_ns": 11311928,
+        "head": "beat_followers$when:main",
+        "id": 306,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-1093",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "beat_followers$when(g, t, f, m, mt, c, s) :- raft_heartbeat(_, _), leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c), rsent(g, f, s), notin idle(g, t).",
+        "work": {
+          "compiled_terms": 59,
+          "evaluations": 59,
+          "expression_steps": 0,
+          "probe_rows": 33018,
+          "support_writes": 4480
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "beat:sent",
+          "eff:main",
+          "takes:main",
+          "rlog:main"
+        ],
+        "elapsed_ns": 11262536,
+        "head": "beat_ok:main",
+        "id": 1133,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-35",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "beat_ok(g, l, t, p, c, sent) :- beat(g, t, p, pt, c, sent, _u | l), eff(g, t), takes(g), rlog(g, p, pt, _, _, _, _).",
+        "work": {
+          "compiled_terms": 45,
+          "evaluations": 45,
+          "expression_steps": 0,
+          "probe_rows": 21750,
+          "support_writes": 5972
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "out_batch$u:main"
+        ],
+        "elapsed_ns": 10366688,
+        "head": "out_batch$a:main",
+        "id": 1064,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-246",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_batch$a(g, f, from, CollectVec<$0, g, f, from, _e, i, et, k, pos, data, b>) :- out_batch$u(g, f, from, _e, i, et, k, pos, data, b), $0 := (u64, u64, u8, i64, Bytes)(i, et, k, pos, b).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 25,
+          "expression_steps": 42240,
+          "probe_rows": 0,
+          "support_writes": 1760
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "out_sizes$u:main"
+        ],
+        "elapsed_ns": 9860020,
+        "head": "out_sizes$a:main",
+        "id": 1057,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-240",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_sizes$a(g, f, from, CollectVec<$0, g, f, from, i, data, n>) :- out_sizes$u(g, f, from, i, data, n), $0 := (u64, u64)(i, n).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 25,
+          "expression_steps": 21120,
+          "probe_rows": 0,
+          "support_writes": 1760
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_materialize:main"
+        ],
+        "elapsed_ns": 9744537,
+        "head": "index_chunks$when:main",
+        "id": 796,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-1121",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "index_chunks$when(tid, p, x, ch) :- to_materialize(tid, p, xs), x in xs, ch in chunks_of(x.1, x.2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 44,
+          "expression_steps": 101934,
+          "probe_rows": 0,
+          "support_writes": 9138
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "placed:main",
+          "rlog:main",
+          "compacted_at:main"
+        ],
+        "elapsed_ns": 9237018,
+        "head": "placed_lost:main",
+        "id": 1424,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-426",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "placed_lost(c, i, j) :- placed(c, i, j, tid, p, idx, e, _b, _l, _s), g := (Bytes, i32)(tid, p), notin rlog(g, idx, e, _, _, _, _), notin compacted_at(g, idx).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 26,
+          "expression_steps": 97221,
+          "probe_rows": 29847,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "store_batches$when:main"
+        ],
+        "elapsed_ns": 8802000,
+        "head": "batch:next",
+        "id": 795,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "batch(tid, p, $0, $1, $2, $3)@next :- store_batches$when(tid, p, x), $0 := x.1, $1 := x.2, $2 := x.3, $3 := x.4.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 44,
+          "expression_steps": 69120,
+          "probe_rows": 0,
+          "support_writes": 8640
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "pending_end$u:main"
+        ],
+        "elapsed_ns": 8698473,
+        "head": "pending_end:main",
+        "id": 1452,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-453",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "pending_end(tid, p, Max<last>) :- pending_end$u(tid, p, _base, last, _t, _blob).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 43,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 2200
+        }
+      }
+    ],
+    "top_functions": [
+      {
+        "calls": 6880,
+        "id": 505,
+        "inclusive_steps": 1204000,
+        "name": "BatchHeader::decode",
+        "self_steps": 1204000
+      },
+      {
+        "calls": 6400,
+        "id": 118,
+        "inclusive_steps": 631040,
+        "name": "after_append",
+        "self_steps": 528640
+      },
+      {
+        "calls": 1080,
+        "id": 127,
+        "inclusive_steps": 292640,
+        "name": "segment_appends",
+        "self_steps": 250520
+      },
+      {
+        "calls": 2560,
+        "id": 79,
+        "inclusive_steps": 207360,
+        "name": "split_batches",
+        "self_steps": 207360
+      },
+      {
+        "calls": 2560,
+        "id": 100,
+        "inclusive_steps": 209920,
+        "name": "batch_error",
+        "self_steps": 158720
+      },
+      {
+        "calls": 5400,
+        "id": 134,
+        "inclusive_steps": 156600,
+        "name": "producers_in",
+        "self_steps": 156600
+      },
+      {
+        "calls": 4320,
+        "id": 135,
+        "inclusive_steps": 146880,
+        "name": "producer_batches",
+        "self_steps": 146880
+      },
+      {
+        "calls": 8960,
+        "id": 110,
+        "inclusive_steps": 142080,
+        "name": "seq_add",
+        "self_steps": 142080
+      },
+      {
+        "calls": 2560,
+        "id": 102,
+        "inclusive_steps": 1021440,
+        "name": "check_records",
+        "self_steps": 125440
+      },
+      {
+        "calls": 762,
+        "id": 271,
+        "inclusive_steps": 130214,
+        "name": "chained",
+        "self_steps": 105090
+      },
+      {
+        "calls": 4320,
+        "id": 126,
+        "inclusive_steps": 96534,
+        "name": "chunks_of",
+        "self_steps": 96534
+      },
+      {
+        "calls": 1280,
+        "id": 115,
+        "inclusive_steps": 135680,
+        "name": "producer_check",
+        "self_steps": 87040
+      },
+      {
+        "calls": 840,
+        "id": 278,
+        "inclusive_steps": 86520,
+        "name": "batch_end",
+        "self_steps": 86520
+      },
+      {
+        "calls": 8,
+        "id": 218,
+        "inclusive_steps": 77928,
+        "name": "last_per_partition",
+        "self_steps": 77928
+      },
+      {
+        "calls": 1280,
+        "id": 119,
+        "inclusive_steps": 433920,
+        "name": "walk_batch",
+        "self_steps": 74240
+      },
+      {
+        "calls": 5120,
+        "id": 96,
+        "inclusive_steps": 71680,
+        "name": "produce_request_error",
+        "self_steps": 71680
+      },
+      {
+        "calls": 6040,
+        "id": 1285,
+        "inclusive_steps": 66440,
+        "name": "format$left",
+        "self_steps": 66440
+      },
+      {
+        "calls": 8640,
+        "id": 117,
+        "inclusive_steps": 60480,
+        "name": "last_offset_of",
+        "self_steps": 60480
+      },
+      {
+        "calls": 1280,
+        "id": 120,
+        "inclusive_steps": 491520,
+        "name": "sequence_one",
+        "self_steps": 57600
+      },
+      {
+        "calls": 2456,
+        "id": 1292,
+        "inclusive_steps": 98240,
+        "name": "format$skip_tags",
+        "self_steps": 56488
+      }
+    ],
+    "plan_rules": 1741,
+    "physical_stores": 1332,
+    "declared_durable_main_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 0,
+      "bulk_retracted_rows": 0,
+      "membership_changes": 29519,
+      "probe_calls": 347305,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 62924
+    },
+    "scoped_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 335,
+      "bulk_retracted_rows": 66563,
+      "membership_changes": 132049,
+      "probe_calls": 90496,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 21129
+    }
+  },
+  {
+    "window": "max-early-plain",
+    "ticks": 96,
+    "recorded_time_bounds_ns": [
+      1792088348330971200,
+      1792088353242362385
+    ],
+    "replay_ns": 1821986723,
+    "timing_ns": {
+      "engine_step": 1609772567,
+      "other": 142903053,
+      "prepare": 69311103
+    },
+    "rule_maintenance_ns": 0,
+    "batches_inserted": 4320,
+    "work": {
+      "compiled_terms": 215324,
+      "evaluations": 15428,
+      "expression_steps": 9430441,
+      "probe_rows": 1085872,
+      "support_writes": 607221
+    },
+    "operations": {},
+    "work_per_batch": {
+      "compiled_terms": 49.84351851851852,
+      "evaluations": 3.571296296296296,
+      "expression_steps": 2182.9724537037036,
+      "probe_rows": 251.35925925925926,
+      "support_writes": 140.56041666666667
+    },
+    "operations_per_batch": {},
+    "operators": {
+      "compiled-relational": {
+        "rules": 305,
+        "elapsed_ns": 0,
+        "support_writes": 114121,
+        "compiled_terms": 214951
+      },
+      "copy": {
+        "rules": 503,
+        "elapsed_ns": 0,
+        "support_writes": 181687,
+        "compiled_terms": 373
+      },
+      "generic-relational": {
+        "rules": 492,
+        "elapsed_ns": 0,
+        "support_writes": 216757,
+        "compiled_terms": 0
+      },
+      "virtual-frame": {
+        "rules": 65,
+        "elapsed_ns": 0,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "native-upsert-delete": {
+        "rules": 48,
+        "elapsed_ns": 0,
+        "support_writes": 21695,
+        "compiled_terms": 0
+      },
+      "alias": {
+        "rules": 65,
+        "elapsed_ns": 0,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "retained-map": {
+        "rules": 262,
+        "elapsed_ns": 0,
+        "support_writes": 72961,
+        "compiled_terms": 0
+      },
+      "fused-observation": {
+        "rules": 1,
+        "elapsed_ns": 0,
+        "support_writes": 0,
+        "compiled_terms": 0
+      }
+    },
+    "boundary_rows": {
+      "deleted": {
+        "acked_at": 2121,
+        "answering": 76,
+        "applied_d": 1081,
+        "behind": 120,
+        "commit": 1081,
+        "committed": 120,
+        "frame_start": 68,
+        "heard_at": 3006,
+        "heard_commit": 762,
+        "log_end": 1080,
+        "match_idx": 720,
+        "materialize_to": 1121,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4320,
+        "queued": 76,
+        "quiesced": 361,
+        "quiet": 120,
+        "quorum_heard": 1000,
+        "received": 68,
+        "repl_wait": 920,
+        "rsent": 1040,
+        "segment": 1080
+      },
+      "delivered": {
+        "ack": 5480,
+        "beat": 5972,
+        "entries": 923,
+        "quiesce": 361
+      },
+      "events": {
+        "broker": 288,
+        "cmd_resend": 10,
+        "fetch_wake": 322,
+        "kafka.data": 68,
+        "quorum_check": 17,
+        "raft_heartbeat": 101,
+        "raft_poll": 252
+      },
+      "host": {
+        "kafka.write": 76
+      },
+      "inserted": {
+        "acked_at": 2121,
+        "answering": 76,
+        "applied_d": 1081,
+        "batch": 4320,
+        "batch_chunk": 4569,
+        "behind": 120,
+        "commit": 1081,
+        "committed": 120,
+        "frame_start": 68,
+        "heard_at": 3006,
+        "heard_commit": 762,
+        "log_end": 1080,
+        "match_idx": 720,
+        "materialize_to": 1121,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4320,
+        "queued": 68,
+        "quiesced": 361,
+        "quiet": 120,
+        "quorum_heard": 1000,
+        "received": 68,
+        "repl_wait": 920,
+        "rlog": 4324,
+        "rsent": 1040,
+        "segment": 1080,
+        "time_index": 940
+      },
+      "sent": {
+        "ack": 6895,
+        "beat": 4480,
+        "entries": 840,
+        "quiesce": 240
+      }
+    },
+    "top_rules": [
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "rterm:main",
+          "rterm$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$cand:main",
+        "id": 0,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-636",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$cand(X0, X1) :- rterm(X0, X1), notin rterm$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "rterm$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$cand:main",
+        "id": 1,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-636",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$cand(X0, X1) :- rterm$n(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rterm$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$ext:main",
+        "id": 2,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-637",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$ext(X0, Max<X1>) :- rterm$cand(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rterm$cand:main",
+          "rterm$ext:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$pmin:main",
+        "id": 3,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-638",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$pmin(X0, Min<P>) :- rterm$cand(X0, X1), rterm$ext(X0, X1), P := $prio<rterm::resolve>(((Bytes, i32))(X0), (u64)(X1)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rterm$cand:main",
+          "rterm$ext:main",
+          "rterm$pmin:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm:next",
+        "id": 4,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm(X0, X1)@next :- rterm$cand(X0, X1), rterm$ext(X0, X1), rterm$pmin(X0, P), (P Eq $prio<rterm::resolve>(((Bytes, i32))(X0), (u64)(X1))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rvote:main",
+          "rvote$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rvote:next",
+        "id": 5,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rvote(X0, X1, X2)@next :- rvote(X0, X1, X2), notin rvote$del(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rlog:main",
+          "rlog$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rlog:next",
+        "id": 6,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rlog(X0, X1, X2, X3, X4, X5, X6)@next :- rlog(X0, X1, X2, X3, X4, X5, X6), notin rlog$del(X0, X1, X2, X3, X4, X5, X6).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "rsnap:main",
+          "rsnap$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$cand:main",
+        "id": 7,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-653",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$cand(X0, X1, X2, X3, X4) :- rsnap(X0, X1, X2, X3, X4), notin rsnap$del(X0, X1, X2, X3, X4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "rsnap$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$cand:main",
+        "id": 8,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-653",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$cand(X0, X1, X2, X3, X4) :- rsnap$n(X0, X1, X2, X3, X4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rsnap$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$ext:main",
+        "id": 9,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-654",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$ext(X0, Max<X1>) :- rsnap$cand(X0, X1, X2, X3, X4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rsnap$cand:main",
+          "rsnap$ext:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$pmin:main",
+        "id": 10,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-655",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$pmin(X0, Min<P>) :- rsnap$cand(X0, X1, X2, X3, X4), rsnap$ext(X0, X1), P := $prio<rsnap::resolve>(((Bytes, i32))(X0), (u64, u64, i64, Vec<i32>)(X1, X2, X3, X4)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rsnap$cand:main",
+          "rsnap$ext:main",
+          "rsnap$pmin:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap:next",
+        "id": 11,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap(X0, X1, X2, X3, X4)@next :- rsnap$cand(X0, X1, X2, X3, X4), rsnap$ext(X0, X1), rsnap$pmin(X0, P), (P Eq $prio<rsnap::resolve>(((Bytes, i32))(X0), (u64, u64, i64, Vec<i32>)(X1, X2, X3, X4))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "won:main",
+          "won$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "won:next",
+        "id": 12,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "won(X0, X1)@next :- won(X0, X1), notin won$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "leader_of:main",
+          "leader_of$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "leader_of:next",
+        "id": 13,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "leader_of(X0, X1, X2)@next :- leader_of(X0, X1, X2), notin leader_of$del(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "voters:main",
+          "voters$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "voters:next",
+        "id": 14,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "voters(X0, X1, X2)@next :- voters(X0, X1, X2), notin voters$del(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "deadline:main",
+          "deadline$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "deadline:next",
+        "id": 15,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "deadline(X0, X1)@next :- deadline(X0, X1), notin deadline$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "election_span:main",
+          "election_span$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "election_span:next",
+        "id": 16,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "election_span(X0, X1)@next :- election_span(X0, X1), notin election_span$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "commit:main",
+          "commit$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$cand:main",
+        "id": 17,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-686",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$cand(X0, X1) :- commit(X0, X1), notin commit$del(X0, X1).",
+        "work": {
+          "compiled_terms": 2242,
+          "evaluations": 26,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 2242
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "commit$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$cand:main",
+        "id": 18,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-686",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$cand(X0, X1) :- commit$n(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 60,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 4167
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "commit$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$ext:main",
+        "id": 19,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-687",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$ext(X0, Max<X1>) :- commit$cand(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 45,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 2162
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "commit$cand:main",
+          "commit$ext:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$pmin:main",
+        "id": 20,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-688",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$pmin(X0, Min<P>) :- commit$cand(X0, X1), commit$ext(X0, X1), P := $prio<commit::resolve>(((Bytes, i32))(X0), (u64)(X1)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 45,
+          "expression_steps": 21820,
+          "probe_rows": 2162,
+          "support_writes": 2162
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "commit$cand:main",
+          "commit$ext:main",
+          "commit$pmin:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit:next",
+        "id": 21,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit(X0, X1)@next :- commit$cand(X0, X1), commit$ext(X0, X1), commit$pmin(X0, P), (P Eq $prio<commit::resolve>(((Bytes, i32))(X0), (u64)(X1))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 45,
+          "expression_steps": 45402,
+          "probe_rows": 9729,
+          "support_writes": 2162
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "heard_commit:main",
+          "heard_commit$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "heard_commit$cand:main",
+        "id": 22,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-694",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "heard_commit$cand(X0, X1) :- heard_commit(X0, X1), notin heard_commit$del(X0, X1).",
+        "work": {
+          "compiled_terms": 1604,
+          "evaluations": 18,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 1604
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "heard_commit$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "heard_commit$cand:main",
+        "id": 23,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-694",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "heard_commit$cand(X0, X1) :- heard_commit$n(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 58,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 4011
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "heard_commit$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "heard_commit$ext:main",
+        "id": 24,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-695",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "heard_commit$ext(X0, Max<X1>) :- heard_commit$cand(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 30,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 1524
+        }
+      }
+    ],
+    "top_functions": [
+      {
+        "calls": 6880,
+        "id": 505,
+        "inclusive_steps": 1204000,
+        "name": "BatchHeader::decode",
+        "self_steps": 1204000
+      },
+      {
+        "calls": 6400,
+        "id": 118,
+        "inclusive_steps": 631040,
+        "name": "after_append",
+        "self_steps": 528640
+      },
+      {
+        "calls": 1080,
+        "id": 127,
+        "inclusive_steps": 292640,
+        "name": "segment_appends",
+        "self_steps": 250520
+      },
+      {
+        "calls": 2560,
+        "id": 79,
+        "inclusive_steps": 207360,
+        "name": "split_batches",
+        "self_steps": 207360
+      },
+      {
+        "calls": 2560,
+        "id": 100,
+        "inclusive_steps": 209920,
+        "name": "batch_error",
+        "self_steps": 158720
+      },
+      {
+        "calls": 5400,
+        "id": 134,
+        "inclusive_steps": 156600,
+        "name": "producers_in",
+        "self_steps": 156600
+      },
+      {
+        "calls": 4320,
+        "id": 135,
+        "inclusive_steps": 146880,
+        "name": "producer_batches",
+        "self_steps": 146880
+      },
+      {
+        "calls": 8960,
+        "id": 110,
+        "inclusive_steps": 142080,
+        "name": "seq_add",
+        "self_steps": 142080
+      },
+      {
+        "calls": 2560,
+        "id": 102,
+        "inclusive_steps": 1021440,
+        "name": "check_records",
+        "self_steps": 125440
+      },
+      {
+        "calls": 762,
+        "id": 271,
+        "inclusive_steps": 130214,
+        "name": "chained",
+        "self_steps": 105090
+      },
+      {
+        "calls": 4320,
+        "id": 126,
+        "inclusive_steps": 96534,
+        "name": "chunks_of",
+        "self_steps": 96534
+      },
+      {
+        "calls": 1280,
+        "id": 115,
+        "inclusive_steps": 135680,
+        "name": "producer_check",
+        "self_steps": 87040
+      },
+      {
+        "calls": 840,
+        "id": 278,
+        "inclusive_steps": 86520,
+        "name": "batch_end",
+        "self_steps": 86520
+      },
+      {
+        "calls": 8,
+        "id": 218,
+        "inclusive_steps": 77928,
+        "name": "last_per_partition",
+        "self_steps": 77928
+      },
+      {
+        "calls": 1280,
+        "id": 119,
+        "inclusive_steps": 433920,
+        "name": "walk_batch",
+        "self_steps": 74240
+      },
+      {
+        "calls": 5120,
+        "id": 96,
+        "inclusive_steps": 71680,
+        "name": "produce_request_error",
+        "self_steps": 71680
+      },
+      {
+        "calls": 6040,
+        "id": 1285,
+        "inclusive_steps": 66440,
+        "name": "format$left",
+        "self_steps": 66440
+      },
+      {
+        "calls": 8640,
+        "id": 117,
+        "inclusive_steps": 60480,
+        "name": "last_offset_of",
+        "self_steps": 60480
+      },
+      {
+        "calls": 1280,
+        "id": 120,
+        "inclusive_steps": 491520,
+        "name": "sequence_one",
+        "self_steps": 57600
+      },
+      {
+        "calls": 2456,
+        "id": 1292,
+        "inclusive_steps": 98240,
+        "name": "format$skip_tags",
+        "self_steps": 56488
+      }
+    ],
+    "plan_rules": 1741,
+    "physical_stores": 1332,
+    "declared_durable_main_operations": {},
+    "scoped_operations": {}
+  },
+  {
+    "window": "max-late-measured",
+    "ticks": 84,
+    "recorded_time_bounds_ns": [
+      1792088368316492733,
+      1792088373212225489
+    ],
+    "replay_ns": 1910117896,
+    "timing_ns": {
+      "engine_step": 1589218261,
+      "other": 196842712,
+      "prepare": 124056923
+    },
+    "rule_maintenance_ns": 1266320607,
+    "batches_inserted": 4000,
+    "work": {
+      "compiled_terms": 206619,
+      "evaluations": 14404,
+      "expression_steps": 8149432,
+      "probe_rows": 862051,
+      "support_writes": 582408
+    },
+    "operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 319,
+      "bulk_retracted_rows": 62685,
+      "membership_changes": 717421,
+      "probe_calls": 2076688,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 483473
+    },
+    "work_per_batch": {
+      "compiled_terms": 51.65475,
+      "evaluations": 3.601,
+      "expression_steps": 2037.358,
+      "probe_rows": 215.51275,
+      "support_writes": 145.602
+    },
+    "operations_per_batch": {
+      "batch_weight_updates": 0.0,
+      "bulk_index_clears": 0.07975,
+      "bulk_retracted_rows": 15.67125,
+      "membership_changes": 179.35525,
+      "probe_calls": 519.172,
+      "secondary_index_build_rows": 0.0,
+      "secondary_index_row_updates": 120.86825
+    },
+    "operators": {
+      "compiled-relational": {
+        "rules": 305,
+        "elapsed_ns": 188723877,
+        "support_writes": 109780,
+        "compiled_terms": 206260
+      },
+      "copy": {
+        "rules": 503,
+        "elapsed_ns": 131438493,
+        "support_writes": 171430,
+        "compiled_terms": 359
+      },
+      "generic-relational": {
+        "rules": 492,
+        "elapsed_ns": 600554993,
+        "support_writes": 209110,
+        "compiled_terms": 0
+      },
+      "virtual-frame": {
+        "rules": 65,
+        "elapsed_ns": 486979,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "native-upsert-delete": {
+        "rules": 48,
+        "elapsed_ns": 38648060,
+        "support_writes": 20754,
+        "compiled_terms": 0
+      },
+      "alias": {
+        "rules": 65,
+        "elapsed_ns": 498024,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "retained-map": {
+        "rules": 262,
+        "elapsed_ns": 305967676,
+        "support_writes": 71334,
+        "compiled_terms": 0
+      },
+      "fused-observation": {
+        "rules": 1,
+        "elapsed_ns": 2505,
+        "support_writes": 0,
+        "compiled_terms": 0
+      }
+    },
+    "boundary_rows": {
+      "deleted": {
+        "acked_at": 2120,
+        "answering": 72,
+        "applied_d": 1001,
+        "behind": 160,
+        "commit": 1001,
+        "committed": 120,
+        "frame_start": 72,
+        "heard_at": 2925,
+        "heard_commit": 721,
+        "log_end": 1000,
+        "match_idx": 640,
+        "materialize_to": 1001,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4000,
+        "queued": 72,
+        "quiesced": 321,
+        "quiet": 240,
+        "quorum_heard": 880,
+        "received": 80,
+        "repl_wait": 800,
+        "rsent": 1040,
+        "segment": 1000
+      },
+      "delivered": {
+        "ack": 4840,
+        "beat": 6206,
+        "entries": 881,
+        "quiesce": 321
+      },
+      "events": {
+        "broker": 252,
+        "cmd_resend": 10,
+        "fetch_wake": 396,
+        "kafka.data": 80,
+        "quorum_check": 16,
+        "raft_heartbeat": 98,
+        "raft_poll": 247
+      },
+      "host": {
+        "kafka.write": 72
+      },
+      "inserted": {
+        "acked_at": 2120,
+        "answering": 72,
+        "applied_d": 1001,
+        "batch": 4000,
+        "batch_chunk": 4224,
+        "behind": 160,
+        "commit": 1001,
+        "committed": 120,
+        "frame_start": 80,
+        "heard_at": 2925,
+        "heard_commit": 721,
+        "log_end": 1000,
+        "match_idx": 640,
+        "materialize_to": 1001,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4000,
+        "queued": 80,
+        "quiesced": 281,
+        "quiet": 240,
+        "quorum_heard": 880,
+        "received": 80,
+        "repl_wait": 800,
+        "rlog": 4164,
+        "rsent": 1040,
+        "segment": 1000,
+        "time_index": 883
+      },
+      "sent": {
+        "ack": 7047,
+        "beat": 3920,
+        "entries": 880,
+        "quiesce": 480
+      }
+    },
+    "top_rules": [
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "data_rlog:main"
+        ],
+        "elapsed_ns": 44225743,
+        "head": "data_entry:main",
+        "id": 1375,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-54",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "data_entry(tid, p, i, base, last, max_ts, h, data) :- data_rlog(tid, p, i, base, data), Variant<Option<BatchHeader>>#1(h) := batch_header(entry_bytes(data)), last := (base Add $as_i64(h.6)), max_ts := h.8.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 22,
+          "expression_steps": 815360,
+          "probe_rows": 0,
+          "support_writes": 4160
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "produce_entry:main",
+          "mtopic:main",
+          "topic_limits:main",
+          "led:main",
+          "isr_of:main",
+          "produce_started:main"
+        ],
+        "elapsed_ns": 40903724,
+        "head": "entry_check:main",
+        "id": 1384,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-168",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "entry_check(c, i, j, tid, p, o, checked) :- produce_entry(c, i, j, name, p, records, req, o), (produce_request_error(req) Eq (Option(None): Option<(i16, String)>)), mtopic(name, tid, parts, _cfg), topic_limits(tid, limits), led(tid, p, _), g := (Bytes, i32)(tid, p), isr_of(g, isr), (p Ge Int(I32(0))), (p Lt parts), checked := check_entry(records, req.1, limits, $len(isr)), (name Ne Str(\"__consumer_offsets\")), notin produce_started(c, i).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 17,
+          "expression_steps": 1218632,
+          "probe_rows": 12320,
+          "support_writes": 2720
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "out_end:main",
+          "out_rows:main"
+        ],
+        "elapsed_ns": 31780943,
+        "head": "out_batch$u:main",
+        "id": 1063,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-245",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_batch$u(g, f, from, _e, i, et, k, pos, data, b) :- out_end(g, f, from, _e), out_rows(g, f, from, i, et, k, pos, data), b := log_bytes(data).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 21,
+          "expression_steps": 60480,
+          "probe_rows": 3520,
+          "support_writes": 6720
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "applied_d:main",
+          "partition_commit:main",
+          "data_entry:main",
+          "installing:main"
+        ],
+        "elapsed_ns": 26883825,
+        "head": "pending_batch:main",
+        "id": 1450,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-451",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "pending_batch(tid, p, base, last, max_ts, blob) :- applied_d(tid, p, a), partition_commit(tid, p, c), data_entry(tid, p, i, base, last, max_ts, _h, blob), (i Gt a), (i Le c), notin installing(tid, p).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 43,
+          "expression_steps": 77928,
+          "probe_rows": 16404,
+          "support_writes": 8160
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "sequenced:main",
+          "led:main"
+        ],
+        "elapsed_ns": 25577902,
+        "head": "data_proposals:main",
+        "id": 1401,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-184",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "data_proposals(g, x) :- sequenced(tid, p, s), led(tid, p, epoch), g := (Bytes, i32)(tid, p), pb in placed_all(s), x := (u8, i64, Blob)(Int(U8(1)), pb.0, $lib_BlobOf(restamp(pb.3, pb.0, epoch))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 17,
+          "expression_steps": 87720,
+          "probe_rows": 2720,
+          "support_writes": 2720
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_materialize:main",
+          "producer:main"
+        ],
+        "elapsed_ns": 22923025,
+        "head": "materialized_producer:main",
+        "id": 1462,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-596",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "materialized_producer(tid, p, e) :- to_materialize(tid, p, xs), $contains(producers_in(xs), pid), producer(tid, p, pid, epoch, recent), Variant<Option<ProducerEntry>>#1(e) := tail_state(Option<ProducerEntry>#1(ProducerEntry(pid, epoch, recent)), producer_batches(xs, pid)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 41,
+          "expression_steps": 704000,
+          "probe_rows": 4000,
+          "support_writes": 8160
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_apply_d:main",
+          "data_entry:main"
+        ],
+        "elapsed_ns": 17391499,
+        "head": "to_materialize$u:main",
+        "id": 1458,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-592",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "to_materialize$u(tid, p, a, c, i, base, last, max_ts, h, data) :- to_apply_d(tid, p, a, c), data_entry(tid, p, i, base, last, max_ts, h, data), (i Gt a), (i Le c).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 47,
+          "expression_steps": 60084,
+          "probe_rows": 8640,
+          "support_writes": 8160
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "out_from:main",
+          "rlog:main",
+          "behind_snapshot:main"
+        ],
+        "elapsed_ns": 14727915,
+        "head": "out_sizes$u:main",
+        "id": 1056,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-239",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_sizes$u(g, f, from, i, data, n) :- out_from(g, f, from), rlog(g, i, _, _, _, _, data), n := $len(data), (i Gt from), (i Le (from Add Int(U64(64)))), notin behind_snapshot(g, from).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 30,
+          "expression_steps": 78081,
+          "probe_rows": 6720,
+          "support_writes": 6720
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "raft_poll:main",
+          "eff:main",
+          "mine:main",
+          "election_due:main",
+          "leader:main",
+          "granted_now:main",
+          "heard_leader:main",
+          "leader_alive:main",
+          "round_open:main"
+        ],
+        "elapsed_ns": 14524817,
+        "head": "timed_out:main",
+        "id": 1012,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-96",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "timed_out(g, t) :- raft_poll(_, _), eff(g, t), mine(g), election_due(g, d), ($Now Ge d), notin leader(g, t), notin granted_now(g), notin heard_leader(g), notin leader_alive(g), notin round_open(g).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 70,
+          "expression_steps": 67133,
+          "probe_rows": 44826,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "follow$in#67a0c5ac:main"
+        ],
+        "elapsed_ns": 13869464,
+        "head": "ack:async",
+        "id": 418,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Async",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "ack(@l, g, t, p, $0)@async :- follow$in#67a0c5ac(g, l, t, p, sent), $0 := Option<Instant>#1(sent).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 61,
+          "expression_steps": 24664,
+          "probe_rows": 0,
+          "support_writes": 12332
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "appends:main",
+          "tail_end:main",
+          "part_producers:main"
+        ],
+        "elapsed_ns": 13604954,
+        "head": "sequenced:main",
+        "id": 1398,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-183",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "sequenced(tid, p, s) :- appends(tid, p, xs), tail_end(tid, p, end), part_producers(tid, p, ps), s := sequence_appends(xs, end, ps).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 30,
+          "expression_steps": 527360,
+          "probe_rows": 960,
+          "support_writes": 680
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "placed:main",
+          "partition_commit:main",
+          "isr_lacks:main"
+        ],
+        "elapsed_ns": 13098001,
+        "head": "placed_done:main",
+        "id": 1418,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-424",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "placed_done(c, i, j) :- placed(c, i, j, tid, p, idx, _e, _b, _last, _s), partition_commit(tid, p, cm), g := (Bytes, i32)(tid, p), (cm Ge idx), notin isr_lacks(g, idx).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 32,
+          "expression_steps": 150966,
+          "probe_rows": 42906,
+          "support_writes": 2720
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "fetch_part:main",
+          "batch_chunk:main",
+          "batch:main",
+          "readable_batch:main"
+        ],
+        "elapsed_ns": 12737927,
+        "head": "fetch_first:main",
+        "id": 1493,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-457",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_first(c, j, base) :- fetch_part(c, j, tid, p, off, _pmax, end, _start), ch := (off Div Int(I64(256))), batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob), (off Lt end), (base Le off), (last Ge off), notin readable_batch(tid, p, off, _, _, _).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 47,
+          "expression_steps": 62524,
+          "probe_rows": 10000,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "to_materialize$u:main"
+        ],
+        "elapsed_ns": 12473549,
+        "head": "to_materialize:main",
+        "id": 1459,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-593",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "to_materialize(tid, p, CollectVec<$0, tid, p, a, c, i, base, last, max_ts, h, data>) :- to_materialize$u(tid, p, a, c, i, base, last, max_ts, h, data), $0 := (u64, i64, i64, i64, Blob, BatchHeader)(i, base, last, max_ts, data, h).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 41,
+          "expression_steps": 57120,
+          "probe_rows": 0,
+          "support_writes": 2040
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "out_end:main",
+          "rlog:main"
+        ],
+        "elapsed_ns": 12114933,
+        "head": "out_rows:main",
+        "id": 1062,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-244",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_rows(g, f, from, i, et, k, pos, data) :- out_end(g, f, from, e), rlog(g, i, et, _pt, k, pos, data), (i Gt from), (i Le e).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 30,
+          "expression_steps": 47841,
+          "probe_rows": 6720,
+          "support_writes": 6720
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "beat:sent",
+          "eff:main",
+          "takes:main",
+          "rlog:main"
+        ],
+        "elapsed_ns": 11868288,
+        "head": "beat_ok:main",
+        "id": 1133,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-35",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "beat_ok(g, l, t, p, c, sent) :- beat(g, t, p, pt, c, sent, _u | l), eff(g, t), takes(g), rlog(g, p, pt, _, _, _, _).",
+        "work": {
+          "compiled_terms": 46,
+          "evaluations": 46,
+          "expression_steps": 0,
+          "probe_rows": 21274,
+          "support_writes": 6206
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "deadline:main",
+          "last_heard:main",
+          "election_span:main"
+        ],
+        "elapsed_ns": 11108629,
+        "head": "election_due:main",
+        "id": 1010,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-74",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "election_due(g, d) :- deadline(g, d0), last_heard(g, h), election_span(g, s), d := if ((h Add s) Gt d0) then (h Add s) else d0.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 50,
+          "expression_steps": 51930,
+          "probe_rows": 11540,
+          "support_writes": 5770
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "raft_heartbeat:main",
+          "leader:main",
+          "match_idx:main",
+          "term_at:main",
+          "commit_of:main",
+          "rsent:main",
+          "idle:main"
+        ],
+        "elapsed_ns": 10978451,
+        "head": "beat_followers$when:main",
+        "id": 306,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-1093",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "beat_followers$when(g, t, f, m, mt, c, s) :- raft_heartbeat(_, _), leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c), rsent(g, f, s), notin idle(g, t).",
+        "work": {
+          "compiled_terms": 55,
+          "evaluations": 55,
+          "expression_steps": 0,
+          "probe_rows": 31444,
+          "support_writes": 3920
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "producer$ups:main",
+          "producer:main"
+        ],
+        "elapsed_ns": 10736977,
+        "head": "producer$del:main",
+        "id": 809,
+        "operator": "native-upsert-delete",
+        "parallel_eligible": true,
+        "phase": "stratum-1004",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "producer$del($0, $1, $2, $3, $4) :- producer$ups($0, $1, $2, _, _), producer($0, $1, $2, $3, $4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 41,
+          "expression_steps": 0,
+          "probe_rows": 8160,
+          "support_writes": 8160
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "out_batch$u:main"
+        ],
+        "elapsed_ns": 10191791,
+        "head": "out_batch$a:main",
+        "id": 1064,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-246",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_batch$a(g, f, from, CollectVec<$0, g, f, from, _e, i, et, k, pos, data, b>) :- out_batch$u(g, f, from, _e, i, et, k, pos, data, b), $0 := (u64, u64, u8, i64, Bytes)(i, et, k, pos, b).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 21,
+          "expression_steps": 40320,
+          "probe_rows": 0,
+          "support_writes": 1680
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "rlog:main"
+        ],
+        "elapsed_ns": 9917515,
+        "head": "term_at:main",
+        "id": 1045,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-231",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "term_at(g, i, it) :- rlog(g, i, it, _, _, _, _).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 22,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 4161
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "out_sizes$u:main"
+        ],
+        "elapsed_ns": 9718202,
+        "head": "out_sizes$a:main",
+        "id": 1057,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-240",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_sizes$a(g, f, from, CollectVec<$0, g, f, from, i, data, n>) :- out_sizes$u(g, f, from, i, data, n), $0 := (u64, u64)(i, n).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 21,
+          "expression_steps": 20160,
+          "probe_rows": 0,
+          "support_writes": 1680
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "to_materialize:main"
+        ],
+        "elapsed_ns": 9175125,
+        "head": "index_chunks$when:main",
+        "id": 796,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-1121",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "index_chunks$when(tid, p, x, ch) :- to_materialize(tid, p, xs), x in xs, ch in chunks_of(x.1, x.2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 41,
+          "expression_steps": 94344,
+          "probe_rows": 0,
+          "support_writes": 8609
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "fetch_entry:main",
+          "topic_by_id:main",
+          "led:main",
+          "high_watermark:main",
+          "log_start:main",
+          "tail_end:main"
+        ],
+        "elapsed_ns": 8775693,
+        "head": "fetch_part:main",
+        "id": 1491,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-455",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_part(c, j, tid, p, off, pmax, end, start) :- fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), p := fp.0, (p Ge Int(I32(0))), (p Lt parts), led(tid, p, epoch), (leader_epoch_error(fp.1, epoch) Eq (Option(None): Option<i16>)), high_watermark(tid, p, end), log_start(tid, p, start), tail_end(tid, p, leo), off := fp.2, (off Ge start), (off Le leo), pmax := $as_i64(fp.3).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 47,
+          "expression_steps": 78040,
+          "probe_rows": 14840,
+          "support_writes": 1480
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "append_producer:main",
+          "data_entry:main",
+          "applied_d:main"
+        ],
+        "elapsed_ns": 8534601,
+        "head": "tail_batches$u:main",
+        "id": 1388,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-176",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "tail_batches$u(tid, p, pid, i, base, last, h, a) :- append_producer(tid, p, pid), data_entry(tid, p, i, base, last, _, h, _), applied_d(tid, p, a), (i Gt a), (h.9 Eq pid).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 40,
+          "expression_steps": 61600,
+          "probe_rows": 11680,
+          "support_writes": 1440
+        }
+      }
+    ],
+    "top_functions": [
+      {
+        "calls": 6880,
+        "id": 505,
+        "inclusive_steps": 1204000,
+        "name": "BatchHeader::decode",
+        "self_steps": 1204000
+      },
+      {
+        "calls": 5920,
+        "id": 118,
+        "inclusive_steps": 584000,
+        "name": "after_append",
+        "self_steps": 489280
+      },
+      {
+        "calls": 1000,
+        "id": 127,
+        "inclusive_steps": 271064,
+        "name": "segment_appends",
+        "self_steps": 232064
+      },
+      {
+        "calls": 2720,
+        "id": 79,
+        "inclusive_steps": 220320,
+        "name": "split_batches",
+        "self_steps": 220320
+      },
+      {
+        "calls": 2720,
+        "id": 100,
+        "inclusive_steps": 223040,
+        "name": "batch_error",
+        "self_steps": 168640
+      },
+      {
+        "calls": 5000,
+        "id": 134,
+        "inclusive_steps": 145000,
+        "name": "producers_in",
+        "self_steps": 145000
+      },
+      {
+        "calls": 4000,
+        "id": 135,
+        "inclusive_steps": 136000,
+        "name": "producer_batches",
+        "self_steps": 136000
+      },
+      {
+        "calls": 8480,
+        "id": 110,
+        "inclusive_steps": 134400,
+        "name": "seq_add",
+        "self_steps": 134400
+      },
+      {
+        "calls": 2720,
+        "id": 102,
+        "inclusive_steps": 1085280,
+        "name": "check_records",
+        "self_steps": 133280
+      },
+      {
+        "calls": 721,
+        "id": 271,
+        "inclusive_steps": 123291,
+        "name": "chained",
+        "self_steps": 99498
+      },
+      {
+        "calls": 880,
+        "id": 278,
+        "inclusive_steps": 90640,
+        "name": "batch_end",
+        "self_steps": 90640
+      },
+      {
+        "calls": 4000,
+        "id": 126,
+        "inclusive_steps": 89344,
+        "name": "chunks_of",
+        "self_steps": 89344
+      },
+      {
+        "calls": 1280,
+        "id": 115,
+        "inclusive_steps": 135680,
+        "name": "producer_check",
+        "self_steps": 87040
+      },
+      {
+        "calls": 8,
+        "id": 218,
+        "inclusive_steps": 77928,
+        "name": "last_per_partition",
+        "self_steps": 77928
+      },
+      {
+        "calls": 5440,
+        "id": 96,
+        "inclusive_steps": 76160,
+        "name": "produce_request_error",
+        "self_steps": 76160
+      },
+      {
+        "calls": 1280,
+        "id": 119,
+        "inclusive_steps": 433920,
+        "name": "walk_batch",
+        "self_steps": 74240
+      },
+      {
+        "calls": 6408,
+        "id": 1285,
+        "inclusive_steps": 70488,
+        "name": "format$left",
+        "self_steps": 70488
+      },
+      {
+        "calls": 2632,
+        "id": 1292,
+        "inclusive_steps": 105280,
+        "name": "format$skip_tags",
+        "self_steps": 60536
+      },
+      {
+        "calls": 8320,
+        "id": 117,
+        "inclusive_steps": 58240,
+        "name": "last_offset_of",
+        "self_steps": 58240
+      },
+      {
+        "calls": 1280,
+        "id": 120,
+        "inclusive_steps": 491520,
+        "name": "sequence_one",
+        "self_steps": 57600
+      }
+    ],
+    "plan_rules": 1741,
+    "physical_stores": 1332,
+    "declared_durable_main_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 0,
+      "bulk_retracted_rows": 0,
+      "membership_changes": 28428,
+      "probe_calls": 342650,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 64741
+    },
+    "scoped_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 319,
+      "bulk_retracted_rows": 62685,
+      "membership_changes": 126113,
+      "probe_calls": 91076,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 20822
+    }
+  },
+  {
+    "window": "max-late-plain",
+    "ticks": 84,
+    "recorded_time_bounds_ns": [
+      1792088368316492733,
+      1792088373212225489
+    ],
+    "replay_ns": 1880395699,
+    "timing_ns": {
+      "engine_step": 1560905695,
+      "other": 195599537,
+      "prepare": 123890467
+    },
+    "rule_maintenance_ns": 0,
+    "batches_inserted": 4000,
+    "work": {
+      "compiled_terms": 206619,
+      "evaluations": 14404,
+      "expression_steps": 8149432,
+      "probe_rows": 862051,
+      "support_writes": 582408
+    },
+    "operations": {},
+    "work_per_batch": {
+      "compiled_terms": 51.65475,
+      "evaluations": 3.601,
+      "expression_steps": 2037.358,
+      "probe_rows": 215.51275,
+      "support_writes": 145.602
+    },
+    "operations_per_batch": {},
+    "operators": {
+      "compiled-relational": {
+        "rules": 305,
+        "elapsed_ns": 0,
+        "support_writes": 109780,
+        "compiled_terms": 206260
+      },
+      "copy": {
+        "rules": 503,
+        "elapsed_ns": 0,
+        "support_writes": 171430,
+        "compiled_terms": 359
+      },
+      "generic-relational": {
+        "rules": 492,
+        "elapsed_ns": 0,
+        "support_writes": 209110,
+        "compiled_terms": 0
+      },
+      "virtual-frame": {
+        "rules": 65,
+        "elapsed_ns": 0,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "native-upsert-delete": {
+        "rules": 48,
+        "elapsed_ns": 0,
+        "support_writes": 20754,
+        "compiled_terms": 0
+      },
+      "alias": {
+        "rules": 65,
+        "elapsed_ns": 0,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "retained-map": {
+        "rules": 262,
+        "elapsed_ns": 0,
+        "support_writes": 71334,
+        "compiled_terms": 0
+      },
+      "fused-observation": {
+        "rules": 1,
+        "elapsed_ns": 0,
+        "support_writes": 0,
+        "compiled_terms": 0
+      }
+    },
+    "boundary_rows": {
+      "deleted": {
+        "acked_at": 2120,
+        "answering": 72,
+        "applied_d": 1001,
+        "behind": 160,
+        "commit": 1001,
+        "committed": 120,
+        "frame_start": 72,
+        "heard_at": 2925,
+        "heard_commit": 721,
+        "log_end": 1000,
+        "match_idx": 640,
+        "materialize_to": 1001,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4000,
+        "queued": 72,
+        "quiesced": 321,
+        "quiet": 240,
+        "quorum_heard": 880,
+        "received": 80,
+        "repl_wait": 800,
+        "rsent": 1040,
+        "segment": 1000
+      },
+      "delivered": {
+        "ack": 4840,
+        "beat": 6206,
+        "entries": 881,
+        "quiesce": 321
+      },
+      "events": {
+        "broker": 252,
+        "cmd_resend": 10,
+        "fetch_wake": 396,
+        "kafka.data": 80,
+        "quorum_check": 16,
+        "raft_heartbeat": 98,
+        "raft_poll": 247
+      },
+      "host": {
+        "kafka.write": 72
+      },
+      "inserted": {
+        "acked_at": 2120,
+        "answering": 72,
+        "applied_d": 1001,
+        "batch": 4000,
+        "batch_chunk": 4224,
+        "behind": 160,
+        "commit": 1001,
+        "committed": 120,
+        "frame_start": 80,
+        "heard_at": 2925,
+        "heard_commit": 721,
+        "log_end": 1000,
+        "match_idx": 640,
+        "materialize_to": 1001,
+        "placed": 1280,
+        "produce_reply": 1280,
+        "produce_started": 32,
+        "producer": 4000,
+        "queued": 80,
+        "quiesced": 281,
+        "quiet": 240,
+        "quorum_heard": 880,
+        "received": 80,
+        "repl_wait": 800,
+        "rlog": 4164,
+        "rsent": 1040,
+        "segment": 1000,
+        "time_index": 883
+      },
+      "sent": {
+        "ack": 7047,
+        "beat": 3920,
+        "entries": 880,
+        "quiesce": 480
+      }
+    },
+    "top_rules": [
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "rterm:main",
+          "rterm$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$cand:main",
+        "id": 0,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-636",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$cand(X0, X1) :- rterm(X0, X1), notin rterm$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "rterm$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$cand:main",
+        "id": 1,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-636",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$cand(X0, X1) :- rterm$n(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rterm$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$ext:main",
+        "id": 2,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-637",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$ext(X0, Max<X1>) :- rterm$cand(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rterm$cand:main",
+          "rterm$ext:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm$pmin:main",
+        "id": 3,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-638",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm$pmin(X0, Min<P>) :- rterm$cand(X0, X1), rterm$ext(X0, X1), P := $prio<rterm::resolve>(((Bytes, i32))(X0), (u64)(X1)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rterm$cand:main",
+          "rterm$ext:main",
+          "rterm$pmin:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rterm:next",
+        "id": 4,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rterm(X0, X1)@next :- rterm$cand(X0, X1), rterm$ext(X0, X1), rterm$pmin(X0, P), (P Eq $prio<rterm::resolve>(((Bytes, i32))(X0), (u64)(X1))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rvote:main",
+          "rvote$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rvote:next",
+        "id": 5,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rvote(X0, X1, X2)@next :- rvote(X0, X1, X2), notin rvote$del(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rlog:main",
+          "rlog$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rlog:next",
+        "id": 6,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rlog(X0, X1, X2, X3, X4, X5, X6)@next :- rlog(X0, X1, X2, X3, X4, X5, X6), notin rlog$del(X0, X1, X2, X3, X4, X5, X6).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "rsnap:main",
+          "rsnap$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$cand:main",
+        "id": 7,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-653",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$cand(X0, X1, X2, X3, X4) :- rsnap(X0, X1, X2, X3, X4), notin rsnap$del(X0, X1, X2, X3, X4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "rsnap$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$cand:main",
+        "id": 8,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-653",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$cand(X0, X1, X2, X3, X4) :- rsnap$n(X0, X1, X2, X3, X4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rsnap$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$ext:main",
+        "id": 9,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-654",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$ext(X0, Max<X1>) :- rsnap$cand(X0, X1, X2, X3, X4).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "rsnap$cand:main",
+          "rsnap$ext:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap$pmin:main",
+        "id": 10,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-655",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap$pmin(X0, Min<P>) :- rsnap$cand(X0, X1, X2, X3, X4), rsnap$ext(X0, X1), P := $prio<rsnap::resolve>(((Bytes, i32))(X0), (u64, u64, i64, Vec<i32>)(X1, X2, X3, X4)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "rsnap$cand:main",
+          "rsnap$ext:main",
+          "rsnap$pmin:main"
+        ],
+        "elapsed_ns": null,
+        "head": "rsnap:next",
+        "id": 11,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "rsnap(X0, X1, X2, X3, X4)@next :- rsnap$cand(X0, X1, X2, X3, X4), rsnap$ext(X0, X1), rsnap$pmin(X0, P), (P Eq $prio<rsnap::resolve>(((Bytes, i32))(X0), (u64, u64, i64, Vec<i32>)(X1, X2, X3, X4))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "won:main",
+          "won$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "won:next",
+        "id": 12,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "won(X0, X1)@next :- won(X0, X1), notin won$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "leader_of:main",
+          "leader_of$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "leader_of:next",
+        "id": 13,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "leader_of(X0, X1, X2)@next :- leader_of(X0, X1, X2), notin leader_of$del(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "voters:main",
+          "voters$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "voters:next",
+        "id": 14,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "voters(X0, X1, X2)@next :- voters(X0, X1, X2), notin voters$del(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "deadline:main",
+          "deadline$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "deadline:next",
+        "id": 15,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "deadline(X0, X1)@next :- deadline(X0, X1), notin deadline$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "election_span:main",
+          "election_span$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "election_span:next",
+        "id": 16,
+        "operator": "virtual-frame",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "election_span(X0, X1)@next :- election_span(X0, X1), notin election_span$del(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 0,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "commit:main",
+          "commit$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$cand:main",
+        "id": 17,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-686",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$cand(X0, X1) :- commit(X0, X1), notin commit$del(X0, X1).",
+        "work": {
+          "compiled_terms": 2002,
+          "evaluations": 21,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 2002
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "commit$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$cand:main",
+        "id": 18,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-686",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$cand(X0, X1) :- commit$n(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 55,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 3610
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "commit$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$ext:main",
+        "id": 19,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-687",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$ext(X0, Max<X1>) :- commit$cand(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 40,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 2002
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "commit$cand:main",
+          "commit$ext:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit$pmin:main",
+        "id": 20,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-688",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit$pmin(X0, Min<P>) :- commit$cand(X0, X1), commit$ext(X0, X1), P := $prio<commit::resolve>(((Bytes, i32))(X0), (u64)(X1)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 40,
+          "expression_steps": 20030,
+          "probe_rows": 2002,
+          "support_writes": 2002
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state"
+        ],
+        "dependencies": [
+          "commit$cand:main",
+          "commit$ext:main",
+          "commit$pmin:main"
+        ],
+        "elapsed_ns": null,
+        "head": "commit:next",
+        "id": 21,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "Inductive",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "commit(X0, X1)@next :- commit$cand(X0, X1), commit$ext(X0, X1), commit$pmin(X0, P), (P Eq $prio<commit::resolve>(((Bytes, i32))(X0), (u64)(X1))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 40,
+          "expression_steps": 42056,
+          "probe_rows": 9011,
+          "support_writes": 2002
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "heard_commit:main",
+          "heard_commit$del:main"
+        ],
+        "elapsed_ns": null,
+        "head": "heard_commit$cand:main",
+        "id": 22,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-694",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "heard_commit$cand(X0, X1) :- heard_commit(X0, X1), notin heard_commit$del(X0, X1).",
+        "work": {
+          "compiled_terms": 1362,
+          "evaluations": 16,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 1362
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "heard_commit$n:main"
+        ],
+        "elapsed_ns": null,
+        "head": "heard_commit$cand:main",
+        "id": 23,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-694",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "heard_commit$cand(X0, X1) :- heard_commit$n(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 52,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 3008
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "heard_commit$cand:main"
+        ],
+        "elapsed_ns": null,
+        "head": "heard_commit$ext:main",
+        "id": 24,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-695",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "heard_commit$ext(X0, Max<X1>) :- heard_commit$cand(X0, X1).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 31,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 1442
+        }
+      }
+    ],
+    "top_functions": [
+      {
+        "calls": 6880,
+        "id": 505,
+        "inclusive_steps": 1204000,
+        "name": "BatchHeader::decode",
+        "self_steps": 1204000
+      },
+      {
+        "calls": 5920,
+        "id": 118,
+        "inclusive_steps": 584000,
+        "name": "after_append",
+        "self_steps": 489280
+      },
+      {
+        "calls": 1000,
+        "id": 127,
+        "inclusive_steps": 271064,
+        "name": "segment_appends",
+        "self_steps": 232064
+      },
+      {
+        "calls": 2720,
+        "id": 79,
+        "inclusive_steps": 220320,
+        "name": "split_batches",
+        "self_steps": 220320
+      },
+      {
+        "calls": 2720,
+        "id": 100,
+        "inclusive_steps": 223040,
+        "name": "batch_error",
+        "self_steps": 168640
+      },
+      {
+        "calls": 5000,
+        "id": 134,
+        "inclusive_steps": 145000,
+        "name": "producers_in",
+        "self_steps": 145000
+      },
+      {
+        "calls": 4000,
+        "id": 135,
+        "inclusive_steps": 136000,
+        "name": "producer_batches",
+        "self_steps": 136000
+      },
+      {
+        "calls": 8480,
+        "id": 110,
+        "inclusive_steps": 134400,
+        "name": "seq_add",
+        "self_steps": 134400
+      },
+      {
+        "calls": 2720,
+        "id": 102,
+        "inclusive_steps": 1085280,
+        "name": "check_records",
+        "self_steps": 133280
+      },
+      {
+        "calls": 721,
+        "id": 271,
+        "inclusive_steps": 123291,
+        "name": "chained",
+        "self_steps": 99498
+      },
+      {
+        "calls": 880,
+        "id": 278,
+        "inclusive_steps": 90640,
+        "name": "batch_end",
+        "self_steps": 90640
+      },
+      {
+        "calls": 4000,
+        "id": 126,
+        "inclusive_steps": 89344,
+        "name": "chunks_of",
+        "self_steps": 89344
+      },
+      {
+        "calls": 1280,
+        "id": 115,
+        "inclusive_steps": 135680,
+        "name": "producer_check",
+        "self_steps": 87040
+      },
+      {
+        "calls": 8,
+        "id": 218,
+        "inclusive_steps": 77928,
+        "name": "last_per_partition",
+        "self_steps": 77928
+      },
+      {
+        "calls": 5440,
+        "id": 96,
+        "inclusive_steps": 76160,
+        "name": "produce_request_error",
+        "self_steps": 76160
+      },
+      {
+        "calls": 1280,
+        "id": 119,
+        "inclusive_steps": 433920,
+        "name": "walk_batch",
+        "self_steps": 74240
+      },
+      {
+        "calls": 6408,
+        "id": 1285,
+        "inclusive_steps": 70488,
+        "name": "format$left",
+        "self_steps": 70488
+      },
+      {
+        "calls": 2632,
+        "id": 1292,
+        "inclusive_steps": 105280,
+        "name": "format$skip_tags",
+        "self_steps": 60536
+      },
+      {
+        "calls": 8320,
+        "id": 117,
+        "inclusive_steps": 58240,
+        "name": "last_offset_of",
+        "self_steps": 58240
+      },
+      {
+        "calls": 1280,
+        "id": 120,
+        "inclusive_steps": 491520,
+        "name": "sequence_one",
+        "self_steps": 57600
+      }
+    ],
+    "plan_rules": 1741,
+    "physical_stores": 1332,
+    "declared_durable_main_operations": {},
+    "scoped_operations": {}
+  },
+  {
+    "window": "recovery-measured",
+    "ticks": 735,
+    "recorded_time_bounds_ns": [
+      1792088439094718174,
+      1792088444083701206
+    ],
+    "replay_ns": 5300068199,
+    "timing_ns": {
+      "engine_step": 1568997857,
+      "other": 1920546230,
+      "prepare": 1810524112
+    },
+    "rule_maintenance_ns": 1172124045,
+    "batches_inserted": 686,
+    "work": {
+      "compiled_terms": 182853,
+      "evaluations": 42874,
+      "expression_steps": 4713572,
+      "probe_rows": 846915,
+      "support_writes": 435837
+    },
+    "operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 871,
+      "bulk_retracted_rows": 69957,
+      "membership_changes": 597399,
+      "probe_calls": 1496039,
+      "secondary_index_build_rows": 289,
+      "secondary_index_row_updates": 468781
+    },
+    "work_per_batch": {
+      "compiled_terms": 266.54956268221576,
+      "evaluations": 62.498542274052475,
+      "expression_steps": 6871.096209912536,
+      "probe_rows": 1234.569970845481,
+      "support_writes": 635.3309037900875
+    },
+    "operations_per_batch": {
+      "batch_weight_updates": 0.0,
+      "bulk_index_clears": 1.2696793002915452,
+      "bulk_retracted_rows": 101.97813411078717,
+      "membership_changes": 870.8440233236151,
+      "probe_calls": 2180.814868804665,
+      "secondary_index_build_rows": 0.42128279883381925,
+      "secondary_index_row_updates": 683.3542274052478
+    },
+    "operators": {
+      "compiled-relational": {
+        "rules": 305,
+        "elapsed_ns": 210080881,
+        "support_writes": 93603,
+        "compiled_terms": 181986
+      },
+      "copy": {
+        "rules": 503,
+        "elapsed_ns": 131319635,
+        "support_writes": 131581,
+        "compiled_terms": 867
+      },
+      "generic-relational": {
+        "rules": 492,
+        "elapsed_ns": 561905728,
+        "support_writes": 150688,
+        "compiled_terms": 0
+      },
+      "virtual-frame": {
+        "rules": 65,
+        "elapsed_ns": 2854828,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "native-upsert-delete": {
+        "rules": 48,
+        "elapsed_ns": 36575412,
+        "support_writes": 19719,
+        "compiled_terms": 0
+      },
+      "alias": {
+        "rules": 65,
+        "elapsed_ns": 2709664,
+        "support_writes": 0,
+        "compiled_terms": 0
+      },
+      "retained-map": {
+        "rules": 262,
+        "elapsed_ns": 226657061,
+        "support_writes": 40246,
+        "compiled_terms": 0
+      },
+      "fused-observation": {
+        "rules": 1,
+        "elapsed_ns": 20836,
+        "support_writes": 0,
+        "compiled_terms": 0
+      }
+    },
+    "boundary_rows": {
+      "deleted": {
+        "acked_at": 5064,
+        "answering": 122,
+        "applied_d": 579,
+        "behind": 261,
+        "cgroup": 8,
+        "commit": 643,
+        "commit_decided": 4,
+        "commit_placed": 4,
+        "committed": 120,
+        "frame_start": 116,
+        "heard_at": 3215,
+        "heard_commit": 361,
+        "log_end": 578,
+        "match_idx": 747,
+        "materialize_to": 616,
+        "placed": 352,
+        "produce_reply": 352,
+        "produce_started": 31,
+        "producer": 686,
+        "queued": 112,
+        "quiesced": 120,
+        "quiet": 101,
+        "quorum_heard": 1271,
+        "received": 116,
+        "repl_wait": 910,
+        "rsent": 1062,
+        "segment": 578
+      },
+      "delivered": {
+        "ack": 21011,
+        "beat": 3295,
+        "entries": 506,
+        "leads_taken": 26,
+        "missed": 2158,
+        "pre_vote": 12,
+        "pre_vote_reply": 115,
+        "quiesce": 163,
+        "vote": 72
+      },
+      "events": {
+        "broker": 2205,
+        "cmd_resend": 10,
+        "fetch_wake": 457,
+        "kafka.data": 116,
+        "quorum_check": 17,
+        "raft_heartbeat": 100,
+        "raft_poll": 250
+      },
+      "host": {
+        "kafka.write": 122
+      },
+      "inserted": {
+        "acked_at": 5079,
+        "answering": 122,
+        "applied_d": 579,
+        "batch": 686,
+        "batch_chunk": 715,
+        "behind": 206,
+        "cgroup": 8,
+        "commit": 643,
+        "commit_decided": 4,
+        "commit_placed": 4,
+        "committed": 120,
+        "frame_start": 116,
+        "heard_at": 3215,
+        "heard_commit": 361,
+        "log_end": 578,
+        "match_idx": 747,
+        "materialize_to": 616,
+        "placed": 388,
+        "produce_reply": 388,
+        "produce_started": 31,
+        "producer": 686,
+        "queued": 106,
+        "quiesced": 163,
+        "quiet": 147,
+        "quorum_heard": 1292,
+        "received": 116,
+        "repl_wait": 910,
+        "rlog": 852,
+        "rsent": 1062,
+        "segment": 578,
+        "time_index": 479,
+        "told": 72,
+        "voters": 15
+      },
+      "sent": {
+        "ack": 3727,
+        "beat": 6240,
+        "entries": 899,
+        "leads": 27,
+        "missed": 252,
+        "pre_vote_reply": 12,
+        "quiesce": 294
+      }
+    },
+    "top_rules": [
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "out_end:main",
+          "out_rows:main"
+        ],
+        "elapsed_ns": 63379571,
+        "head": "out_batch$u:main",
+        "id": 1063,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-245",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_batch$u(g, f, from, _e, i, et, k, pos, data, b) :- out_end(g, f, from, _e), out_rows(g, f, from, i, et, k, pos, data), b := log_bytes(data).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 90,
+          "expression_steps": 128502,
+          "probe_rows": 7139,
+          "support_writes": 14278
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "out_from:main",
+          "rlog:main",
+          "behind_snapshot:main"
+        ],
+        "elapsed_ns": 32399586,
+        "head": "out_sizes$u:main",
+        "id": 1056,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-239",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_sizes$u(g, f, from, i, data, n) :- out_from(g, f, from), rlog(g, i, _, _, _, _, data), n := $len(data), (i Gt from), (i Le (from Add Int(U64(64)))), notin behind_snapshot(g, from).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 95,
+          "expression_steps": 150824,
+          "probe_rows": 14278,
+          "support_writes": 14278
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "raft_poll:main",
+          "eff:main",
+          "mine:main",
+          "election_due:main",
+          "leader:main",
+          "granted_now:main",
+          "heard_leader:main",
+          "leader_alive:main",
+          "round_open:main"
+        ],
+        "elapsed_ns": 29733719,
+        "head": "timed_out:main",
+        "id": 1012,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-96",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "timed_out(g, t) :- raft_poll(_, _), eff(g, t), mine(g), election_due(g, d), ($Now Ge d), notin leader(g, t), notin granted_now(g), notin heard_leader(g), notin leader_alive(g), notin round_open(g).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 210,
+          "expression_steps": 90628,
+          "probe_rows": 60502,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "out_end:main",
+          "rlog:main"
+        ],
+        "elapsed_ns": 27858139,
+        "head": "out_rows:main",
+        "id": 1062,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-244",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_rows(g, f, from, i, et, k, pos, data) :- out_end(g, f, from, e), rlog(g, i, et, _pt, k, pos, data), (i Gt from), (i Le e).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 95,
+          "expression_steps": 90116,
+          "probe_rows": 14278,
+          "support_writes": 14278
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "ack:sent",
+          "leader:main"
+        ],
+        "elapsed_ns": 21976378,
+        "head": "heard_now:main",
+        "id": 1079,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-257",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "heard_now(g, f) :- ack(g, t, _, _ | f), leader(g, t).",
+        "work": {
+          "compiled_terms": 41873,
+          "evaluations": 257,
+          "expression_steps": 0,
+          "probe_rows": 41873,
+          "support_writes": 9195
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "out_batch$u:main"
+        ],
+        "elapsed_ns": 21896200,
+        "head": "out_batch$a:main",
+        "id": 1064,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-246",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_batch$a(g, f, from, CollectVec<$0, g, f, from, _e, i, et, k, pos, data, b>) :- out_batch$u(g, f, from, _e, i, et, k, pos, data, b), $0 := (u64, u64, u8, i64, Bytes)(i, et, k, pos, b).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 90,
+          "expression_steps": 85668,
+          "probe_rows": 0,
+          "support_writes": 1798
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "out_sizes$u:main"
+        ],
+        "elapsed_ns": 21008772,
+        "head": "out_sizes$a:main",
+        "id": 1057,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-240",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "out_sizes$a(g, f, from, CollectVec<$0, g, f, from, i, data, n>) :- out_sizes$u(g, f, from, i, data, n), $0 := (u64, u64)(i, n).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 90,
+          "expression_steps": 42834,
+          "probe_rows": 0,
+          "support_writes": 1798
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "fetch_part:main",
+          "batch_chunk:main",
+          "batch:main",
+          "readable_batch:main"
+        ],
+        "elapsed_ns": 20564255,
+        "head": "fetch_first:main",
+        "id": 1493,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-457",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_first(c, j, base) :- fetch_part(c, j, tid, p, off, _pmax, end, _start), ch := (off Div Int(I64(256))), batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob), (off Lt end), (base Le off), (last Ge off), notin readable_batch(tid, p, off, _, _, _).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 74,
+          "expression_steps": 114843,
+          "probe_rows": 25695,
+          "support_writes": 0
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "raft_heartbeat:main",
+          "leader:main",
+          "match_idx:main",
+          "term_at:main",
+          "commit_of:main",
+          "rsent:main",
+          "idle:main"
+        ],
+        "elapsed_ns": 17197643,
+        "head": "beat_followers$when:main",
+        "id": 306,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-1093",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "beat_followers$when(g, t, f, m, mt, c, s) :- raft_heartbeat(_, _), leader(g, t), match_idx(g, f, m), term_at(g, m, mt), commit_of(g, c), rsent(g, f, s), notin idle(g, t).",
+        "work": {
+          "compiled_terms": 96,
+          "evaluations": 96,
+          "expression_steps": 0,
+          "probe_rows": 30323,
+          "support_writes": 6240
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies",
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "leader:main",
+          "rsent:main",
+          "match_idx:main",
+          "repl_wait:main",
+          "acked_new:main",
+          "missed_now:main"
+        ],
+        "elapsed_ns": 16909996,
+        "head": "stalled:main",
+        "id": 1052,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-235",
+        "recursive": false,
+        "regime": "Recompute",
+        "text": "stalled(g, f) :- leader(g, _), rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, at, w, _b), (m Lt s), ($Now Ge (at Add w)), notin acked_new(g, f), notin missed_now(g, f).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 134,
+          "expression_steps": 50223,
+          "probe_rows": 36861,
+          "support_writes": 398
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "data_rlog:main"
+        ],
+        "elapsed_ns": 14066840,
+        "head": "data_entry:main",
+        "id": 1375,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-54",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "data_entry(tid, p, i, base, last, max_ts, h, data) :- data_rlog(tid, p, i, base, data), Variant<Option<BatchHeader>>#1(h) := batch_header(entry_bytes(data)), last := (base Add $as_i64(h.6)), max_ts := h.8.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 31,
+          "expression_steps": 166208,
+          "probe_rows": 0,
+          "support_writes": 848
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "acked_at$ups:main",
+          "acked_at:main"
+        ],
+        "elapsed_ns": 14038857,
+        "head": "acked_at$del:main",
+        "id": 340,
+        "operator": "native-upsert-delete",
+        "parallel_eligible": true,
+        "phase": "stratum-789",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "acked_at$del($0, $1, $2) :- acked_at$ups($0, $1, _), acked_at($0, $1, $2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 257,
+          "expression_steps": 0,
+          "probe_rows": 11450,
+          "support_writes": 10090
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "deadline:main",
+          "last_heard:main",
+          "election_span:main"
+        ],
+        "elapsed_ns": 13692495,
+        "head": "election_due:main",
+        "id": 1010,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-74",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "election_due(g, d) :- deadline(g, d0), last_heard(g, h), election_span(g, s), d := if ((h Add s) Gt d0) then (h Add s) else d0.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 97,
+          "expression_steps": 56880,
+          "probe_rows": 12640,
+          "support_writes": 6320
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "produce_entry:main",
+          "mtopic:main",
+          "topic_limits:main",
+          "led:main",
+          "isr_of:main",
+          "produce_started:main"
+        ],
+        "elapsed_ns": 13369104,
+        "head": "entry_check:main",
+        "id": 1384,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-168",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "entry_check(c, i, j, tid, p, o, checked) :- produce_entry(c, i, j, name, p, records, req, o), (produce_request_error(req) Eq (Option(None): Option<(i16, String)>)), mtopic(name, tid, parts, _cfg), topic_limits(tid, limits), led(tid, p, _), g := (Bytes, i32)(tid, p), isr_of(g, isr), (p Ge Int(I32(0))), (p Lt parts), checked := check_entry(records, req.1, limits, $len(isr)), (name Ne Str(\"__consumer_offsets\")), notin produce_started(c, i).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 32,
+          "expression_steps": 347710,
+          "probe_rows": 3492,
+          "support_writes": 776
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "fetch_entry:main",
+          "topic_by_id:main",
+          "led:main",
+          "high_watermark:main",
+          "log_start:main",
+          "tail_end:main"
+        ],
+        "elapsed_ns": 12824815,
+        "head": "fetch_part:main",
+        "id": 1491,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-455",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_part(c, j, tid, p, off, pmax, end, start) :- fetch_entry(c, j, tid, fp), topic_by_id(tid, parts), p := fp.0, (p Ge Int(I32(0))), (p Lt parts), led(tid, p, epoch), (leader_epoch_error(fp.1, epoch) Eq (Option(None): Option<i16>)), high_watermark(tid, p, end), log_start(tid, p, start), tail_end(tid, p, leo), off := fp.2, (off Ge start), (off Le leo), pmax := $as_i64(fp.3).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 85,
+          "expression_steps": 94559,
+          "probe_rows": 16359,
+          "support_writes": 2340
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "ack:sent",
+          "leader:main",
+          "members:main"
+        ],
+        "elapsed_ns": 12578458,
+        "head": "on_ack$when:main",
+        "id": 308,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-708",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "on_ack$when(g, m, f) :- ack(g, t, m, _sent | f), leader(g, t), members(g, f).",
+        "work": {
+          "compiled_terms": 149,
+          "evaluations": 149,
+          "expression_steps": 0,
+          "probe_rows": 37647,
+          "support_writes": 6023
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "acked_at:main"
+        ],
+        "elapsed_ns": 12538862,
+        "head": "heard_now:main",
+        "id": 1078,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "stratum-257",
+        "recursive": false,
+        "regime": "Recompute",
+        "text": "heard_now(g, f) :- acked_at(g, f, at), ($Now Lt (at Add Duration(Duration(300000000)))).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 158,
+          "expression_steps": 113010,
+          "probe_rows": 22602,
+          "support_writes": 377
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "heard_term:main",
+          "takes:main"
+        ],
+        "elapsed_ns": 12421122,
+        "head": "eff$u:main",
+        "id": 976,
+        "operator": "compiled-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-18",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "eff$u(g, x) :- heard_term(g, x), takes(g).",
+        "work": {
+          "compiled_terms": 12546,
+          "evaluations": 360,
+          "expression_steps": 0,
+          "probe_rows": 12546,
+          "support_writes": 12546
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "match_idx$cand:main"
+        ],
+        "elapsed_ns": 10674984,
+        "head": "match_idx$ext:main",
+        "id": 29,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-713",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "match_idx$ext(X0, X1, Max<X2>) :- match_idx$cand(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 130,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 1494
+        }
+      },
+      {
+        "aggregate": true,
+        "barriers": [
+          "aggregate requires completed input for each evaluated group"
+        ],
+        "dependencies": [
+          "match_idx$cand:main",
+          "match_idx$ext:main"
+        ],
+        "elapsed_ns": 10098518,
+        "head": "match_idx$pmin:main",
+        "id": 30,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-714",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "match_idx$pmin(X0, X1, Min<P>) :- match_idx$cand(X0, X1, X2), match_idx$ext(X0, X1, X2), P := $prio<match_idx::resolve>(((Bytes, i32), Node<Broker>)(X0, X1), (u64)(X2)).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 130,
+          "expression_steps": 41664,
+          "probe_rows": 1494,
+          "support_writes": 1494
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "match_idx$n:main"
+        ],
+        "elapsed_ns": 9630231,
+        "head": "match_idx$cand:main",
+        "id": 28,
+        "operator": "copy",
+        "parallel_eligible": true,
+        "phase": "stratum-712",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "match_idx$cand(X0, X1, X2) :- match_idx$n(X0, X1, X2).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 256,
+          "expression_steps": 0,
+          "probe_rows": 0,
+          "support_writes": 10994
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "head:main"
+        ],
+        "elapsed_ns": 9362885,
+        "head": "fetch_req:main",
+        "id": 1487,
+        "operator": "retained-map",
+        "parallel_eligible": true,
+        "phase": "stratum-445",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "fetch_req(c, i, req) :- head(c, i, _seq, key, _version, _corr, fr, _at), (key Eq Int(I16(1))), Variant<Option<Cur>>#1(body) := request_body(fr), Variant<Option<FetchRequest>>#1(req) := decode_fetch(body).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 68,
+          "expression_steps": 330444,
+          "probe_rows": 0,
+          "support_writes": 146
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "next-state and sends consume the completed deductive state",
+          "not eligible for pure read-only workers"
+        ],
+        "dependencies": [
+          "beat_followers$when:main"
+        ],
+        "elapsed_ns": 9348699,
+        "head": "beat:async",
+        "id": 307,
+        "operator": "generic-relational",
+        "parallel_eligible": false,
+        "phase": "Async",
+        "recursive": false,
+        "regime": "Recompute",
+        "text": "beat(@f, g, t, m, mt, c, $0, s)@async :- beat_followers$when(g, t, f, m, mt, c, s), $0 := $Now.",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 735,
+          "expression_steps": 735,
+          "probe_rows": 6240,
+          "support_writes": 12462
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [
+          "negation requires completed lower-stratum dependencies"
+        ],
+        "dependencies": [
+          "applied_d:main",
+          "partition_commit:main",
+          "data_entry:main",
+          "installing:main"
+        ],
+        "elapsed_ns": 9059693,
+        "head": "pending_batch:main",
+        "id": 1450,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-451",
+        "recursive": false,
+        "regime": "Delta",
+        "text": "pending_batch(tid, p, base, last, max_ts, blob) :- applied_d(tid, p, a), partition_commit(tid, p, c), data_entry(tid, p, i, base, last, max_ts, _h, blob), (i Gt a), (i Le c), notin installing(tid, p).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 70,
+          "expression_steps": 17600,
+          "probe_rows": 4668,
+          "support_writes": 1416
+        }
+      },
+      {
+        "aggregate": false,
+        "barriers": [],
+        "dependencies": [
+          "ack:sent",
+          "leader:main",
+          "match_idx:main"
+        ],
+        "elapsed_ns": 8862678,
+        "head": "acked_new:main",
+        "id": 1050,
+        "operator": "generic-relational",
+        "parallel_eligible": true,
+        "phase": "stratum-233",
+        "recursive": false,
+        "regime": "Scoped",
+        "text": "acked_new(g, f) :- ack(g, t, m, _ | f), leader(g, t), match_idx(g, f, cur), (m Gt cur).",
+        "work": {
+          "compiled_terms": 0,
+          "evaluations": 149,
+          "expression_steps": 11368,
+          "probe_rows": 16404,
+          "support_writes": 747
+        }
+      }
+    ],
+    "top_functions": [
+      {
+        "calls": 1624,
+        "id": 505,
+        "inclusive_steps": 284200,
+        "name": "BatchHeader::decode",
+        "self_steps": 284200
+      },
+      {
+        "calls": 899,
+        "id": 278,
+        "inclusive_steps": 181172,
+        "name": "batch_end",
+        "self_steps": 181172
+      },
+      {
+        "calls": 12,
+        "id": 218,
+        "inclusive_steps": 117140,
+        "name": "last_per_partition",
+        "self_steps": 116888
+      },
+      {
+        "calls": 14278,
+        "id": 279,
+        "inclusive_steps": 114224,
+        "name": "log_bytes",
+        "self_steps": 114224
+      },
+      {
+        "calls": 183,
+        "id": 146,
+        "inclusive_steps": 116386,
+        "name": "trim_to",
+        "self_steps": 104107
+      },
+      {
+        "calls": 1141,
+        "id": 118,
+        "inclusive_steps": 112813,
+        "name": "after_append",
+        "self_steps": 94557
+      },
+      {
+        "calls": 895,
+        "id": 569,
+        "inclusive_steps": 119035,
+        "name": "FetchPartition::decode",
+        "self_steps": 83235
+      },
+      {
+        "calls": 6946,
+        "id": 1285,
+        "inclusive_steps": 76406,
+        "name": "format$left",
+        "self_steps": 76406
+      },
+      {
+        "calls": 2902,
+        "id": 1292,
+        "inclusive_steps": 116080,
+        "name": "format$skip_tags",
+        "self_steps": 66746
+      },
+      {
+        "calls": 5210,
+        "id": 134,
+        "inclusive_steps": 63142,
+        "name": "producers_in",
+        "self_steps": 63142
+      },
+      {
+        "calls": 776,
+        "id": 79,
+        "inclusive_steps": 62856,
+        "name": "split_batches",
+        "self_steps": 62856
+      },
+      {
+        "calls": 578,
+        "id": 127,
+        "inclusive_steps": 63742,
+        "name": "segment_appends",
+        "self_steps": 55834
+      },
+      {
+        "calls": 2728,
+        "id": 1286,
+        "inclusive_steps": 81840,
+        "name": "format$bytes",
+        "self_steps": 51832
+      },
+      {
+        "calls": 2196,
+        "id": 207,
+        "inclusive_steps": 92232,
+        "name": "hash_step",
+        "self_steps": 50508
+      },
+      {
+        "calls": 77,
+        "id": 151,
+        "inclusive_steps": 150202,
+        "name": "fetch_response_parts",
+        "self_steps": 48207
+      },
+      {
+        "calls": 776,
+        "id": 100,
+        "inclusive_steps": 63632,
+        "name": "batch_error",
+        "self_steps": 48112
+      },
+      {
+        "calls": 2998,
+        "id": 143,
+        "inclusive_steps": 44970,
+        "name": "leader_epoch_error",
+        "self_steps": 44970
+      },
+      {
+        "calls": 944,
+        "id": 153,
+        "inclusive_steps": 44947,
+        "name": "fetch_partition_parts",
+        "self_steps": 43059
+      },
+      {
+        "calls": 776,
+        "id": 102,
+        "inclusive_steps": 309624,
+        "name": "check_records",
+        "self_steps": 38024
+      },
+      {
+        "calls": 77,
+        "id": 1297,
+        "inclusive_steps": 33047,
+        "name": "by_topic<FetchAnswer>",
+        "self_steps": 33047
+      }
+    ],
+    "plan_rules": 1741,
+    "physical_stores": 1332,
+    "declared_durable_main_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 0,
+      "bulk_retracted_rows": 0,
+      "membership_changes": 7814,
+      "probe_calls": 112860,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 17501
+    },
+    "scoped_operations": {
+      "batch_weight_updates": 0,
+      "bulk_index_clears": 871,
+      "bulk_retracted_rows": 69957,
+      "membership_changes": 140775,
+      "probe_calls": 129197,
+      "secondary_index_build_rows": 0,
+      "secondary_index_row_updates": 25390
+    }
+  }
+]

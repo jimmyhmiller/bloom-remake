@@ -1121,6 +1121,8 @@ fn measured_plan_options(
     let mut recorded_bounds = None;
     let mut ticks = 0u64;
     let mut elapsed = 0u128;
+    let mut prepare_elapsed = 0u128;
+    let mut engine_elapsed = 0u128;
     while let Some(tick) = replay.peek_tick().map_err(err)? {
         if last.is_some_and(|last| tick.0 > last) {
             break;
@@ -1129,6 +1131,7 @@ fn measured_plan_options(
             && first.is_none_or(|first| tick.0 >= first)
             && let Some(plan) = replay.plan_report()
         {
+            replay.measure_steps(true);
             compiled_start = plan.rules.into_iter().map(|r| (r.id, r.work.compiled_terms)).collect();
         }
         if measured && ticks == 0 && first.is_none_or(|first| tick.0 >= first) && !replay.measure_plan(true) {
@@ -1141,6 +1144,8 @@ fn measured_plan_options(
             continue;
         }
         elapsed += duration;
+        prepare_elapsed += r.prepare_elapsed_ns.unwrap_or(0);
+        engine_elapsed += r.engine_elapsed_ns.unwrap_or(0);
         ticks += 1;
         let bounds = recorded_bounds.get_or_insert((r.inputs.now.0, r.inputs.now.0));
         bounds.1 = r.inputs.now.0;
@@ -1225,7 +1230,7 @@ fn measured_plan_options(
         let name = names.program().fns.get(id).map_or_else(|| format!("{id:?}"), |f| f.name.to_string());
         serde_json::json!({"id":id.raw(),"name":name,"calls":work.calls,"self_steps":work.self_steps,"inclusive_steps":work.steps})
     }).collect();
-    let value = serde_json::json!({"report_version":1,"boundary_rows":boundaries,"functions":functions,"recorded_time_bounds_ns":recorded_bounds,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins,"packed_indexes":options.packed_indexes,"fuse_relations":options.fuse_relations},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
+    let value = serde_json::json!({"report_version":1,"timing_ns":{"prepare":prepare_elapsed,"engine_step":engine_elapsed,"other":elapsed.saturating_sub(prepare_elapsed+engine_elapsed)},"boundary_rows":boundaries,"functions":functions,"recorded_time_bounds_ns":recorded_bounds,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins,"packed_indexes":options.packed_indexes,"fuse_relations":options.fuse_relations},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
     Ok(value)
 }
 
@@ -1377,6 +1382,15 @@ mod plan_tests {
             }
         }
         assert_eq!(a["ticks"], 3);
+        let timing = &a["timing_ns"];
+        assert!(timing["engine_step"].as_u64().unwrap() > 0);
+        assert_eq!(
+            a["replay_elapsed_ns"].as_u64().unwrap(),
+            ["prepare", "engine_step", "other"]
+                .iter()
+                .map(|k| timing[k].as_u64().unwrap())
+                .sum::<u64>()
+        );
         let parsed: blossom_engine::PlanReport = serde_json::from_value(a["plan"].clone()).unwrap();
         assert!(
             parsed

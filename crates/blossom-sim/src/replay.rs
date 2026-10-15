@@ -82,6 +82,10 @@ pub struct Inputs {
 /// One replayed tick.
 #[derive(Debug)]
 pub struct Replayed {
+    /// Opt-in offline preparation time, including trace decoding and blob-map cloning.
+    pub prepare_elapsed_ns: Option<u128>,
+    /// Opt-in time inside Executor::step; excludes replay verification and cleanup.
+    pub engine_elapsed_ns: Option<u128>,
     pub inputs: Inputs,
     /// What it changed in the carried state (`None`: it failed, as recorded).
     pub changes: Option<Changes>,
@@ -117,6 +121,7 @@ pub struct Replay<R: Read> {
     /// The relations whose rows each replayed tick reports.
     observe: Vec<RelId>,
     profile: bool,
+    measure_steps: bool,
 }
 
 impl<R: Read> Replay<R> {
@@ -204,12 +209,18 @@ impl<R: Read> Replay<R> {
             booted: false,
             observe: Vec::new(),
             profile: false,
+            measure_steps: false,
         })
     }
 
     /// Snapshot of the actual replay executor, including cumulative work.
     pub fn measure_plan(&mut self, on: bool) -> bool {
         self.engine.measure_plan(on)
+    }
+
+    /// Enable offline phase timing without feeding a clock into evaluation.
+    pub fn measure_steps(&mut self, on: bool) {
+        self.measure_steps = on;
     }
 
     pub fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
@@ -295,7 +306,9 @@ impl<R: Read> Replay<R> {
     /// Replays the next tick (`None` at the end of the trace). With `examine`, the oracle also runs it, from the same
     /// state, capturing its firings. A tick whose outcome the trace does not hold (the node was killed while it ran)
     /// is replayed unchecked.
+    #[allow(clippy::disallowed_methods)] // Explicit offline measurement; never semantic time.
     pub fn next(&mut self, examine: bool) -> Result<Option<Replayed>, ReplayError> {
+        let started = self.measure_steps.then(std::time::Instant::now);
         self.boot()?;
         let inputs = match self.read()? {
             None => return Ok(None),
@@ -363,6 +376,8 @@ impl<R: Read> Replay<R> {
         } else {
             None
         };
+        let engine_started = self.measure_steps.then(std::time::Instant::now);
+        let prepare_elapsed_ns = started.zip(engine_started).map(|(a, b)| b.duration_since(a).as_nanos());
         let result = self.engine.step(
             &StepInput {
                 node: self.node,
@@ -376,6 +391,7 @@ impl<R: Read> Replay<R> {
             },
             &self.observe,
         );
+        let engine_elapsed_ns = engine_started.map(|s| s.elapsed().as_nanos());
         let tick = inputs.tick.0;
         let mut work = BTreeMap::new();
         if let (Some(before), Some(after)) = (work_before, self.engine.work_by_rule()) {
@@ -408,6 +424,8 @@ impl<R: Read> Replay<R> {
                 }
                 self.blobs.extend(out.blobs);
                 Ok(Some(Replayed {
+                    prepare_elapsed_ns,
+                    engine_elapsed_ns,
                     inputs,
                     changes: Some(out.changes),
                     failed: None,
@@ -422,6 +440,8 @@ impl<R: Read> Replay<R> {
             (Ok(out), None) => {
                 self.blobs.extend(out.blobs);
                 Ok(Some(Replayed {
+                    prepare_elapsed_ns,
+                    engine_elapsed_ns,
                     inputs,
                     changes: Some(out.changes),
                     failed: None,
@@ -438,6 +458,8 @@ impl<R: Read> Replay<R> {
                 what: format!("it succeeded, but the recorded tick failed: {error}"),
             }),
             (Err(e), Some(Err(error))) if e.to_string() == error => Ok(Some(Replayed {
+                prepare_elapsed_ns,
+                engine_elapsed_ns,
                 inputs,
                 changes: None,
                 failed: Some(error),

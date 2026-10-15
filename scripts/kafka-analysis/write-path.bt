@@ -1,0 +1,27 @@
+// Logical bytes successfully returned by VFS writes, grouped by file basename.
+// These are not physical device bytes. mmap writes are not counted.
+kprobe:vfs_write,
+kprobe:vfs_iter_write
+/pid == $1 || pid == $2 || pid == $3/
+{ @active[tid] = 1; @file[tid] = str(((struct file *)arg0)->f_path.dentry->d_name.name); }
+kretprobe:vfs_write,
+kretprobe:vfs_iter_write
+/@active[tid]/
+{
+ if (retval > 0) { @written[pid, comm, @file[tid]] = sum(retval); @writes[pid, comm, @file[tid]] = count(); }
+ else { @write_return[pid, retval] = count(); }
+ delete(@file[tid]); delete(@active[tid]);
+}
+tracepoint:sched:sched_switch
+{
+ if ((pid == $1 || pid == $2 || pid == $3) && comm == "engine" && args.prev_state == 2) {
+  @blocked[args.prev_pid] = nsecs; @owner[args.prev_pid] = pid; @stack[args.prev_pid] = kstack(16);
+ }
+ $t = args.next_pid;
+ if (@blocked[$t]) {
+  @blocked_ns[@owner[$t], @stack[$t]] = sum(nsecs - @blocked[$t]);
+  delete(@blocked[$t]); delete(@owner[$t]); delete(@stack[$t]);
+ }
+}
+interval:s:30 { exit(); }
+END { clear(@active); clear(@file); clear(@blocked); clear(@owner); clear(@stack); }
