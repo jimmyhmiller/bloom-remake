@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 /// Clock-free counters; writes are support updates, not physical index operations.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkReport {
+    /// Delta terms executed by compiled source-column kernels.
+    #[serde(default)]
+    pub compiled_terms: u64,
     pub probe_rows: u64,
     pub expression_steps: u64,
     pub support_writes: u64,

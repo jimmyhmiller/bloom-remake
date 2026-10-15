@@ -78,6 +78,8 @@ pub struct EngineConfig {
     pub pipeline_batches: bool,
     /// Infer physical keys for single-writer deterministic derived relations.
     pub infer_keys: bool,
+    /// Compile pure relational joins/projections to source-column execution kernels.
+    pub compiled_joins: bool,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -128,6 +130,7 @@ pub struct Engine {
     examined: u64,
     /// The work of each rule (rows examined, expression nodes evaluated).
     examined_by: BTreeMap<RuleId, RuleWork>,
+    compiled_by: BTreeMap<RuleId, u64>,
     /// The work of each rule in the last tick (cleared at each tick's start).
     tick_work: BTreeMap<RuleId, RuleWork>,
     /// The blobs the current tick created (`Blob::of`), with their bytes.
@@ -458,6 +461,7 @@ impl Engine {
                 continue;
             }
             let mut plan = Plan::new(rule)?;
+            plan.compiled = cfg.compiled_joins && crate::compiled::Kernel::eligible(rule);
             plan.upsert_delete = crate::upsert::UpsertDelete::of(p, rule);
             plan.frame = p
                 .rels
@@ -823,6 +827,7 @@ impl Engine {
             unsettled: BTreeSet::new(),
             examined: 0,
             examined_by: BTreeMap::new(),
+            compiled_by: BTreeMap::new(),
             tick_work: BTreeMap::new(),
             new_blobs: std::cell::RefCell::new(BTreeMap::new()),
             orders: std::cell::RefCell::new(BTreeMap::new()),
@@ -2089,7 +2094,7 @@ impl Engine {
             Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
             Regime::Scoped => {
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 self.apply(p, input, rule, &plan, terms)
             }
             Regime::Delta => {
@@ -2097,7 +2102,7 @@ impl Engine {
                 // tick's change).
                 let full = self.rebuilding && !self.view_rules.contains(&id);
                 let terms = self.evaluate(p, input, rule, &plan, full)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 self.apply(p, input, rule, &plan, terms)
             }
         }
@@ -2714,7 +2719,7 @@ impl Engine {
         plan: &Plan,
     ) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
-        self.count(rule.id, terms.examined, terms.steps);
+        self.count(rule.id, terms.examined, terms.steps, terms.compiled);
         let (flips_at, reads_time) = (terms.flips_at, terms.reads_time);
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
@@ -2859,7 +2864,7 @@ impl Engine {
                     .clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     if strict {
                         return Err(to_eval(e, tick, Some(rule)));
@@ -2985,7 +2990,7 @@ impl Engine {
                     .clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 return match terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     Some((_, (_, Some(e)))) => Err(to_eval(e, tick, Some(rule))),
                     _ => Err(internal_error!("rule {id:?} raised during the iteration and not at its fixpoint").into()),
@@ -3029,7 +3034,7 @@ impl Engine {
                         self.run_drivers(p, input, rule, &plan, drivers)?
                     }
                 };
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 if terms.errors.values().any(|(n, _)| *n > 0) {
                     raised.insert(*id);
                     continue;
@@ -3287,6 +3292,8 @@ impl Engine {
                 "native-upsert-delete"
             } else if plan.copy.is_some() {
                 "copy"
+            } else if plan.compiled {
+                "compiled-relational"
             } else {
                 "generic-relational"
             };
@@ -3326,6 +3333,7 @@ impl Engine {
                     .as_ref()
                     .map(|times| times.get(&plan.rule).copied().unwrap_or(0)),
                 work: WorkReport {
+                    compiled_terms: self.compiled_by.get(&plan.rule).copied().unwrap_or(0),
                     probe_rows: work.rows,
                     expression_steps: work.steps,
                     support_writes: work.writes,
@@ -3423,7 +3431,10 @@ impl Engine {
         }
     }
 
-    fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {
+    fn count(&mut self, rule: RuleId, examined: u64, steps: u64, compiled: u64) {
+        if compiled != 0 {
+            *self.compiled_by.entry(rule).or_default() += compiled;
+        }
         self.examined += examined;
         let t = self.tick_work.entry(rule).or_default();
         t.rows += examined;
@@ -3454,6 +3465,7 @@ struct Terms {
     /// The rows its atom probes returned, and the expression nodes it evaluated (the work it did).
     examined: u64,
     steps: u64,
+    compiled: u64,
     heads: BTreeMap<Row, i64>,
     aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,
@@ -3473,6 +3485,7 @@ std::thread_local! {
 impl Terms {
     fn merge(&mut self, other: Self) {
         self.examined += other.examined;
+        self.compiled += other.compiled;
         self.steps += other.steps;
         self.reads_time |= other.reads_time;
         self.flips_at = self.flips_at.into_iter().chain(other.flips_at).min();
@@ -3561,6 +3574,25 @@ fn run_terms(
             .map(|(_, o)| o)
             .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
         let old = |lit: usize| plan.dep_pos.get(lit).copied().flatten().is_some_and(|q| q > *pos);
+        if let Some(kernel) = &order.compiled {
+            out.compiled += 1;
+            let sign = match driver {
+                Driver::Full => 1,
+                Driver::Atom { sign, .. } | Driver::Neg { sign, .. } | Driver::Lookup { sign, .. } => *sign,
+            };
+            out.examined += kernel.run(cx, stores, driver, &old, &mut |row, rows| {
+                if let Some(MapCapture { primary, update }) = &mut capture {
+                    let input = rows
+                        .get(*primary)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| internal_error!("compiled map lacks primary row"))?;
+                    update(input, &row, sign);
+                }
+                *out.heads.entry(row).or_insert(0) += sign;
+                Ok(())
+            })?;
+            continue;
+        }
         let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
             if plan.aggregate {
                 let mut group = Vec::new();

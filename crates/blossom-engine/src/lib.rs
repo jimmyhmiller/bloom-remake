@@ -10,6 +10,7 @@
 //! work.
 
 mod cold;
+mod compiled;
 mod engine;
 mod expr;
 mod func;

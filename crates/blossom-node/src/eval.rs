@@ -506,6 +506,12 @@ impl Executors {
         self
     }
 
+    /// Compile pure relational terms to source-column kernels.
+    pub fn with_compiled_joins(mut self, enabled: bool) -> Executors {
+        self.engine.compiled_joins = enabled;
+        self
+    }
+
     /// Infer compact physical keys for deterministic derived relations.
     pub fn with_inferred_keys(mut self, enabled: bool) -> Executors {
         self.engine.infer_keys = enabled;

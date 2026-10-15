@@ -524,7 +524,8 @@ impl Server {
         .with_map_cache_joins(spec.map_cache_joins)
         .with_lazy_indexes(spec.lazy_indexes)
         .with_pipeline_batches(spec.pipeline_batches)
-        .with_inferred_keys(spec.infer_keys);
+        .with_inferred_keys(spec.infer_keys)
+        .with_compiled_joins(spec.compiled_joins);
         if let Some(rows) = spec.hot_rows {
             executors = executors.with_hot_rows(rows);
         }

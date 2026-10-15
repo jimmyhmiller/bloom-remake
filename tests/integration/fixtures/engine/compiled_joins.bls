@@ -1,0 +1,35 @@
+program compiled_joins version 1;
+input put_left(k: u64, a: u64, b: u64);
+input put_right(k: u64, v: u64);
+input remove_left(k: u64);
+input remove_right(k: u64);
+input block(k: u64);
+input unblock(k: u64);
+table left(k: u64, a: u64, b: u64) key(k);
+table right(k: u64, v: u64) key(k);
+table blocked(k: u64) key(k);
+write_left: on put_left(k, a, b) {
+    upsert left(k, a, b);
+}
+write_right: on put_right(k, v) {
+    upsert right(k, v);
+}
+erase_left: on remove_left(k), left(k, a, b) {
+    delete left(k, a, b);
+}
+erase_right: on remove_right(k), right(k, v) {
+    delete right(k, v);
+}
+write_block: on block(k) {
+    upsert blocked(k);
+}
+erase_block: on unblock(k) {
+    delete blocked(k);
+}
+view joined(k, a, v) = left(k, a, _), right(k, v), not blocked(k);
+view repeated(k) = left(k, a, a), right(k, _);
+view constant(k, v) = left(k, 2u64, _), right(k, v);
+view projected(a) = left(k, a, _), right(k, _);
+view self_join(a, b) = left(k, a, _), left(k, _, b);
+view absent() = not blocked(_);
+view no_match(k) = left(k, _, _), not right(k, 7u64);

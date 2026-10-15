@@ -65,6 +65,9 @@ pub enum TraceCommand {
         /// Infer compact physical keys of deterministic derived views.
         #[arg(long)]
         infer_keys: bool,
+        /// Compile pure relational delta terms to source-column kernels.
+        #[arg(long)]
+        compiled_joins: bool,
         /// Read-only evaluation workers; state mutation remains serial.
         #[arg(long, default_value_t = 1)]
         workers: usize,
@@ -590,6 +593,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             lazy_indexes,
             pipeline_batches,
             infer_keys,
+            compiled_joins,
             no_measurement,
         } => plan_workload(
             common,
@@ -603,6 +607,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 lazy_indexes,
                 pipeline_batches,
                 infer_keys,
+                compiled_joins,
             },
         ),
         TraceCommand::Replay { common, slow } => {
@@ -1153,7 +1158,7 @@ fn measured_plan_options(
         }
         hash.update(buffer.get(..n).ok_or("invalid read size")?);
     }
-    let value = serde_json::json!({"report_version":1,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
+    let value = serde_json::json!({"report_version":1,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
     Ok(value)
 }
 

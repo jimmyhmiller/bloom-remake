@@ -257,6 +257,7 @@ pub(crate) enum Regime {
 /// A rule's plan.
 #[derive(Clone, Debug)]
 pub(crate) struct Plan {
+    pub compiled: bool,
     pub rule: RuleId,
     pub nvars: usize,
     /// The positive atoms, by literal index.
@@ -492,6 +493,7 @@ pub(crate) enum Step {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Order {
     pub steps: Vec<Step>,
+    pub compiled: Option<crate::compiled::Kernel>,
 }
 
 /// The store an atom reads.
@@ -710,6 +712,7 @@ impl Plan {
             Skip::WhenUnchanged
         };
         Ok(Plan {
+            compiled: false,
             rule: rule.id,
             nvars: rule.body.vars.len(),
             atoms,
@@ -757,7 +760,11 @@ impl Plan {
                 driver_vars(rule, lit),
             ),
         };
-        self.order(rule, skip, &bound, cost)
+        let mut order = self.order(rule, skip, &bound, cost);
+        if self.compiled {
+            order.compiled = crate::compiled::Kernel::compile(rule, self, &order, driver);
+        }
+        order
     }
 
     /// The steps of a term whose driver binds `bound` (and is atom `skip`, if an atom): repeatedly the atom with the
@@ -835,7 +842,7 @@ impl Plan {
             steps.push(Step::Check(next));
             next += 1;
         }
-        Order { steps }
+        Order { steps, compiled: None }
     }
 
     /// Appends the checks from `next` on that are ready, in order, binding what they bind.

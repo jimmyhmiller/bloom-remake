@@ -76,6 +76,7 @@ fn drive(args: Args) -> Result<String, String> {
         physical.lazy_indexes = spec.lazy_indexes;
         physical.pipeline_batches = spec.pipeline_batches;
         physical.infer_keys = spec.infer_keys;
+        physical.compiled_joins = spec.compiled_joins;
         physical.hot_rows = spec.hot_rows;
         physical.in_memory = !spec.tiered;
         artifact
