@@ -10,7 +10,7 @@
 //! A store records the tick's change to its present rows (`ins`, `del`), which drives the rules reading it, and can
 //! read the relation as it was at the start of the tick (`old`): the present rows, minus those inserted this tick, plus
 //! those deleted. Indexes on column sets are built on first use (a probe, or a planner's estimate) and maintained with
-//! every change after; they are ordered, so a probe can also take a range of one more column.
+//! every change after. Equality probes use hashing; a range probe promotes its index to canonical key order.
 //!
 //! A tiered store ([`Tiered`], docs/design/DATABASE.md §7) is a durable table whose rows live in the node's database
 //! (the [`ColdTables`]): memory holds only the carry's changes the database does not hold yet, support other than
@@ -18,6 +18,7 @@
 //! with what memory holds.
 
 use crate::probe_cache::ProbeCache;
+use crate::probe_index::Index;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::sync::Arc;
@@ -87,8 +88,6 @@ impl CellSpec {
         Ok(Arc::from(out))
     }
 }
-
-type Index = BTreeMap<Vec<Value>, RowBucket>;
 
 /// Rows by the values of some of their columns, hashed.
 type RowsBy = blossom_base::det::DetMap<Vec<Value>, RowBucket>;
@@ -1736,7 +1735,7 @@ impl Store {
         }
         self.count_blobs(&row, true);
         for (cols, index) in self.indexes.get_mut() {
-            index.entry(key(&row, cols)).or_default().insert(row.clone());
+            index.insert_row(key(&row, cols), row.clone());
         }
         if self.cell.is_some() {
             self.merged_rows.insert(row.clone());
@@ -1854,13 +1853,19 @@ impl Store {
             Present::Set(self.counts.iter())
         };
         for row in rows {
-            index.entry(key(row, cols)).or_default().insert(row.clone());
+            index.insert_row(key(row, cols), row.clone());
         }
         if let Some(m) = &self.inspection {
             m.index_build_rows
                 .fetch_add(self.present_len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        self.indexes.borrow_mut().insert(cols.to_vec(), index);
+        // Another read-only worker may have built or promoted this index while we built ours.
+        // Never replace its ordered index with a late equality-only build.
+        let mut indexes = self.indexes.borrow_mut();
+        if indexes.contains_key(cols) {
+            return;
+        }
+        indexes.insert(cols.to_vec(), index);
         if self.lazy_estimates {
             self.index_epoch.fetch_add(1, Ordering::Relaxed);
         }
@@ -1902,7 +1907,7 @@ impl Store {
         }
         if !self.lazy_estimates {
             self.ensure_index(cols);
-            let keys = self.indexes.borrow().get(cols).map_or(1, BTreeMap::len).max(1);
+            let keys = self.indexes.borrow().get(cols).map_or(1, Index::len).max(1);
             return n.div_ceil(keys);
         }
         // Costing must not materialize a rejected candidate's index.
@@ -2124,9 +2129,13 @@ impl Store {
         let mut key_cols = cols.to_vec();
         key_cols.push(col);
         self.ensure_index(&key_cols);
+        if let Some(index) = self.indexes.borrow_mut().get_mut(&key_cols) {
+            index.make_ordered();
+        }
         let indexes = self.indexes.borrow();
         let index = indexes
             .get(&key_cols)
+            .and_then(Index::ordered)
             .ok_or_else(|| internal_error!("a range probe on columns {key_cols:?} without an index"))?;
         let within = |v: &Value| {
             (match &lo {
@@ -2246,6 +2255,86 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equality_indexes_promote_for_ranges_and_keep_both_versions_after_updates() {
+        let mut store = Store::new(None, false);
+        let row = |a, b| Row::from(vec![Value::u64(a), Value::u64(b)]);
+        for k in 0..128 {
+            store.add(row(k, k % 8), 1).unwrap();
+        }
+        store.ensure_index(&[1]);
+        assert!(matches!(store.indexes.borrow().get(&vec![1]), Some(Index::Equality(_))));
+        store.clear_delta();
+        store.add(row(1, 1), -1).unwrap();
+        store.add(row(129, 1), 1).unwrap();
+        let mut old = store.old_rows(&[1], &[Value::u64(1)]).unwrap();
+        old.sort();
+        let new = store.new_rows(&[1], &[Value::u64(1)]).unwrap();
+        for (previous, expected) in [(false, &new), (true, &old)] {
+            let mut ranged = store
+                .range_rows(
+                    previous,
+                    &[],
+                    &[],
+                    1,
+                    Bound::Included(Value::u64(1)),
+                    Bound::Included(Value::u64(1)),
+                )
+                .unwrap();
+            ranged.sort();
+            assert_eq!(&ranged, expected);
+        }
+        assert!(matches!(store.indexes.borrow().get(&vec![1]), Some(Index::Ordered(_))));
+        store.add(row(129, 1), -1).unwrap();
+        store.add(row(130, 1), 2).unwrap();
+        assert!(store.new_rows(&[1], &[Value::u64(1)]).unwrap().contains(&row(130, 1)));
+        assert!(!store.new_rows(&[1], &[Value::u64(1)]).unwrap().contains(&row(129, 1)));
+        store.retract_all().unwrap();
+        store.add(row(131, 1), 1).unwrap();
+        assert_eq!(store.new_rows(&[1], &[Value::u64(1)]).unwrap(), vec![row(131, 1)]);
+    }
+
+    #[test]
+    fn concurrent_equality_builds_never_downgrade_a_range_index() {
+        let mut store = Store::new(None, false);
+        for k in 0..4096 {
+            store.add(Arc::from([Value::u64(k), Value::u64(k % 8)]), 1).unwrap();
+        }
+        let store = Arc::new(store);
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if i % 2 == 0 {
+                        assert_eq!(store.new_rows(&[1], &[Value::u64(1)]).unwrap().len(), 512);
+                    } else {
+                        assert_eq!(
+                            store
+                                .range_rows(
+                                    false,
+                                    &[],
+                                    &[],
+                                    1,
+                                    Bound::Included(Value::u64(1)),
+                                    Bound::Included(Value::u64(1))
+                                )
+                                .unwrap()
+                                .len(),
+                            512
+                        );
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(matches!(store.indexes.borrow().get(&vec![1]), Some(Index::Ordered(_))));
+    }
 
     #[test]
     fn small_pipeline_updates_keep_existing_non_prefix_indexes_exact() {
