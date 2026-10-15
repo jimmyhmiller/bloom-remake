@@ -1,13 +1,12 @@
 //! Native delta evaluation of the normative keyed-upsert deletion join.
 //! The expansion and its stores remain visible; unsupported shapes use the general evaluator.
 
-use crate::change_batch::ChangeBatch;
 use crate::rule::{Driver, StoreKey, Stores};
 use blossom_base::RelId;
 use blossom_ir::core::{ConstructKind, HeadArg, HeadMode, Literal, Program, Rule, RuleKind, Term};
 use blossom_ir::tick::{EvalError, Row};
 use blossom_value::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 pub(crate) struct UpsertDelete {
@@ -91,7 +90,7 @@ impl UpsertDelete {
             .collect()
     }
 
-    pub fn run(&self, stores: &Stores, drivers: &[(Driver, usize)]) -> Result<(ChangeBatch<Row>, u64), EvalError> {
+    pub fn run(&self, stores: &Stores, drivers: &[(Driver, usize)]) -> Result<(BTreeMap<Row, i64>, u64), EvalError> {
         let get = |r| -> Result<&crate::store::Store, EvalError> {
             stores
                 .get(&StoreKey::Main(r))
@@ -99,7 +98,7 @@ impl UpsertDelete {
         };
         let staging = get(self.staging)?;
         let target = get(self.target)?;
-        let mut heads = ChangeBatch::default();
+        let mut heads = BTreeMap::new();
         let mut examined = 0;
         for (driver, _) in drivers {
             match driver {
@@ -110,7 +109,7 @@ impl UpsertDelete {
                         for old in target.new_rows(&self.key, &values)? {
                             self.check_width(&old)?;
                             examined += 1;
-                            heads.push(old, 1);
+                            *heads.entry(old).or_insert(0) += 1;
                         }
                     }
                 }
@@ -120,14 +119,14 @@ impl UpsertDelete {
                     for old in target.old_rows(&self.key, &values)? {
                         self.check_width(&old)?;
                         examined += 1;
-                        heads.push(old, *sign);
+                        *heads.entry(old).or_insert(0) += sign;
                     }
                 }
                 Driver::Atom { lit: 1, row, sign } => {
                     let values = self.project(row)?;
                     let count = staging.new_rows(&self.key, &values)?.len();
                     examined += count as u64;
-                    heads.push(row.clone(), *sign * count as i64);
+                    *heads.entry(row.clone()).or_insert(0) += *sign * count as i64;
                 }
                 _ => return Err(blossom_base::internal_error!("non-atom driver in native upsert deletion").into()),
             }
