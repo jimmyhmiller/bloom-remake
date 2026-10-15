@@ -498,14 +498,14 @@ impl Sst {
         decode_block(&self.path, b.offset, body)
     }
 
-    /// The entries with keys from `start` (inclusive) to `end` (exclusive; `None`: no end), at or below `as_of`, in
-    /// order.
+    /// The newest eligible entry per key from `start` (inclusive) to `end` (exclusive; `None`: no end),
+    /// at or below `as_of`, in key order.
     fn scan(&self, start: &[u8], end: Option<&[u8]>, as_of: u64, out: &mut Vec<Entry>) -> Result<(), StoreError> {
         self.scan_keys(start, end, as_of, usize::MAX, out).map(|_| ())
     }
 
-    /// The entries at or below `as_of` of the first `keys` distinct keys from `start` to `end` (every version of
-    /// each), into `out`. Returns the last key taken when the range holds more keys than that (`None`: none left).
+    /// The newest eligible entry per key among the first `keys` distinct keys from `start` to `end`,
+    /// into `out`. Returns the last key taken when the range holds more keys than that (`None`: none left).
     fn scan_keys(
         &self,
         start: &[u8],
@@ -518,9 +518,15 @@ impl Sst {
         let first = self.index.partition_point(|b| b.last.as_slice() < start);
         let mut taken = 0usize;
         let mut last: Option<Vec<u8>> = None;
+        let mut selected = false;
         for b in self.index.iter().skip(first) {
             if !before_end(&b.first) {
                 break;
+            }
+            // A hot key's history can fill entire blocks. Once its visible version is selected,
+            // older blocks containing only that key cannot affect this snapshot or its page boundary.
+            if selected && last.as_deref() == Some(b.last.as_slice()) {
+                continue;
             }
             let block = self.block(b)?;
             // Blocks are ordered by key, then newest version first. Seek to the range rather than comparing every
@@ -531,10 +537,12 @@ impl Sst {
                     if taken == keys {
                         return Ok(last);
                     }
+                    selected = false;
                     taken += 1;
                     last = Some(e.key.clone());
                 }
-                if e.version <= as_of {
+                if !selected && e.version <= as_of {
+                    selected = true;
                     out.push(e.clone());
                 }
             }
@@ -1185,11 +1193,13 @@ impl Lsm {
             let mut newest: BTreeMap<Vec<u8>, (u64, Op)> = BTreeMap::new();
             let mems = std::iter::once(&s.mem).chain(s.frozen.as_ref().map(|(m, _, _)| &**m));
             for mem in mems {
+                let mut selected: Option<&Vec<u8>> = None;
                 for ((key, Reverse(version)), op) in mem.range((start.to_vec(), Reverse(u64::MAX))..) {
                     if !before_end(key) {
                         break;
                     }
-                    if *version <= as_of {
+                    if *version <= as_of && selected != Some(key) {
+                        selected = Some(key);
                         let slot = newest.entry(key.clone()).or_insert((*version, *op));
                         if *version > slot.0 {
                             *slot = (*version, *op);
@@ -1247,6 +1257,7 @@ impl Lsm {
                 let mut taken = 0usize;
                 let mut last: Option<&Vec<u8>> = None;
                 let mut more = None;
+                let mut selected = false;
                 for ((key, Reverse(version)), op) in mem.range((start.to_vec(), Reverse(u64::MAX))..) {
                     if !before_end(key) {
                         break;
@@ -1256,10 +1267,12 @@ impl Lsm {
                             more = last.cloned();
                             break;
                         }
+                        selected = false;
                         taken += 1;
                         last = Some(key);
                     }
-                    if *version <= as_of {
+                    if !selected && *version <= as_of {
+                        selected = true;
                         entries.push((key.clone(), *version, *op));
                     }
                 }
