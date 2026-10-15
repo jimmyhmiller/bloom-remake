@@ -1,4 +1,0 @@
-program parallel_cost version 1;
-input values(k: u64, x: u64);
-fn work(x: u64) -> u64 { range(0u64, 2048u64).fold(x, |a, i| a + i) }
-view results(k, y) = values(k, x), let y = work(x);
