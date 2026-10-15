@@ -476,7 +476,7 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                 return Ok(Value::Option(None));
             }
             let (lo, hi) = (lo as usize, hi as usize);
-            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes((s).into()))))
+            Ok(some_or_none(b.slice(lo..hi).map(Value::Bytes)))
         }
         LibFn::BytesConcat => match (arg_value(cx, env, f, args, 0)?, arg_value(cx, env, f, args, 1)?) {
             (Value::Bytes(a), Value::Bytes(b)) => {
@@ -692,7 +692,9 @@ pub(crate) fn library(cx: &Ctx<'_>, env: &mut Frame<'_>, f: LibFn, args: &[Expr]
                 return Ok(Value::Option(None));
             }
             let (lo, hi) = (lo as usize, hi as usize);
-            Ok(some_or_none(b.get(lo..hi).map(|s| Value::Bytes((s).into()))))
+            Ok(some_or_none(
+                blossom_value::BytesValue::from(b).slice(lo..hi).map(Value::Bytes),
+            ))
         }
         LibFn::BytesJoin => {
             let parts = arg_vector(cx, env, f, args, 0)?;

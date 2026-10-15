@@ -1080,7 +1080,11 @@ fn blobs_are_made_measured_and_read_on_both_evaluators() {
     let inputs_by_tick: Vec<Vec<Vec<u8>>> = vec![
         vec![],
         vec![b"hello".to_vec(), b"".to_vec()],
-        vec![b"x".to_vec(), b"blob of bytes".to_vec()],
+        vec![
+            b"x".to_vec(),
+            b"blob of bytes".to_vec(),
+            (0..1024).map(|n| (n % 251) as u8).collect(),
+        ],
         vec![],
     ];
     let mut inputs = Vec::new();
@@ -1110,6 +1114,11 @@ fn blobs_are_made_measured_and_read_on_both_evaluators() {
         assert_eq!(rows(t, "v_len"), want(&|b| u(b.len() as u64)), "tick {t}");
         assert_eq!(rows(t, "v_read"), want(&|b| opt(b.get(1..3).map(bytes))), "tick {t}");
         assert_eq!(
+            rows(t, "v_large_read"),
+            want(&|b| opt(b.get(32..512).map(bytes))),
+            "tick {t}"
+        );
+        assert_eq!(
             rows(t, "v_bytewise"),
             want(&|b| Value::Vec(b.iter().map(|x| opt(Some(bytes(&[*x])))).collect())),
             "tick {t}"
@@ -1119,6 +1128,7 @@ fn blobs_are_made_measured_and_read_on_both_evaluators() {
     let kept: BTreeSet<Vec<Value>> = inputs_by_tick
         .iter()
         .flatten()
+        .flat_map(|b| std::iter::once(b.as_slice()).chain(b.get(32..512).and_then(|s| s.get(16..400))))
         .map(|b| vec![Value::Blob(blossom_value::BlobRef::of(b)), opt(Some(bytes(b)))])
         .collect();
     assert_eq!(rows(3, "v_kept"), kept);

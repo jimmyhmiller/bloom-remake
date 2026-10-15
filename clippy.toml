@@ -21,3 +21,7 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+
+# Byte values are immutable. Their OnceLocks cache only a deterministic digest or exact slice
+# materialization; neither changes equality, ordering or hashing. Keep checking other mutable keys.
+ignore-interior-mutability = ["bytes::Bytes", "blossom_value::bytes::BytesValue"]
