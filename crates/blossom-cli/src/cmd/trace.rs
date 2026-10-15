@@ -1111,10 +1111,14 @@ fn measured_plan_options(
     if first.zip(last).is_some_and(|(a, b)| a > b) {
         return Err("first tick exceeds last tick".into());
     }
-    let (_, mut replay) = open_workers(&common, options)?;
+    let (artifact, mut replay) = open_workers(&common, options)?;
+    let names = Names { artifact: &artifact };
     replay.profile(true).map_err(err)?;
     let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
     let mut compiled_start = BTreeMap::new();
+    let mut functions: BTreeMap<FnId, FnWork> = BTreeMap::new();
+    let mut boundaries: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    let mut recorded_bounds = None;
     let mut ticks = 0u64;
     let mut elapsed = 0u128;
     while let Some(tick) = replay.peek_tick().map_err(err)? {
@@ -1138,6 +1142,44 @@ fn measured_plan_options(
         }
         elapsed += duration;
         ticks += 1;
+        let bounds = recorded_bounds.get_or_insert((r.inputs.now.0, r.inputs.now.0));
+        bounds.1 = r.inputs.now.0;
+        let mut add = |kind: &str, rel: RelId, count: usize| {
+            *boundaries
+                .entry(kind.into())
+                .or_default()
+                .entry(names.rel_name(rel))
+                .or_default() += count as u64;
+        };
+        for (rel, _) in &r.inputs.events {
+            add("events", *rel, 1);
+        }
+        for row in &r.inputs.delivered {
+            add("delivered", row.rel, 1);
+        }
+        for row in &r.inputs.ingress {
+            add("ingress", row.rel, 1);
+        }
+        for row in &r.sent {
+            add("sent", row.rel, 1);
+        }
+        for row in &r.host {
+            add("host", row.rel, 1);
+        }
+        if let Some(changes) = &r.changes {
+            for (rel, rows) in &changes.inserted {
+                add("inserted", *rel, rows.len());
+            }
+            for (rel, rows) in &changes.deleted {
+                add("deleted", *rel, rows.len());
+            }
+        }
+        for (id, n) in r.fn_work {
+            let f = functions.entry(id).or_default();
+            f.calls += n.calls;
+            f.steps += n.steps;
+            f.self_steps += n.self_steps;
+        }
         for (id, n) in r.work {
             let w = work.entry(id).or_default();
             w.rows += n.rows;
@@ -1179,7 +1221,11 @@ fn measured_plan_options(
         }
         hash.update(buffer.get(..n).ok_or("invalid read size")?);
     }
-    let value = serde_json::json!({"report_version":1,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins,"packed_indexes":options.packed_indexes,"fuse_relations":options.fuse_relations},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
+    let functions: Vec<_> = functions.into_iter().map(|(id, work)| {
+        let name = names.program().fns.get(id).map_or_else(|| format!("{id:?}"), |f| f.name.to_string());
+        serde_json::json!({"id":id.raw(),"name":name,"calls":work.calls,"self_steps":work.self_steps,"inclusive_steps":work.steps})
+    }).collect();
+    let value = serde_json::json!({"report_version":1,"boundary_rows":boundaries,"functions":functions,"recorded_time_bounds_ns":recorded_bounds,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins,"packed_indexes":options.packed_indexes,"fuse_relations":options.fuse_relations},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
     Ok(value)
 }
 
@@ -1321,6 +1367,15 @@ mod plan_tests {
             assert_eq!(window["execution"][flag], true);
         }
         assert_eq!(count(&whole), count(&prefix) + count(&window));
+        for (kind, relations) in whole["boundary_rows"].as_object().unwrap() {
+            for (rel, total) in relations.as_object().unwrap() {
+                assert_eq!(
+                    total.as_u64().unwrap(),
+                    prefix["boundary_rows"][kind][rel].as_u64().unwrap_or(0)
+                        + window["boundary_rows"][kind][rel].as_u64().unwrap_or(0)
+                );
+            }
+        }
         assert_eq!(a["ticks"], 3);
         let parsed: blossom_engine::PlanReport = serde_json::from_value(a["plan"].clone()).unwrap();
         assert!(
