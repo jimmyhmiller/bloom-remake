@@ -88,7 +88,7 @@ impl CellSpec {
     }
 }
 
-type Index = BTreeMap<Vec<Value>, RowBucket>;
+use crate::arrangement::Index;
 
 /// Rows by the values of some of their columns, hashed.
 type RowsBy = blossom_base::det::DetMap<Vec<Value>, RowBucket>;
@@ -915,6 +915,8 @@ pub(crate) struct Store {
     inspection: Option<InspectionCounters>,
     lazy_estimates: bool,
     declared_key: Option<Vec<usize>>,
+    index_fields: Vec<Option<crate::row_support::Layout>>,
+    packed_indexes: bool,
     estimate_samples: ProbeCache<BTreeMap<Vec<usize>, (u32, usize)>>,
     index_epoch: std::sync::atomic::AtomicU64,
 
@@ -1015,6 +1017,10 @@ struct InspectionCounters {
 impl Store {
     pub(crate) fn inspection_key(&self) -> Option<Vec<usize>> {
         self.declared_key.clone()
+    }
+
+    pub(crate) fn packed_indexes(&mut self, on: bool) {
+        self.packed_indexes = on;
     }
 
     pub(crate) fn lazy_estimates(&mut self, on: bool) {
@@ -1156,6 +1162,7 @@ impl Store {
     /// Compile the physical support key once; lattice contributions retain full-row support.
     pub fn with_schema(mut self, schema: &blossom_ir::core::Schema, types: &blossom_value::TypeTable) -> Self {
         self.declared_key = Some(schema.key.iter().map(|c| c.index()).collect());
+        self.index_fields = crate::row_support::Layout::columns(schema, types);
         if self.batch.is_none()
             && self.cell.is_none()
             && let Some(layout) = crate::row_support::Layout::of(schema, types)
@@ -1196,6 +1203,8 @@ impl Store {
         store.counts = self.counts.emptied();
         store.lazy_estimates = self.lazy_estimates;
         store.declared_key = self.declared_key.clone();
+        store.index_fields = self.index_fields.clone();
+        store.packed_indexes = self.packed_indexes;
         store.inspection = self.inspection.as_ref().map(|m| InspectionCounters {
             probes: std::sync::atomic::AtomicU64::new(m.probes.load(std::sync::atomic::Ordering::Relaxed)),
             membership: m.membership,
@@ -1715,7 +1724,7 @@ impl Store {
         }
         self.count_blobs(&row, true);
         for (cols, index) in self.indexes.get_mut() {
-            index.entry(key(&row, cols)).or_default().insert(row.clone());
+            index.insert_row(cols, row.clone());
         }
         if self.cell.is_some() {
             self.merged_rows.insert(row.clone());
@@ -1811,6 +1820,10 @@ impl Store {
 
     /// Builds the index on `cols` if there is none.
     /// (A tiered store keeps none: the cold side keeps its own.)
+    pub(crate) fn inspection_packed_indexes(&self) -> usize {
+        self.indexes.borrow().values().filter(|i| i.is_packed()).count()
+    }
+
     pub(crate) fn inspection_indexes(&self) -> Vec<Vec<usize>> {
         self.indexes.borrow().keys().cloned().collect()
     }
@@ -1824,7 +1837,11 @@ impl Store {
         {
             return;
         }
-        let mut index = Index::new();
+        let layout = self
+            .packed_indexes
+            .then(|| crate::row_support::Layout::select(&self.index_fields, cols))
+            .flatten();
+        let mut index = Index::new(cols, layout);
         let rows = if let Some(rows) = &self.batch {
             Present::Batch(rows.keys())
         } else if self.cell.is_some() {
@@ -1833,13 +1850,14 @@ impl Store {
             Present::Set(self.counts.iter())
         };
         for row in rows {
-            index.entry(key(row, cols)).or_default().insert(row.clone());
+            index.insert_row(cols, row.clone());
         }
         if let Some(m) = &self.inspection {
             m.index_build_rows
                 .fetch_add(self.present_len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        self.indexes.borrow_mut().insert(cols.to_vec(), index);
+        // A concurrent range reader may already have promoted this index.
+        self.indexes.borrow_mut().entry(cols.to_vec()).or_insert(index);
         if self.lazy_estimates {
             self.index_epoch.fetch_add(1, Ordering::Relaxed);
         }
@@ -1881,7 +1899,7 @@ impl Store {
         }
         if !self.lazy_estimates {
             self.ensure_index(cols);
-            let keys = self.indexes.borrow().get(cols).map_or(1, BTreeMap::len).max(1);
+            let keys = self.indexes.borrow().get(cols).map_or(1, Index::len).max(1);
             return n.div_ceil(keys);
         }
         // Costing must not materialize a rejected candidate's index.
@@ -2103,6 +2121,12 @@ impl Store {
         let mut key_cols = cols.to_vec();
         key_cols.push(col);
         self.ensure_index(&key_cols);
+        {
+            let mut indexes = self.indexes.borrow_mut();
+            if let Some(index) = indexes.get_mut(&key_cols) {
+                index.make_ordered();
+            }
+        }
         let indexes = self.indexes.borrow();
         let index = indexes
             .get(&key_cols)
@@ -2128,7 +2152,11 @@ impl Store {
             Bound::Unbounded => Bound::Included(start),
         };
         let mut out: Vec<Row> = Vec::new();
-        for (k, bucket) in index.range((lower, Bound::Unbounded)) {
+        for (k, bucket) in index
+            .ordered()
+            .ok_or_else(|| internal_error!("range arrangement was not ordered"))?
+            .range((lower, Bound::Unbounded))
+        {
             let (prefix, last) = k.split_at(k.len().saturating_sub(1));
             if prefix != values {
                 break;

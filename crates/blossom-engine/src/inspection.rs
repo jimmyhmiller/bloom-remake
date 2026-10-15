@@ -45,6 +45,9 @@ pub struct StoreReport {
     pub physical_key: Option<Vec<usize>>,
     #[serde(default)]
     pub batch_backed: bool,
+    /// Currently resident schema-compiled equality arrangements.
+    #[serde(default)]
+    pub packed_indexes: usize,
 }
 /// Versioned snapshot. Unknown metrics are deliberately not represented as zero measurements.
 #[derive(Clone, Debug, Serialize, Deserialize)]

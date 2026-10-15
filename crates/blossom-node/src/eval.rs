@@ -506,6 +506,12 @@ impl Executors {
         self
     }
 
+    /// Use schema-compiled equality arrangements.
+    pub fn with_packed_indexes(mut self, enabled: bool) -> Executors {
+        self.engine.packed_indexes = enabled;
+        self
+    }
+
     /// Compile pure relational terms to source-column kernels.
     pub fn with_compiled_joins(mut self, enabled: bool) -> Executors {
         self.engine.compiled_joins = enabled;

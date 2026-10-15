@@ -80,6 +80,8 @@ pub struct EngineConfig {
     pub infer_keys: bool,
     /// Compile pure relational joins/projections to source-column execution kernels.
     pub compiled_joins: bool,
+    /// Compile equality arrangement keys from relation schemas.
+    pub packed_indexes: bool,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -557,6 +559,7 @@ impl Engine {
         }
         for store in stores.values_mut() {
             store.lazy_estimates(cfg.lazy_indexes);
+            store.packed_indexes(cfg.packed_indexes);
         }
         // Scoped identity stages share their source. Stratification has already ruled out cycles;
         // no facts, carry, second writer or lattice contribution can be hidden by this physical fusion.
@@ -3387,6 +3390,7 @@ impl Engine {
                     operations: store.inspection_operations(),
                     physical_key: store.inspection_key(),
                     batch_backed: store.is_batch(),
+                    packed_indexes: store.inspection_packed_indexes(),
                 }
             })
             .collect();

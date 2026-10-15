@@ -79,6 +79,27 @@ impl Field {
 }
 
 impl Layout {
+    pub(crate) fn columns(schema: &Schema, types: &TypeTable) -> Vec<Option<Self>> {
+        schema
+            .cols
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Some(Self(vec![(i, Field::of(types.get(c.ty)?, types)?)])))
+            .collect()
+    }
+    pub(crate) fn select(fields: &[Option<Self>], cols: &[usize]) -> Option<Self> {
+        let mut out = Vec::new();
+        for col in cols {
+            out.extend(fields.get(*col)?.as_ref()?.0.iter().cloned());
+        }
+        Some(Self(out))
+    }
+    pub(crate) fn probe_key<'a>(&self, values: &'a [Value]) -> Option<KeyRef<'a>> {
+        if values.len() != self.0.len() {
+            return None;
+        }
+        self.pack(values.iter().map(Some))
+    }
     pub(crate) fn of(schema: &Schema, types: &TypeTable) -> Option<Self> {
         if !schema.lattice.is_empty() {
             return None;
@@ -562,5 +583,127 @@ mod borrowed_tests {
             Value::Int(IntValue::U64(0)),
         ]);
         assert_eq!(support.change(&wrong, 1), None);
+    }
+}
+
+#[cfg(test)]
+mod arrangement_tests {
+    use super::*;
+    use crate::arrangement::Index;
+    use blossom_value::IntTy;
+
+    #[test]
+    fn packed_arrangements_preserve_payloads_and_promote_exactly() {
+        let layout = Layout(vec![(
+            0,
+            Field::Tuple(vec![
+                Field::Scalar(TypeDef::Int(IntTy::I64)),
+                Field::Scalar(TypeDef::Bytes),
+            ]),
+        )]);
+        let mut index = Index::new(&[0], Some(layout));
+        let mut expected = BTreeMap::<Vec<Value>, Vec<Row>>::new();
+        for k in -20..20 {
+            for payload in 0..3 {
+                let key = Value::Tuple(Arc::from([
+                    Value::Int(IntValue::I64(k)),
+                    Value::Bytes(vec![k as u8; 256].into()),
+                ]));
+                let row: Row = Arc::from([key.clone(), Value::u64(payload)]);
+                expected.entry(vec![key.clone()]).or_default().push(row.clone());
+                index.insert(vec![key], row);
+            }
+        }
+        assert_eq!(index.len(), expected.len());
+        for (key, rows) in &expected {
+            assert_eq!(index.get(key).unwrap().iter().cloned().collect::<Vec<_>>(), *rows);
+        }
+        let (key, rows) = expected.first_key_value().unwrap();
+        index.get_mut(key).unwrap().remove(&rows[0]);
+        assert_eq!(index.get(key).unwrap().iter().len(), 2);
+        index.insert(key.clone(), rows[0].clone());
+        index.make_ordered();
+        let ordered = index.ordered().unwrap();
+        assert_eq!(ordered.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>());
+        for (key, rows) in &expected {
+            assert_eq!(index.get(key).unwrap().iter().cloned().collect::<Vec<_>>(), *rows);
+        }
+        index.remove(key);
+        assert!(index.get(key).is_none());
+        index.clear();
+        assert_eq!(index.len(), 0);
+    }
+
+    #[test]
+    fn unexpected_values_promote_without_losing_existing_rows() {
+        let layout = Layout(vec![(0, Field::Scalar(TypeDef::Int(IntTy::U64)))]);
+        let mut index = Index::new(&[0], Some(layout));
+        let a: Row = Arc::from([Value::u64(4)]);
+        let b: Row = Arc::from([Value::Bool(true)]);
+        index.insert(a.to_vec(), a.clone());
+        assert!(index.get(&b).is_none());
+        index.insert(b.to_vec(), b.clone());
+        assert!(index.ordered().is_some());
+        assert!(index.get(&a).is_some());
+        assert!(index.get(&b).is_some());
+    }
+}
+
+#[cfg(test)]
+mod arrangement_store_tests {
+    use super::*;
+    use crate::store::Store;
+    use blossom_ir::core::Column;
+    use std::ops::Bound;
+    #[test]
+    fn concurrent_first_probes_and_ranges_keep_old_and_new_versions_exact() {
+        let mut types = TypeTable::new();
+        let ty = types.insert(TypeDef::Int(blossom_value::IntTy::I64)).unwrap();
+        let schema = Schema {
+            cols: vec![Column {
+                name: "key".into(),
+                ty,
+                field_no: None,
+                default: None,
+                since: None,
+                deprecated: None,
+                hidden_dest: false,
+            }],
+            key: vec![],
+            payload: vec![],
+            lattice: vec![],
+        };
+        let mut store = Store::new(None, false).with_schema(&schema, &types);
+        store.packed_indexes(true);
+        let rows: Vec<Row> = (-30..30).map(|v| Arc::from([Value::Int(IntValue::I64(v))])).collect();
+        for row in &rows {
+            store.add(row.clone(), 1).unwrap();
+        }
+        store.clear_delta();
+        store.add(rows[7].clone(), -1).unwrap();
+        let extra: Row = Arc::from([Value::Int(IntValue::I64(40))]);
+        store.add(extra.clone(), 1).unwrap();
+        std::thread::scope(|scope| {
+            for n in 0..8 {
+                let store = &store;
+                let rows = &rows;
+                scope.spawn(move || {
+                    if n % 2 == 0 {
+                        assert_eq!(store.rows(true, &[0], &rows[7]).unwrap(), vec![rows[7].clone()]);
+                    }
+                    let old = store
+                        .range_rows(true, &[], &[], 0, Bound::Unbounded, Bound::Unbounded)
+                        .unwrap();
+                    let mut old = old;
+                    old.sort();
+                    assert_eq!(old, *rows);
+                    assert!(store.rows(false, &[0], &rows[7]).unwrap().is_empty());
+                });
+            }
+        });
+        let mut empty = store.emptied();
+        empty.add(extra.clone(), 1).unwrap();
+        assert_eq!(empty.rows(false, &[0], &extra).unwrap(), vec![extra]);
+        assert_eq!(empty.inspection_packed_indexes(), 1);
     }
 }

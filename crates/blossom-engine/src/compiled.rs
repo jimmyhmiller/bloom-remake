@@ -90,6 +90,7 @@ pub(crate) struct Kernel {
     seed: Option<Binding>,
     ops: Vec<Op>,
     head: Vec<Source>,
+    identity_head: Option<usize>,
     slots: usize,
 }
 fn terms(a: &Atom) -> impl Iterator<Item = Term> + '_ {
@@ -195,11 +196,23 @@ impl Kernel {
                 HeadArg::Term(t) => source(t, &bound),
                 _ => None,
             })
-            .collect::<Option<_>>()?;
+            .collect::<Option<Vec<_>>>()?;
+        let identity_head = match head.first() {
+            Some(Source::Column(lit, 0))
+                if head
+                    .iter()
+                    .enumerate()
+                    .all(|(i, s)| matches!(s, Source::Column(l,c) if l == lit && *c == i)) =>
+            {
+                Some(*lit)
+            }
+            _ => None,
+        };
         Some(Self {
             seed,
             ops,
             head,
+            identity_head,
             slots: rule.body.lits.len(),
         })
     }
@@ -241,6 +254,14 @@ impl Kernel {
         examined: &mut u64,
     ) -> Result<(), EvalError> {
         let Some(op) = self.ops.get(pc) else {
+            if let Some(row) = self
+                .identity_head
+                .and_then(|lit| rows.get(lit))
+                .and_then(Option::as_ref)
+                && row.len() == self.head.len()
+            {
+                return emit(row.clone(), rows);
+            }
             let head = self
                 .head
                 .iter()

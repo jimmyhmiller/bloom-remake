@@ -166,6 +166,7 @@ struct RawStorage {
     pipeline_batches: Option<bool>,
     infer_keys: Option<bool>,
     compiled_joins: Option<bool>,
+    packed_indexes: Option<bool>,
     cache_bytes: Option<usize>,
     tail_certification: Option<String>,
 }
@@ -238,6 +239,7 @@ pub struct DeploymentSpec {
     /// Infer compact physical keys for deterministic derived relations.
     pub infer_keys: bool,
     pub compiled_joins: bool,
+    pub packed_indexes: bool,
     /// Database decoded-block retention budget (`None`: LSM default; zero disables retention).
     pub cache_bytes: Option<usize>,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
@@ -431,6 +433,7 @@ impl DeploymentSpec {
             pipeline_batches: raw.storage.pipeline_batches.unwrap_or(false),
             infer_keys: raw.storage.infer_keys.unwrap_or(false),
             compiled_joins: raw.storage.compiled_joins.unwrap_or(false),
+            packed_indexes: raw.storage.packed_indexes.unwrap_or(false),
             cache_bytes: raw.storage.cache_bytes,
             tail_certification,
             stream_limits,

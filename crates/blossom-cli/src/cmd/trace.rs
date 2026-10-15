@@ -68,6 +68,9 @@ pub enum TraceCommand {
         /// Compile pure relational delta terms to source-column kernels.
         #[arg(long)]
         compiled_joins: bool,
+        /// Compile secondary equality index keys from relation schemas.
+        #[arg(long)]
+        packed_indexes: bool,
         /// Read-only evaluation workers; state mutation remains serial.
         #[arg(long, default_value_t = 1)]
         workers: usize,
@@ -594,6 +597,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             pipeline_batches,
             infer_keys,
             compiled_joins,
+            packed_indexes,
             no_measurement,
         } => plan_workload(
             common,
@@ -608,6 +612,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 pipeline_batches,
                 infer_keys,
                 compiled_joins,
+                packed_indexes,
             },
         ),
         TraceCommand::Replay { common, slow } => {
@@ -808,7 +813,6 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             let names = Names { artifact: &artifact };
             replay.profile(true).map_err(err)?;
             let mut work: BTreeMap<RuleId, RuleWork> = BTreeMap::new();
-            let mut compiled_start = BTreeMap::new();
             let mut fns: BTreeMap<FnId, FnWork> = BTreeMap::new();
             let mut ticks = 0u64;
             while let Some(r) = replay.next(false).map_err(err)? {
@@ -1112,10 +1116,11 @@ fn measured_plan_options(
         if last.is_some_and(|last| tick.0 > last) {
             break;
         }
-        if ticks == 0 && first.is_none_or(|first| tick.0 >= first) {
-            if let Some(plan) = replay.plan_report() {
-                compiled_start = plan.rules.into_iter().map(|r| (r.id, r.work.compiled_terms)).collect();
-            }
+        if ticks == 0
+            && first.is_none_or(|first| tick.0 >= first)
+            && let Some(plan) = replay.plan_report()
+        {
+            compiled_start = plan.rules.into_iter().map(|r| (r.id, r.work.compiled_terms)).collect();
         }
         if measured && ticks == 0 && first.is_none_or(|first| tick.0 >= first) && !replay.measure_plan(true) {
             return Err("executor cannot measure plans".into());
@@ -1169,7 +1174,7 @@ fn measured_plan_options(
         }
         hash.update(buffer.get(..n).ok_or("invalid read size")?);
     }
-    let value = serde_json::json!({"report_version":1,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
+    let value = serde_json::json!({"report_version":1,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins,"packed_indexes":options.packed_indexes},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
     Ok(value)
 }
 
@@ -1280,6 +1285,32 @@ mod plan_tests {
         let a = measured_plan(common(), Some(2), Some(4), 1, true).unwrap();
         let b = measured_plan(common(), Some(2), Some(4), 2, true).unwrap();
         let plain = measured_plan(common(), Some(2), Some(4), 1, false).unwrap();
+        let compiled = |first, last| {
+            measured_plan_options(
+                common(),
+                Some(first),
+                Some(last),
+                false,
+                ReplayOptions {
+                    compiled_joins: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let count = |report: &serde_json::Value| {
+            report["plan"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["work"]["compiled_terms"].as_u64().unwrap())
+                .sum::<u64>()
+        };
+        let prefix = compiled(0, 1);
+        let window = compiled(2, 4);
+        let whole = compiled(0, 4);
+        assert!(count(&window) > 0);
+        assert_eq!(count(&whole), count(&prefix) + count(&window));
         assert_eq!(a["ticks"], 3);
         let parsed: blossom_engine::PlanReport = serde_json::from_value(a["plan"].clone()).unwrap();
         assert!(

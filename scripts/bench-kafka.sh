@@ -56,6 +56,8 @@ blossom_up() {
     if [ -n "${EVAL_WORKERS:-}" ]; then printf 'eval_workers = %s\n' "$EVAL_WORKERS"; fi
     if [ -n "${MAP_CACHE_ROWS:-}" ]; then printf 'map_cache_rows = %s\n' "$MAP_CACHE_ROWS"; fi
     if [ -n "${MAP_CACHE_JOINS:-}" ]; then printf 'map_cache_joins = %s\n' "$MAP_CACHE_JOINS"; fi
+    if [ -n "${PACKED_INDEXES:-}" ]; then printf 'packed_indexes = %s\n' "$PACKED_INDEXES"; fi
+    if [ -n "${COMPILED_JOINS:-}" ]; then printf 'compiled_joins = %s\n' "$COMPILED_JOINS"; fi
     if [ -n "${INFER_KEYS:-}" ]; then printf 'infer_keys = %s\n' "$INFER_KEYS"; fi
     if [ -n "${PIPELINE_BATCHES:-}" ]; then printf 'pipeline_batches = %s\n' "$PIPELINE_BATCHES"; fi
     if [ -n "${LAZY_INDEXES:-}" ]; then printf 'lazy_indexes = %s\n' "$LAZY_INDEXES"; fi

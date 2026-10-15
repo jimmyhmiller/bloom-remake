@@ -33,3 +33,4 @@ view projected(a) = left(k, a, _), right(k, _);
 view self_join(a, b) = left(k, a, _), left(k, _, b);
 view absent() = not blocked(_);
 view no_match(k) = left(k, _, _), not right(k, 7u64);
+view filtered_identity(k, a, b) = left(k, a, b), not blocked(k);

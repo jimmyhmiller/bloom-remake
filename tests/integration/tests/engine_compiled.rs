@@ -27,6 +27,7 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
         let mut reference = Engine::new(a.program.clone(), NodeId(0), EngineConfig::default()).unwrap();
         let config = EngineConfig {
             compiled_joins: true,
+            packed_indexes: true,
             workers,
             map_cache_rows: 64,
             map_cache_joins: true,
@@ -89,6 +90,16 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
             assert!(
                 candidate
                     .plan_report()
+                    .stores
+                    .iter()
+                    .map(|s| s.packed_indexes)
+                    .sum::<usize>()
+                    > 0,
+                "packed arrangements at tick {t}"
+            );
+            assert!(
+                candidate
+                    .plan_report()
                     .rules
                     .iter()
                     .map(|r| r.work.compiled_terms)
@@ -118,6 +129,7 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
         a.program.clone(),
         EngineConfig {
             compiled_joins: true,
+            packed_indexes: true,
             node_names: vec![Arc::from("n1")],
             seed: Some(Seed::from_u64(7)),
             ..Default::default()
