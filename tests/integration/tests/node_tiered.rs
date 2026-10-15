@@ -63,7 +63,11 @@ impl Fixture {
     }
 
     fn with(backend: Backend, hot_rows: Option<usize>, tiered: bool) -> Fixture {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/db/tiered.bls");
+        Self::with_source(backend, hot_rows, tiered, "fixtures/db/tiered.bls")
+    }
+
+    fn with_source(backend: Backend, hot_rows: Option<usize>, tiered: bool, source: &str) -> Fixture {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(source);
         let (result, _) = compile_file(
             path.to_str().unwrap(),
             &[NodeSpec {
@@ -450,4 +454,40 @@ fn a_record_logs_the_rows_a_tick_wrote_beyond_the_carried_ones() {
     delta.written.insert(armed, (rows(&[7]), Vec::new()));
     let decoded = codec.decode_delta(&codec.encode_delta(&delta).unwrap()).unwrap();
     assert_eq!(decoded, delta);
+}
+
+#[test]
+fn forward_aliases_of_durable_and_mixed_views_preserve_persistence_ownership() {
+    let k = Fixture::with_source(Backend::Checked, Some(32), true, "fixtures/db/tiered_aliases.bls");
+    let mut fs = SimFs::default();
+    let mut now = 10i64;
+    let mut previous = None;
+    for run in 0..4u64 {
+        let mut d = k.boot(&fs);
+        d.run_until_quiescent(Instant(now)).unwrap();
+        if let Some(image) = &previous {
+            assert_eq!(image, &k.released(&d));
+        }
+        for step in 0..6u64 {
+            let key = run * 10 + step;
+            k.offer(&mut d, "put", vec![u(key), u(if step % 2 == 0 { 1402 } else { 2 })]);
+            k.offer(&mut d, "pend", vec![u(key + 100)]);
+            k.offer(&mut d, "bump", vec![u(key), u(step + 1)]);
+            now += 1;
+            d.run_until_quiescent(Instant(now)).unwrap();
+            for n in [key, key + 100, 0] {
+                k.offer(&mut d, "check", vec![u(n)]);
+            }
+            if step % 2 == 1 {
+                k.offer(&mut d, "drop", vec![u(key - 1)]);
+            }
+            now += 1;
+            d.run_until_quiescent(Instant(now)).unwrap();
+            d.flush().unwrap();
+        }
+        previous = Some(k.released(&d));
+        drop(d);
+        fs = crashed(&fs);
+        now += 10_000_000_000;
+    }
 }

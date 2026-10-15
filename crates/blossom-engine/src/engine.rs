@@ -554,9 +554,7 @@ impl Engine {
         for store in stores.values_mut() {
             store.lazy_estimates(cfg.lazy_indexes);
         }
-        // Identity stages share their source. Scoped views always qualify; the experimental pipeline
-        // also eliminates persistent identity stages over non-durable, non-lattice derived sources.
-        // Stratification has already ruled out cycles;
+        // Scoped identity stages share their source. Stratification has already ruled out cycles;
         // no facts, carry, second writer or lattice contribution can be hidden by this physical fusion.
         for s in &strata_list {
             if s.recursive {
@@ -565,9 +563,8 @@ impl Engine {
             for id in &s.rules {
                 let Some(rule) = p.rules.get(*id) else { continue };
                 let Some(plan) = plans.get(id) else { continue };
-                let scoped_identity = plan.regime == Regime::Scoped && scoped_derived.contains(&rule.head.rel);
-                let persistent_identity = cfg.pipeline_batches && plan.regime == Regime::Delta;
-                if !(scoped_identity || persistent_identity)
+                if plan.regime != Regime::Scoped
+                    || !scoped_derived.contains(&rule.head.rel)
                     || rule.head.mode != HeadMode::Insert
                     || p.rels
                         .get(rule.head.rel)
@@ -585,14 +582,6 @@ impl Engine {
                 let [Literal::Pos(a)] = rule.body.lits.as_slice() else {
                     continue;
                 };
-                if persistent_identity
-                    && !scoped_identity
-                    && p.rels
-                        .get(a.rel)
-                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
-                {
-                    continue;
-                }
                 if crate::upsert::is_identity_atom(rule, a) {
                     stores.alias(plan.head, rule::atom_store(a))?;
                 }
@@ -856,8 +845,74 @@ impl Engine {
             rebuilding: false,
             program,
         };
+        if cfg.pipeline_batches {
+            // A non-durable declaration can still become an automatically maintained durable view.
+            // Protect every source that could be mounted on a database, including mixed views and
+            // durable lattice tables kept in memory. This is independent of the current reset mode.
+            let sources = engine
+                .program
+                .get()
+                .rels
+                .iter_enumerated()
+                .filter(|(_, r)| r.durable)
+                .map(|(id, _)| id)
+                .collect();
+            let mut protected = engine.durable_views_over(&sources);
+            let (mixed, _) = engine.mixed_relations_over(&protected, &sources);
+            protected.extend(mixed);
+            engine.fuse_persistent_identities(&protected)?;
+        }
         engine.build_indexes()?;
         Ok(engine)
+    }
+
+    /// An identity stage may share an in-memory source, but never a source whose view writes
+    /// can be drained independently into the database under a different logical relation id.
+    fn fuse_persistent_identities(&mut self, protected: &BTreeSet<RelId>) -> Result<(), EvalError> {
+        let program = self.program.clone();
+        let p = program.get();
+        for s in self.strata.iter() {
+            if s.recursive {
+                continue;
+            }
+            for id in &s.rules {
+                let Some(rule) = p.rules.get(*id) else { continue };
+                let Some(plan) = self.plans.get(id) else { continue };
+                let rel = rule.head.rel;
+                if plan.regime != Regime::Delta
+                    || rule.head.mode != HeadMode::Insert
+                    || plan.aggregate
+                    || plan.frame.is_some()
+                    || plan.upsert_delete.is_some()
+                    || protected.contains(&rel)
+                    || self.stores.is_alias(plan.head)
+                    || p.rels
+                        .get(rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
+                    || p.facts.iter().any(|f| f.rel == rel)
+                    || p.rules
+                        .iter_enumerated()
+                        .filter(|(id, r)| self.plans.contains_key(id) && r.head.rel == rel)
+                        .count()
+                        != 1
+                {
+                    continue;
+                }
+                let [Literal::Pos(atom)] = rule.body.lits.as_slice() else {
+                    continue;
+                };
+                if protected.contains(&atom.rel)
+                    || p.rels
+                        .get(atom.rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
+                    || !crate::upsert::is_identity_atom(rule, atom)
+                {
+                    continue;
+                }
+                self.stores.alias(plan.head, rule::atom_store(atom))?;
+            }
+        }
+        Ok(())
     }
 
     /// Creates every index a term, a check or a key check probes.
@@ -1214,6 +1269,10 @@ impl Engine {
     /// atoms read tiered tables, static relations or other such relations; no fact holds a row of one, and no other
     /// rule writes one. Their rows can be kept in the database with the tables', and are the same after a restart.
     pub fn durable_views(&self) -> BTreeSet<RelId> {
+        self.durable_views_over(&self.tiered.union(&self.durable_in_memory).copied().collect())
+    }
+
+    fn durable_views_over(&self, persistent: &BTreeSet<RelId>) -> BTreeSet<RelId> {
         let p = self.program.get();
         let recursive: BTreeSet<RelId> = self
             .strata
@@ -1254,8 +1313,7 @@ impl Engine {
             .map(|(rel, _)| *rel)
             .collect();
         let source = |rel: &RelId, views: &BTreeSet<RelId>| {
-            self.tiered.contains(rel)
-                || self.durable_in_memory.contains(rel)
+            persistent.contains(rel)
                 || views.contains(rel)
                 || p.rels.get(*rel).is_some_and(|d| d.class == RelClass::Static)
         };
@@ -1384,6 +1442,14 @@ impl Engine {
     /// support can be kept on the cold side, the rest in memory (DATABASE.md §8). Not sources of durable views: part of
     /// them is lost on a restart.
     fn mixed_relations(&self, views: &BTreeSet<RelId>) -> (BTreeSet<RelId>, BTreeSet<RuleId>) {
+        self.mixed_relations_over(views, &self.tiered.union(&self.durable_in_memory).copied().collect())
+    }
+
+    fn mixed_relations_over(
+        &self,
+        views: &BTreeSet<RelId>,
+        persistent: &BTreeSet<RelId>,
+    ) -> (BTreeSet<RelId>, BTreeSet<RuleId>) {
         let p = self.program.get();
         let recursive: BTreeSet<RelId> = self
             .strata
@@ -1394,8 +1460,7 @@ impl Engine {
             .collect();
         let facts: BTreeSet<RelId> = p.facts.iter().map(|f| f.rel).collect();
         let source = |rel: &RelId| {
-            self.tiered.contains(rel)
-                || self.durable_in_memory.contains(rel)
+            persistent.contains(rel)
                 || views.contains(rel)
                 || p.rels.get(*rel).is_some_and(|d| d.class == RelClass::Static)
         };
