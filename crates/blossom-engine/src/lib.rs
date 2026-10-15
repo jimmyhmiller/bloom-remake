@@ -16,6 +16,7 @@ mod engine;
 mod expr;
 mod func;
 mod functional_keys;
+mod fusion;
 mod inspection;
 mod map_cache;
 mod probe_cache;

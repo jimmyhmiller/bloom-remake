@@ -82,6 +82,8 @@ pub struct EngineConfig {
     pub compiled_joins: bool,
     /// Compile equality arrangement keys from relation schemas.
     pub packed_indexes: bool,
+    /// Fuse lossless transient relational views into pure consumers.
+    pub fuse_relations: bool,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -94,6 +96,8 @@ struct Group {
 
 pub struct Engine {
     program: ValidatedProgram,
+    execution: ValidatedProgram,
+    virtuals: BTreeMap<RelId, crate::compiled::Kernel>,
     shared: Shared,
     node: NodeId,
     plans: Plans,
@@ -349,7 +353,7 @@ fn cell_spec(p: &Program, kinds: &[Option<Kind>], rel: RelId, extra: usize) -> R
 /// read one positively and aggregate nothing, that has no facts, merges no lattice and is in no recursive stratum. Its
 /// rules can be evaluated from scratch each tick instead of retracting the last tick's rows one by one
 /// ([`Regime::Scoped`]); readers that are not themselves scoped see the retraction as a change, as before.
-fn tick_scoped(p: &Program, rules: &[RuleId], recursive: &BTreeSet<RelId>) -> BTreeSet<RelId> {
+pub(crate) fn tick_scoped(p: &Program, rules: &[RuleId], recursive: &BTreeSet<RelId>) -> BTreeSet<RelId> {
     let mut scoped: BTreeSet<RelId> = p
         .rels
         .iter_enumerated()
@@ -455,6 +459,13 @@ impl Engine {
             cfg.roles.get(node.0 as usize).copied().flatten()
         };
         let runs = |rule: &Rule| rule.role.is_none_or(|r| Some(r) == my_role);
+        let (execution, virtual_rules) = if cfg.fuse_relations {
+            crate::fusion::compile(&program, &runs)?
+        } else {
+            (program.clone(), BTreeMap::new())
+        };
+        let p = execution.get();
+
         let mut plans = Plans::default();
         let mut inductive = Vec::new();
         let mut asynchronous = Vec::new();
@@ -463,7 +474,7 @@ impl Engine {
                 continue;
             }
             let mut plan = Plan::new(rule)?;
-            plan.compiled = cfg.compiled_joins && crate::compiled::Kernel::eligible(rule);
+            plan.compiled = (cfg.compiled_joins || cfg.fuse_relations) && crate::compiled::Kernel::eligible(rule);
             plan.upsert_delete = crate::upsert::UpsertDelete::of(p, rule);
             plan.frame = p
                 .rels
@@ -788,6 +799,20 @@ impl Engine {
                 }
             })
             .collect();
+        let mut virtuals = BTreeMap::new();
+        for (rel, id) in virtual_rules {
+            let rule = p
+                .rules
+                .get(id)
+                .ok_or_else(|| internal_error!("fused observer rule missing"))?;
+            let plan = plans
+                .get(&id)
+                .ok_or_else(|| internal_error!("fused observer plan missing"))?;
+            let order = plan.order_for(rule, None, &|_, _, _| 1);
+            let kernel = crate::compiled::Kernel::compile(rule, plan, &order, None)
+                .ok_or_else(|| internal_error!("fused observer cannot compile"))?;
+            virtuals.insert(rel, kernel);
+        }
         let mut engine = Engine {
             shared: Shared {
                 params: cfg.params,
@@ -852,6 +877,8 @@ impl Engine {
             boot: None,
             rebuilding: false,
             program,
+            execution,
+            virtuals,
         };
         if cfg.pipeline_batches {
             // A non-durable declaration can still become an automatically maintained durable view.
@@ -877,7 +904,7 @@ impl Engine {
     /// An identity stage may share an in-memory source, but never a source whose view writes
     /// can be drained independently into the database under a different logical relation id.
     fn fuse_persistent_identities(&mut self, protected: &BTreeSet<RelId>) -> Result<(), EvalError> {
-        let program = self.program.clone();
+        let program = self.execution.clone();
         let p = program.get();
         for s in self.strata.iter() {
             if s.recursive {
@@ -925,7 +952,7 @@ impl Engine {
 
     /// Creates every index a term, a check or a key check probes.
     fn build_indexes(&mut self) -> Result<(), EvalError> {
-        let p = self.program.get();
+        let p = self.execution.get();
         let mut wanted: BTreeSet<(StoreKey, Vec<usize>)> = BTreeSet::new();
         for plan in self.plans.values() {
             let rule = p
@@ -1027,7 +1054,7 @@ impl Engine {
             }
         }
         self.reset(carried)?;
-        let p = self.program.clone();
+        let p = self.execution.clone();
         let p = p.get();
         for rel in tiering.keys() {
             self.tiered.insert(*rel);
@@ -1186,7 +1213,7 @@ impl Engine {
         views: &BTreeSet<RelId>,
         statics: &[(RelId, Row)],
     ) -> Result<Vec<(RelId, [u8; 32])>, EvalError> {
-        let p = self.program.get();
+        let p = self.execution.get();
         let mut done: BTreeMap<RelId, [u8; 32]> = BTreeMap::new();
         let mut pending: Vec<RelId> = views.iter().copied().collect();
         let mut guard = 0usize;
@@ -1281,7 +1308,7 @@ impl Engine {
     }
 
     fn durable_views_over(&self, persistent: &BTreeSet<RelId>) -> BTreeSet<RelId> {
-        let p = self.program.get();
+        let p = self.execution.get();
         let recursive: BTreeSet<RelId> = self
             .strata
             .iter()
@@ -1352,7 +1379,7 @@ impl Engine {
     /// change since the views' version, and only the views' rules run; then the last tick's change is carried, to
     /// show as the first tick's change. The views' changes are the first tick's.
     fn catch_up(&mut self, input: &StepInput<'_>, c: &blossom_ir::tick::CatchUp) -> Result<(), EvalError> {
-        let program = self.program.clone();
+        let program = self.execution.clone();
         let p = program.get();
         self.stores.clear_deltas();
         let empty = Vec::new();
@@ -1458,7 +1485,7 @@ impl Engine {
         views: &BTreeSet<RelId>,
         persistent: &BTreeSet<RelId>,
     ) -> (BTreeSet<RelId>, BTreeSet<RuleId>) {
-        let p = self.program.get();
+        let p = self.execution.get();
         let recursive: BTreeSet<RelId> = self
             .strata
             .iter()
@@ -1593,7 +1620,7 @@ impl Engine {
             }
         }
         if !self.facts_loaded {
-            let p = self.program.get();
+            let p = self.execution.get();
             let mut facts = Vec::new();
             for f in &p.facts {
                 let row = f
@@ -1662,7 +1689,7 @@ impl Engine {
             }
         }
         self.settle(tick)?;
-        let program = self.program.clone();
+        let program = self.execution.clone();
         let p = program.get();
         // 2. The strata.
         let strata_list = self.strata.clone();
@@ -1743,7 +1770,7 @@ impl Engine {
                 .get(&plan.head)
                 .ok_or_else(|| internal_error!("no async store"))?;
             let to_host = matches!(
-                self.program.get().rels.get(rel).map(|r| &r.class),
+                self.execution.get().rels.get(rel).map(|r| &r.class),
                 Some(RelClass::HostOut(_))
             );
             for row in s.present()? {
@@ -2044,6 +2071,9 @@ impl Engine {
 
     fn maintain_inner(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+        if self.virtuals.contains_key(&rule.head.rel) {
+            return Ok(());
+        }
         if self.stores.is_alias(StoreKey::Main(rule.head.rel)) {
             return Ok(());
         }
@@ -3168,11 +3198,9 @@ impl Engine {
             &[],
         )?;
         let mut instance = Instance::default();
-        for (key, s) in self.stores.iter() {
-            if let StoreKey::Main(rel) = key {
-                for r in s.present()? {
-                    instance.insert(rel, r.clone());
-                }
+        for (rel, rows) in self.instance_now()? {
+            for row in rows {
+                instance.insert(rel, row);
             }
         }
         Ok(TickOutput {
@@ -3235,7 +3263,22 @@ impl Engine {
             if self.tiered.contains(&rel) {
                 continue;
             }
-            out.insert(rel, s.present_sorted()?.into_iter().collect());
+            if let Some(kernel) = self.virtuals.get(&rel) {
+                let mut rows = BTreeSet::new();
+                kernel.run(
+                    self.execution.get(),
+                    &self.stores,
+                    &Driver::Full,
+                    &|_| false,
+                    &mut |row, _| {
+                        rows.insert(row);
+                        Ok(())
+                    },
+                )?;
+                out.insert(rel, rows);
+            } else {
+                out.insert(rel, s.present_sorted()?.into_iter().collect());
+            }
         }
         Ok(out)
     }
@@ -3251,7 +3294,7 @@ impl Engine {
     /// Snapshot the selected physical execution structure and cumulative clock-free work.
     pub fn plan_report(&self) -> crate::PlanReport {
         use crate::inspection::{PlanReport, RuleReport, StoreReport, WorkReport};
-        let p = self.program.get();
+        let p = self.execution.get();
         let name = |key: StoreKey| {
             let (rel, version) = match key {
                 StoreKey::Main(r) => (r, "main"),
@@ -3279,7 +3322,9 @@ impl Engine {
                     .upsert_next
                     .get(&rule.head.rel)
                     .is_some_and(|(id, _)| *id == plan.rule);
-            let operator = if eliminated {
+            let operator = if self.virtuals.contains_key(&rule.head.rel) {
+                "fused-observation"
+            } else if eliminated {
                 "alias"
             } else if self.stores.get(&plan.head).is_some_and(Store::is_batch) {
                 if self.map_rules.contains(&plan.rule) {
@@ -3584,7 +3629,7 @@ fn run_terms(
                 Driver::Full => 1,
                 Driver::Atom { sign, .. } | Driver::Neg { sign, .. } | Driver::Lookup { sign, .. } => *sign,
             };
-            out.examined += kernel.run(cx, stores, driver, &old, &mut |row, rows| {
+            out.examined += kernel.run(cx.program, stores, driver, &old, &mut |row, rows| {
                 if let Some(MapCapture { primary, update }) = &mut capture {
                     let input = rows
                         .get(*primary)

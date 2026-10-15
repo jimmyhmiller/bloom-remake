@@ -28,6 +28,7 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
         let config = EngineConfig {
             compiled_joins: true,
             packed_indexes: true,
+            fuse_relations: true,
             workers,
             map_cache_rows: 64,
             map_cache_joins: true,
@@ -87,6 +88,31 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
             let x = reference.step(&input, &[]).unwrap();
             let y = candidate.step(&input, &[]).unwrap();
             assert_eq!(x.changes, y.changes, "tick {t}");
+            let report = candidate.plan_report();
+            assert!(
+                report
+                    .rules
+                    .iter()
+                    .any(|r| r.head == "transient_wide:main" && r.operator == "fused-observation")
+            );
+            assert!(
+                report
+                    .rules
+                    .iter()
+                    .filter(|r| r.operator == "fused-observation")
+                    .all(|r| r.work.support_writes == 0)
+            );
+            assert!(
+                report
+                    .rules
+                    .iter()
+                    .filter(|r| matches!(
+                        r.head.as_str(),
+                        "lossy:main" | "negative_boundary:main" | "expression_boundary:main" | "filtered_identity:main"
+                    ))
+                    .all(|r| r.operator != "fused-observation")
+            );
+
             assert!(
                 candidate
                     .plan_report()
@@ -130,6 +156,7 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
         EngineConfig {
             compiled_joins: true,
             packed_indexes: true,
+            fuse_relations: true,
             node_names: vec![Arc::from("n1")],
             seed: Some(Seed::from_u64(7)),
             ..Default::default()

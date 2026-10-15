@@ -67,9 +67,10 @@ fn differential(name: &str, inputs: &[(u64, &str, u64)], last: u64) -> Outcome {
 /// [`differential`] on a deployment of `nodes`, with input rows `(tick, node, relation, row)`.
 #[cfg(test)]
 fn differential_on(name: &str, nodes: &[NodeSpec], inputs: &[(u64, u32, &str, Vec<Value>)], last: u64) -> Outcome {
-    differential_on_mode(name, nodes, inputs, last, false, false);
-    differential_on_mode(name, nodes, inputs, last, true, false);
-    differential_on_mode(name, nodes, inputs, last, true, true)
+    differential_on_mode(name, nodes, inputs, last, false, false, false);
+    differential_on_mode(name, nodes, inputs, last, true, false, false);
+    differential_on_mode(name, nodes, inputs, last, true, true, false);
+    differential_on_mode(name, nodes, inputs, last, true, true, true)
 }
 
 #[cfg(test)]
@@ -80,6 +81,7 @@ fn differential_on_mode(
     last: u64,
     compiled_joins: bool,
     packed_indexes: bool,
+    fuse_relations: bool,
 ) -> Outcome {
     let artifact = compile_on(name, nodes);
     let sim = BlsSim::new(&artifact, blossom_value::Seed::from_u64(0)).unwrap();
@@ -97,6 +99,7 @@ fn differential_on_mode(
     let cfg = blossom_engine::EngineConfig {
         compiled_joins,
         packed_indexes,
+        fuse_relations,
         roles: artifact.roles.clone(),
         node_names: artifact.nodes.iter().map(|n| Arc::from(n.as_str())).collect(),
         seed: Some(blossom_value::Seed::from_u64(0)),

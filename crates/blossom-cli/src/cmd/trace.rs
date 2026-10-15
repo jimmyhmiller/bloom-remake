@@ -71,6 +71,9 @@ pub enum TraceCommand {
         /// Compile secondary equality index keys from relation schemas.
         #[arg(long)]
         packed_indexes: bool,
+        /// Fuse proven lossless transient relational views.
+        #[arg(long)]
+        fuse_relations: bool,
         /// Read-only evaluation workers; state mutation remains serial.
         #[arg(long, default_value_t = 1)]
         workers: usize,
@@ -598,6 +601,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
             infer_keys,
             compiled_joins,
             packed_indexes,
+            fuse_relations,
             no_measurement,
         } => plan_workload(
             common,
@@ -613,6 +617,7 @@ fn drive(cmd: TraceCommand) -> Result<(), String> {
                 infer_keys,
                 compiled_joins,
                 packed_indexes,
+                fuse_relations,
             },
         ),
         TraceCommand::Replay { common, slow } => {
@@ -1174,7 +1179,7 @@ fn measured_plan_options(
         }
         hash.update(buffer.get(..n).ok_or("invalid read size")?);
     }
-    let value = serde_json::json!({"report_version":1,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins,"packed_indexes":options.packed_indexes},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
+    let value = serde_json::json!({"report_version":1,"execution":{"workers":options.workers,"physical_measurement":measured,"map_cache_rows":options.map_cache_rows,"map_cache_joins":options.map_cache_joins,"lazy_indexes":options.lazy_indexes,"pipeline_batches":options.pipeline_batches,"infer_keys":options.infer_keys,"compiled_joins":options.compiled_joins,"packed_indexes":options.packed_indexes,"fuse_relations":options.fuse_relations},"workload":{"trace_blake3":hash.finalize().to_hex().to_string(),"first":first,"last":last},"ticks":ticks,"replay_elapsed_ns":elapsed,"plan":plan});
     Ok(value)
 }
 
@@ -1293,6 +1298,8 @@ mod plan_tests {
                 false,
                 ReplayOptions {
                     compiled_joins: true,
+                    packed_indexes: true,
+                    fuse_relations: true,
                     ..Default::default()
                 },
             )
@@ -1310,6 +1317,9 @@ mod plan_tests {
         let window = compiled(2, 4);
         let whole = compiled(0, 4);
         assert!(count(&window) > 0);
+        for flag in ["compiled_joins", "packed_indexes", "fuse_relations"] {
+            assert_eq!(window["execution"][flag], true);
+        }
         assert_eq!(count(&whole), count(&prefix) + count(&window));
         assert_eq!(a["ticks"], 3);
         let parsed: blossom_engine::PlanReport = serde_json::from_value(a["plan"].clone()).unwrap();

@@ -35,6 +35,7 @@ pub struct ReplayOptions {
     pub infer_keys: bool,
     pub compiled_joins: bool,
     pub packed_indexes: bool,
+    pub fuse_relations: bool,
 }
 impl Default for ReplayOptions {
     fn default() -> Self {
@@ -47,6 +48,7 @@ impl Default for ReplayOptions {
             infer_keys: false,
             compiled_joins: false,
             packed_indexes: false,
+            fuse_relations: false,
         }
     }
 }
@@ -189,7 +191,8 @@ impl<R: Read> Replay<R> {
             .with_pipeline_batches(options.pipeline_batches)
             .with_inferred_keys(options.infer_keys)
             .with_compiled_joins(options.compiled_joins)
-            .with_packed_indexes(options.packed_indexes);
+            .with_packed_indexes(options.packed_indexes)
+            .with_fused_relations(options.fuse_relations);
         Ok(Replay {
             engine: executors.make(h.node)?,
             oracle: executors.oracle().clone(),

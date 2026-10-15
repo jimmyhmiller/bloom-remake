@@ -3,10 +3,7 @@
 //! Storage snapshots and signed publication remain owned by the incremental engine.
 use std::collections::BTreeMap;
 
-use crate::{
-    expr::Ctx,
-    rule::{Driver, Order, Plan, Step, StoreKey, Stores, atom_store},
-};
+use crate::rule::{Driver, Order, Plan, Step, StoreKey, Stores, atom_store};
 use blossom_base::{ConstId, VarId, internal_error};
 use blossom_ir::{
     core::{Atom, HeadArg, Literal, Rule, Term},
@@ -20,10 +17,10 @@ enum Source {
     Constant(ConstId),
 }
 impl Source {
-    fn read<'a>(&self, cx: &'a Ctx<'_>, rows: &'a [Option<Row>]) -> Result<&'a Value, EvalError> {
+    fn read<'a>(&self, cx: &'a blossom_ir::core::Program, rows: &'a [Option<Row>]) -> Result<&'a Value, EvalError> {
         match *self {
             Self::Column(lit, col) => rows.get(lit).and_then(Option::as_ref).and_then(|r| r.get(col)),
-            Self::Constant(id) => cx.program.consts.get(id),
+            Self::Constant(id) => cx.consts.get(id),
         }
         .ok_or_else(|| internal_error!("compiled relational source is unavailable: {self:?}").into())
     }
@@ -54,7 +51,7 @@ impl Binding {
         }
         Self { lit, width, checks }
     }
-    fn matches(&self, cx: &Ctx<'_>, rows: &[Option<Row>]) -> Result<bool, EvalError> {
+    fn matches(&self, cx: &blossom_ir::core::Program, rows: &[Option<Row>]) -> Result<bool, EvalError> {
         let row = rows
             .get(self.lit)
             .and_then(Option::as_ref)
@@ -218,7 +215,7 @@ impl Kernel {
     }
     pub(crate) fn run(
         &self,
-        cx: &Ctx<'_>,
+        cx: &blossom_ir::core::Program,
         stores: &Stores,
         driver: &Driver,
         old: &dyn Fn(usize) -> bool,
@@ -246,7 +243,7 @@ impl Kernel {
     fn walk(
         &self,
         pc: usize,
-        cx: &Ctx<'_>,
+        cx: &blossom_ir::core::Program,
         stores: &Stores,
         old: &dyn Fn(usize) -> bool,
         rows: &mut [Option<Row>],

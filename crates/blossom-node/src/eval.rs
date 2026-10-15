@@ -506,6 +506,12 @@ impl Executors {
         self
     }
 
+    /// Fuse proven lossless transient relations into pure consumers.
+    pub fn with_fused_relations(mut self, enabled: bool) -> Executors {
+        self.engine.fuse_relations = enabled;
+        self
+    }
+
     /// Use schema-compiled equality arrangements.
     pub fn with_packed_indexes(mut self, enabled: bool) -> Executors {
         self.engine.packed_indexes = enabled;
