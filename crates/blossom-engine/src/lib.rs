@@ -17,7 +17,6 @@ mod functional_keys;
 mod inspection;
 mod map_cache;
 mod probe_cache;
-mod probe_index;
 mod purity;
 mod row_bucket;
 mod row_support;
