@@ -426,3 +426,33 @@ fn the_lsm_and_the_memory_tree_hold_to_the_tree_model() {
     };
     tree_suite(&lsm, Some(&reopen)).unwrap();
 }
+
+#[test]
+fn point_reads_choose_newest_eligible_version_across_memory_tables_and_amendments() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let options = LsmOptions { history: 100, ..opts() };
+    let lsm = Lsm::open(fs, Path::new("/version-pruning"), options).unwrap();
+    for v in 1..=12 {
+        lsm.apply(v, v, [(b"key".to_vec(), if v % 2 == 0 { Op::Del } else { Op::Put })])
+            .unwrap();
+        if v % 3 == 0 {
+            lsm.flush().unwrap();
+        }
+        for at in 0..=v {
+            assert_eq!(lsm.get(b"key", at).unwrap(), at % 2 == 1);
+            assert!(!lsm.get(b"absent", at).unwrap());
+        }
+    }
+    // Amendments introduce previously unused keys at the current version after its flush.
+    lsm.amend([(b"derived".to_vec(), Op::Put)]).unwrap();
+    assert!(lsm.get(b"derived", 12).unwrap());
+    assert!(!lsm.get(b"derived", 11).unwrap());
+    assert!(!lsm.get(b"key", 12).unwrap());
+    assert!(lsm.get(b"key", 11).unwrap());
+    lsm.flush().unwrap();
+    while lsm.compact().unwrap() {}
+    for at in 0..=12 {
+        assert_eq!(lsm.get(b"key", at).unwrap(), at % 2 == 1);
+        assert_eq!(lsm.get(b"derived", at).unwrap(), at == 12);
+    }
+}

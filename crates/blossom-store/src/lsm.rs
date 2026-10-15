@@ -1329,10 +1329,26 @@ impl Lsm {
                     newest = Some(f);
                 }
             }
-            (newest, s.tables.clone())
+            // No eligible disk version can beat an exact as-of hit in the memory snapshot.
+            if let Some((version, op)) = newest
+                && version == as_of
+            {
+                return Ok(op == Op::Put);
+            }
+            let tables: Vec<_> = s
+                .tables
+                .iter()
+                .filter(|t| t.meta.min_version <= as_of && newest.is_none_or(|n| t.meta.max_version > n.0))
+                .cloned()
+                .collect();
+            (newest, tables)
         };
-        // A merged table may hold versions on either side of another's: every table is asked.
+        // Compacted tables may overlap in version. Prune only by proven version bounds, never id
+        // or table order; a tombstone is as decisive as a put at the same version.
         for t in &tables {
+            if newest.is_some_and(|n| t.meta.max_version <= n.0) {
+                continue;
+            }
             if let Some(f) = t.get(key, as_of)?
                 && newest.is_none_or(|n| f.0 > n.0)
             {
