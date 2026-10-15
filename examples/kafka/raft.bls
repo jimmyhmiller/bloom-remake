@@ -211,7 +211,15 @@ fn log_bytes(data: Blob) -> Bytes {
 /// leader sent it (by its clock), which the follower's answer echoes.
 /// `upto` is the last index the leader had sent the follower when it sent the heartbeat: a connection delivers in
 /// order, so a follower whose log does not reach it by then lost a batch (`missed`).
-channel beat(g: Group, term: u64, prev_idx: u64, prev_term: u64, commit: u64, sent: Instant, upto: u64): Broker -> Broker;
+channel beat(
+    g: Group,
+    term: u64,
+    prev_idx: u64,
+    prev_term: u64,
+    commit: u64,
+    sent: Instant,
+    upto: u64
+): Broker -> Broker;
 /// A follower's word that a heartbeat (sent at `sent`) found its log short of what its leader had sent it before:
 /// a batch was lost, and the leader goes back to what the follower acknowledged at once.
 channel missed(g: Group, term: u64, sent: Instant): Broker -> Broker;
@@ -458,7 +466,15 @@ at Broker {
         delete misses(g, n);
     }
     view widening(g, n, w) {
-        misses(g, n), let w = if n >= 4 { 16u64 } else if n == 3 { 8u64 } else if n == 2 { 4u64 } else { 2u64 };
+        misses(g, n), let w = if n >= 4 {
+                    16u64
+                } else if n == 3 {
+                    8u64
+                } else if n == 2 {
+                    4u64
+                } else {
+                    2u64
+                };
         mine(g), not misses(g, _), let n = 0u64, let w = 1u64;
     }
     rearm: on reset_timer(g), eff(g, t), widening(g, n, w),
@@ -545,7 +561,8 @@ at Broker {
     /// yet, make a majority: a member that is down will not answer, so a round two live candidates split is decided at
     /// once, and they back off and try again.
     view pre_waiting(g, nt, round, p) = prevoting(g, nt, round), members(g, p), peer_alive(p),
-            not prevoters(g, nt, round, p), not prerefusers(g, nt, round, p) where p != self;
+            not prevoters(g, nt, round, p), not prerefusers(g, nt, round, p)
+            where p != self;
     view pre_waiting_n(g, nt, round, o = count!(p)) = pre_waiting(g, nt, round, p);
     view prevote_hopeful(g) {
         prevoting(g, nt, round), pre_tally(g, nt, round, n), pre_waiting_n(g, nt, round, o), group_size(g, k)
@@ -555,7 +572,8 @@ at Broker {
         prevoting(g, nt, round), not pre_tally(g, nt, round, _);
     }
     view vote_waiting(g, t, p) = candidate(g, t), members(g, p), peer_alive(p), not voters(g, t, p),
-            not refusers(g, t, p) where p != self;
+            not refusers(g, t, p)
+            where p != self;
     view vote_waiting_n(g, t, o = count!(p)) = vote_waiting(g, t, p);
     view vote_hopeful(g, t) {
         candidate(g, t), tally(g, t, n), vote_waiting_n(g, t, o), group_size(g, k) where (n + o) * 2 > k;
@@ -642,12 +660,14 @@ at Broker {
     /// Whether a follower may be sent more: fewer than `RAFT_INFLIGHT` entries sent to it are past what it holds (what
     /// it acknowledged, or the leader's `base` for it if that is further).
     view window_open(g, f) = rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, _at, _w, b),
-            let held = if m > b { m } else { b } where s < held + RAFT_INFLIGHT;
+            let held = if m > b { m } else { b }
+            where s < held + RAFT_INFLIGHT;
     /// A follower that acknowledged something new this tick.
     view acked_new(g, f) = ack(g, t, m, _) from f, leader(g, t), match_idx(g, f, cur) where m > cur;
     /// A follower that reports a batch lost, by a heartbeat sent after the leader last went back for it.
     view missed_now(g, f) = missed(g, t, sent) from f, leader(g, t), rsent(g, f, s), match_idx(g, f, m),
-            repl_wait(g, f, at, _w, _b), not acked_new(g, f) where sent > at && m < s;
+            repl_wait(g, f, at, _w, _b), not acked_new(g, f)
+            where sent > at && m < s;
     /// A follower sent entries it has acknowledged nothing new of for its wait: a batch (or its acknowledgement) may
     /// have been lost, and the batches sent after it were then refused.
     view stalled(g, f) = leader(g, _), rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, at, w, _b),
@@ -662,12 +682,13 @@ at Broker {
     /// the tick after their append), while its window is open (so a follower catching up takes a window per round
     /// trip). None goes to a stalled follower this tick: its leader goes back first (`go_back`).
     view out_from(g, f, from) = leader(g, _), rsent(g, f, from), last_log(g, li, _), window_open(g, f),
-            not going_back(g, f) where li > from;
+            not going_back(g, f)
+            where li > from;
     /// A stalled follower whose broker is heard alive is sent its entries again from what it acknowledged, from the
     /// next tick: the leader takes what it sent as not sent, and waits twice as long before it goes back again. (A
     /// down broker gets nothing: it would cost its leader batches read and encoded for nothing.)
-    go_back: on raft_heartbeat, stalled(g, f), peer_alive(f), rsent(g, f, s), match_idx(g, f, m), repl_wait(g, f, at, w, b),
-            let w2 = if w * 2 > RAFT_RESEND_MAX { RAFT_RESEND_MAX } else { w * 2 } {
+    go_back: on raft_heartbeat, stalled(g, f), peer_alive(f), rsent(g, f, s), match_idx(g, f, m),
+            repl_wait(g, f, at, w, b), let w2 = if w * 2 > RAFT_RESEND_MAX { RAFT_RESEND_MAX } else { w * 2 } {
         delete rsent(g, f, s);
         next rsent(g, f, m);
         delete repl_wait(g, f, at, w, b);
@@ -993,7 +1014,8 @@ at Broker {
     /// The entries of the batches taken that this broker does not hold.
     view incoming(g, i, et, pt, k, pos, b) = batch_taken(g, _l, _t, p, ppt, es), not batch_held(g, p, es),
             snap_at(g, s), e in chained(p, ppt, es), let i = e.0, let et = e.1, let pt = e.2, let k = e.3,
-            let pos = e.4, let b = e.5, not rlog(g: g, idx: i, term: et, ..) where i > s;
+            let pos = e.4, let b = e.5, not rlog(g: g, idx: i, term: et, ..)
+            where i > s;
     /// A stored entry that conflicts with an incoming one (same index, another term): it and all after it go.
     view conflict(g, c = min!(i)) = incoming(g, i, et, _, _, _, _), rlog(g: g, idx: i, term: lt, ..) where lt != et;
     truncate: on conflict(g, c), rlog(g, j, jt, jp, k, pos, data) where j >= c {

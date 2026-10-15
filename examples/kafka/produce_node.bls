@@ -268,10 +268,11 @@ view waits_index(g, idx) {
     duplicate(_c, _i, _j, tid, p, _e, base, _l), entry_index(tid, p, base, idx), let g = (tid, p);
 }
 view placed_done(c, i, j) {
-    placed(c, i, j, tid, p, idx, _e, _b, _last, _s), partition_commit(tid, p, cm), let g = (tid, p), not isr_lacks(g, idx)
-            where cm >= idx;
-    duplicate(c, i, j, tid, p, _e, base, _last), entry_index(tid, p, base, idx), partition_commit(tid, p, cm), let g = (tid, p),
+    placed(c, i, j, tid, p, idx, _e, _b, _last, _s), partition_commit(tid, p, cm), let g = (tid, p),
             not isr_lacks(g, idx)
+            where cm >= idx;
+    duplicate(c, i, j, tid, p, _e, base, _last), entry_index(tid, p, base, idx), partition_commit(tid, p, cm),
+            let g = (tid, p), not isr_lacks(g, idx)
             where cm >= idx;
     duplicate(c, i, j, tid, p, _e, base, last), log_end(tid, p, hw), not entry_index(tid, p, base, _) where hw > last;
 }
