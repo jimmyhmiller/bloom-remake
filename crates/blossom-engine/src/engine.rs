@@ -2344,45 +2344,106 @@ impl Engine {
                 .buffers
                 .try_borrow_mut()
                 .map_err(|_| internal_error!("nested map evaluation"))?;
-            for (driver, pos) in &drivers {
-                let primary_driver = matches!(driver,Driver::Atom{lit,..} if *lit==primary);
-                if let Driver::Atom { row, sign: -1, .. } = driver
-                    && primary_driver
-                    && let Some(outputs) = self.map_cache.borrow_mut().retract(rule.id, row)
+            let primary_insert =
+                |d: &(Driver, usize)| matches!(&d.0, Driver::Atom { lit, sign: 1, .. } if *lit == primary);
+            // Cache mutation stays ordered on the coordinator. Only contiguous primary inserts
+            // can run independently; retractions and join-side changes remain cache barriers.
+            for group in drivers
+                .chunk_by(|a, b| primary_insert(a) == primary_insert(b))
+                .flat_map(|group| group.chunks(256))
+            {
+                if parallel
+                    && group.first().is_some_and(primary_insert)
+                    && group.len() >= PARALLEL_GRAIN * 2
+                    && let Some(pool) = &self.workers
                 {
-                    for (head, count) in outputs {
-                        *out.heads.entry(head).or_insert(0) -= count;
+                    use rayon::prelude::*;
+                    self.parallel_terms.set(self.parallel_terms.get() + group.len() as u64);
+                    let created = self.new_blobs.borrow();
+                    let read = ParallelRead {
+                        p,
+                        input,
+                        node: self.node,
+                        shared: &self.shared,
+                        stores: &self.stores,
+                        created: &created,
+                        profile: self.fn_work.is_some(),
+                    };
+                    let results: Vec<_> = pool.install(|| {
+                        group
+                            .par_chunks(PARALLEL_GRAIN)
+                            .map(|chunk| {
+                                chunk
+                                    .iter()
+                                    .map(|driver| read.run(rule, plan, std::slice::from_ref(driver), &orders))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect()
+                    });
+                    for ((driver, _), result) in group.iter().zip(results.into_iter().flatten()) {
+                        let (terms, functions) = result?;
+                        if let Some(profile) = &self.fn_work {
+                            let mut profile = profile.borrow_mut();
+                            for (id, w) in functions {
+                                let entry = profile.entry(id).or_default();
+                                entry.calls += w.calls;
+                                entry.steps += w.steps;
+                                entry.self_steps += w.self_steps;
+                            }
+                        }
+                        if let Driver::Atom { row, .. } = driver
+                            && terms.errors.is_empty()
+                        {
+                            self.map_cache.borrow_mut().insert(
+                                rule.id,
+                                row.clone(),
+                                terms.heads.iter().map(|(r, n)| (r.clone(), *n)).collect(),
+                            );
+                        }
+                        out.merge(terms);
                     }
                     continue;
                 }
-                let mut update = |input: &Row, output: &Row, sign: i64| {
-                    self.map_cache.borrow_mut().update(rule.id, input, output, sign)
-                };
-                let capture = (!primary_driver).then_some(MapCapture {
-                    primary,
-                    update: &mut update,
-                });
-                let terms = run_terms(
-                    &self.ctx(p, input),
-                    &self.stores,
-                    rule,
-                    plan,
-                    &[(driver.clone(), *pos)],
-                    &orders,
-                    &mut buffers,
-                    capture,
-                )?;
-                if let Driver::Atom { row, sign: 1, .. } = driver
-                    && primary_driver
-                    && terms.errors.is_empty()
-                {
-                    self.map_cache.borrow_mut().insert(
-                        rule.id,
-                        row.clone(),
-                        terms.heads.iter().map(|(r, n)| (r.clone(), *n)).collect(),
-                    );
+                for (driver, pos) in group {
+                    let primary_driver = matches!(driver,Driver::Atom{lit,..} if *lit==primary);
+                    if let Driver::Atom { row, sign: -1, .. } = driver
+                        && primary_driver
+                        && let Some(outputs) = self.map_cache.borrow_mut().retract(rule.id, row)
+                    {
+                        for (head, count) in outputs {
+                            *out.heads.entry(head).or_insert(0) -= count;
+                        }
+                        continue;
+                    }
+                    let mut update = |input: &Row, output: &Row, sign: i64| {
+                        self.map_cache.borrow_mut().update(rule.id, input, output, sign)
+                    };
+                    let capture = (!primary_driver).then_some(MapCapture {
+                        primary,
+                        update: &mut update,
+                    });
+                    let terms = run_terms(
+                        &self.ctx(p, input),
+                        &self.stores,
+                        rule,
+                        plan,
+                        &[(driver.clone(), *pos)],
+                        &orders,
+                        &mut buffers,
+                        capture,
+                    )?;
+                    if let Driver::Atom { row, sign: 1, .. } = driver
+                        && primary_driver
+                        && terms.errors.is_empty()
+                    {
+                        self.map_cache.borrow_mut().insert(
+                            rule.id,
+                            row.clone(),
+                            terms.heads.iter().map(|(r, n)| (r.clone(), *n)).collect(),
+                        );
+                    }
+                    out.merge(terms);
                 }
-                out.merge(terms);
             }
             return Ok(out);
         }
