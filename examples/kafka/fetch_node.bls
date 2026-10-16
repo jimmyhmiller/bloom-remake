@@ -39,16 +39,17 @@ view fetch_part(c, j, tid, p, off, pmax, end, start) = fetch_entry(c, j, tid, fp
         tail_end(tid, p, leo), let off = fp.fetch_offset, off >= start, off <= leo, let pmax = fp.max_bytes as i64;
 
 /// The batch holding each entry's fetch offset: the one starting there, or (after a seek into a batch) the one the
-/// chunk index finds, or the batch not materialized yet holding it.
+/// chunk index finds, or the batch not materialized yet holding it. Reject reads at the
+/// watermark before probing batches: waiting consumers have no readable first batch.
 view fetch_first(c, j, base) {
-    fetch_part(c, j, tid, p, off, _pmax, end, _start), readable_batch(tid, p, off, _l, _t, _blob), let base = off
-            where off < end;
-    fetch_part(c, j, tid, p, off, _pmax, end, _start), not readable_batch(tid, p, off, _, _, _), let ch = off / CHUNK,
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end,
+            readable_batch(tid, p, off, _l, _t, _blob), let base = off;
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end, not readable_batch(tid, p, off, _, _, _), let ch = off / CHUNK,
             batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob)
-            where off < end && base <= off && last >= off;
-    fetch_part(c, j, tid, p, off, _pmax, end, _start), not readable_batch(tid, p, off, _, _, _),
+            where base <= off && last >= off;
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end, not readable_batch(tid, p, off, _, _, _),
             pending_batch(tid, p, base, last, _t, _blob)
-            where off < end && base <= off && last >= off;
+            where base <= off && last >= off;
 }
 
 /// Each entry's batches, walked from the first while they fit the partition's byte limit (the first always).
