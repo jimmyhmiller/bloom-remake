@@ -1,4 +1,4 @@
-//! Lossless transient relational fusion. A producer exposes every positive-atom variable,
+//! Key-proven relational fusion. A producer head determines each positive source row,
 //! so each output row identifies exactly one body valuation. Substitution therefore preserves
 //! set boundaries and derivation counts. Logical observations are reconstructed on demand.
 use crate::{compiled::Kernel, strata};
@@ -21,35 +21,65 @@ fn ordinary(p: &blossom_ir::core::Program, rule: &Rule) -> bool {
     })
 }
 
-fn lossless(rule: &Rule) -> bool {
+// A head must identify one source-row combination. Functional dependencies let us omit
+// payload fields without crossing a set/distinct boundary. Inferred keys are used only
+// where the inference pass established them from pure, single-writer definitions.
+fn lossless(rule: &Rule, p: &blossom_ir::core::Program, keys: &BTreeMap<RelId, Vec<usize>>) -> bool {
     if rule.kind != RuleKind::Deductive || rule.head.mode != HeadMode::Insert || !Kernel::eligible(rule) {
         return false;
     }
-    let mut body = BTreeSet::new();
-    for lit in &rule.body.lits {
-        if let Literal::Pos(a) = lit {
-            if a.sender.is_some() || a.principal.is_some() || a.spec.is_some() {
-                return false;
-            }
-            for t in &a.args {
-                match t {
-                    Term::Var(v) => {
-                        body.insert(*v);
-                    }
-                    Term::Const(_) => {}
-                    Term::Wild => return false,
-                }
-            }
-        }
-    }
-    let mut head = BTreeSet::new();
+    let mut known = BTreeSet::new();
     for arg in &rule.head.args {
         let HeadArg::Term(Term::Var(v)) = arg else { return false };
-        if !head.insert(*v) {
+        if !known.insert(*v) {
             return false;
         }
     }
-    head == body
+    let atoms: Vec<_> = rule
+        .body
+        .lits
+        .iter()
+        .filter_map(|l| match l {
+            Literal::Pos(a) => Some(a),
+            _ => None,
+        })
+        .collect();
+    if atoms.iter().any(|a| {
+        a.sender.is_some()
+            || a.principal.is_some()
+            || a.spec.is_some()
+            || p.rels
+                .get(a.rel)
+                .is_none_or(|r| matches!(r.class, RelClass::Channel(_)) || !r.schema.lattice.is_empty())
+    }) {
+        return false;
+    }
+    let known_term = |t: &Term, known: &BTreeSet<VarId>| match t {
+        Term::Var(v) => known.contains(v),
+        Term::Const(_) => true,
+        Term::Wild => false,
+    };
+    let mut determined = BTreeSet::new();
+    loop {
+        let before = determined.len();
+        for (i, a) in atoms.iter().enumerate() {
+            if keys.get(&a.rel).is_some_and(|cols| {
+                cols.iter()
+                    .all(|c| a.args.get(*c).is_some_and(|t| known_term(t, &known)))
+            }) {
+                determined.insert(i);
+                for t in &a.args {
+                    if let Term::Var(v) = t {
+                        known.insert(*v);
+                    }
+                }
+            }
+        }
+        if before == determined.len() {
+            break;
+        }
+    }
+    determined.len() == atoms.len()
 }
 fn reads(rule: &Rule, rel: RelId) -> bool {
     rule.body.lits.iter().any(|l| {
@@ -110,6 +140,19 @@ fn expand(consumer: &Rule, producer: &Rule) -> Result<Rule, EvalError> {
             };
             vars.insert(*v, term);
         }
+        // Variables determined by the head can remain local to this expansion.
+        for (v, decl) in producer.body.vars.iter_enumerated() {
+            if let std::collections::btree_map::Entry::Vacant(entry) = vars.entry(v) {
+                let mut decl = decl.clone();
+                decl.name = format!("$fused{}", out.body.vars.len()).as_str().into();
+                let id = out
+                    .body
+                    .vars
+                    .push(decl)
+                    .map_err(|e| internal_error!("fusion variables overflow: {e}"))?;
+                entry.insert(Term::Var(id));
+            }
+        }
         for source in &producer.body.lits {
             let mut source = source.clone();
             match &mut source {
@@ -141,6 +184,7 @@ pub(crate) fn compile(
         .map(|(id, _)| id)
         .collect::<Vec<_>>();
     let scoped = crate::engine::tick_scoped(p, &running, &recursive);
+    let keys = crate::functional_keys::infer(p, &running.iter().copied().collect(), &recursive);
     let mut physical = p.clone();
     let mut virtuals = BTreeMap::new();
     for id in strata.iter().filter(|s| !s.recursive).flat_map(|s| &s.rules) {
@@ -151,8 +195,7 @@ pub(crate) fn compile(
         let Some(decl) = p.rels.get(rel) else { continue };
         if !ordinary(p, &producer)
             || !runs(&producer)
-            || !scoped.contains(&rel)
-            || !lossless(&producer)
+            || !lossless(&producer, p, &keys)
             || decl.class != RelClass::Idb
             || decl.durable
             || decl.interface.is_some()
@@ -169,6 +212,9 @@ pub(crate) fn compile(
         // Every consumer must be a pure relational term with no special native construct boundary.
         let consumers: Vec<_> = physical.rules.iter().filter(|r| reads(r, rel)).collect();
         if consumers.is_empty()
+            // Persistent shared results retain their computation reuse. A single consumer
+            // can probe the same base arrangements without maintaining this extra view.
+            || (!scoped.contains(&rel) && consumers.len() != 1)
             || consumers.iter().any(|r| {
                 !ordinary(p, r)
                     || r.role != producer.role

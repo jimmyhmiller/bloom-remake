@@ -1810,13 +1810,7 @@ impl Engine {
             }
         }
         for rel in observe {
-            let rows = self
-                .stores
-                .get(&StoreKey::Main(*rel))
-                .map(Store::present_sorted)
-                .transpose()?
-                .unwrap_or_default();
-            out.observed.insert(*rel, rows);
+            out.observed.insert(*rel, self.visible_rows(*rel)?);
         }
         // The durable views' changes (DATABASE.md §8), and how their sources' rows at the tick differ from those
         // carried in: the views' rows were computed from them.
@@ -3258,29 +3252,38 @@ impl Engine {
     /// tick's rows by then).
     pub fn instance_now(&self) -> Result<BTreeMap<RelId, BTreeSet<Row>>, EvalError> {
         let mut out = BTreeMap::new();
-        for (key, s) in self.stores.iter() {
+        for (key, _) in self.stores.iter() {
             let StoreKey::Main(rel) = key else { continue };
             if self.tiered.contains(&rel) {
                 continue;
             }
-            if let Some(kernel) = self.virtuals.get(&rel) {
-                let mut rows = BTreeSet::new();
-                kernel.run(
-                    self.execution.get(),
-                    &self.stores,
-                    &Driver::Full,
-                    &|_| false,
-                    &mut |row, _| {
-                        rows.insert(row);
-                        Ok(())
-                    },
-                )?;
-                out.insert(rel, rows);
-            } else {
-                out.insert(rel, s.present_sorted()?.into_iter().collect());
-            }
+            out.insert(rel, self.visible_rows(rel)?.into_iter().collect());
         }
         Ok(out)
+    }
+
+    /// Logical reads reconstruct an eliminated relation, including explicit step observations.
+    fn visible_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
+        if let Some(kernel) = self.virtuals.get(&rel) {
+            let mut rows = BTreeSet::new();
+            kernel.run(
+                self.execution.get(),
+                &self.stores,
+                &Driver::Full,
+                &|_| false,
+                &mut |row, _| {
+                    rows.insert(row);
+                    Ok(())
+                },
+            )?;
+            Ok(rows.into_iter().collect())
+        } else {
+            self.stores
+                .get(&StoreKey::Main(rel))
+                .map(Store::present_sorted)
+                .transpose()
+                .map(|rows| rows.unwrap_or_default())
+        }
     }
 
     /// Enable/reset optional measurement. Ordinary execution never reads a measurement clock.

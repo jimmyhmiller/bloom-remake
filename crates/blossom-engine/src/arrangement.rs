@@ -4,6 +4,7 @@ use crate::{
     row_bucket::RowBucket,
     row_support::{Key, Layout},
 };
+use blossom_base::det::DetMap;
 use blossom_ir::tick::Row;
 use blossom_value::Value;
 use std::collections::BTreeMap;
@@ -13,7 +14,7 @@ pub(crate) enum Index {
     Packed {
         layout: Layout,
         cols: Vec<usize>,
-        rows: BTreeMap<Key, RowBucket>,
+        rows: DetMap<Key, RowBucket>,
     },
     Ordered(BTreeMap<Vec<Value>, RowBucket>),
 }
@@ -23,7 +24,7 @@ impl Index {
             Some(layout) => Self::Packed {
                 layout,
                 cols: cols.to_vec(),
-                rows: BTreeMap::new(),
+                rows: DetMap::default(),
             },
             None => Self::Ordered(BTreeMap::new()),
         }
@@ -45,13 +46,13 @@ impl Index {
     }
     pub(crate) fn get(&self, values: &[Value]) -> Option<&RowBucket> {
         match self {
-            Self::Packed { layout, rows, .. } => rows.get(&layout.probe_key(values)?.owned()),
+            Self::Packed { layout, rows, .. } => rows.get_by(&layout.probe_key(values)?, |k, q| q.owns(k)),
             Self::Ordered(rows) => rows.get(values),
         }
     }
     pub(crate) fn get_mut(&mut self, values: &[Value]) -> Option<&mut RowBucket> {
         match self {
-            Self::Packed { layout, rows, .. } => rows.get_mut(&layout.probe_key(values)?.owned()),
+            Self::Packed { layout, rows, .. } => rows.get_mut_by(&layout.probe_key(values)?, |k, q| q.owns(k)),
             Self::Ordered(rows) => rows.get_mut(values),
         }
     }
@@ -59,7 +60,7 @@ impl Index {
         match self {
             Self::Packed { layout, rows, .. } => {
                 if let Some(key) = layout.probe_key(values) {
-                    rows.remove(&key.owned());
+                    rows.remove_by(&key, |k, q| q.owns(k));
                 }
             }
             Self::Ordered(rows) => {
@@ -68,10 +69,14 @@ impl Index {
         }
     }
     pub(crate) fn insert_row(&mut self, cols: &[usize], row: Row) {
-        if let Self::Packed { layout, rows, .. } = self
-            && let Some(key) = layout.key(&row).map(|key| key.owned())
-        {
-            rows.entry(key).or_default().insert(row);
+        let bucket = match self {
+            Self::Packed { layout, rows, .. } => layout
+                .key(&row)
+                .map(|key| rows.entry_by(&key, |k, q| q.owns(k), || key.owned()).or_default()),
+            _ => None,
+        };
+        if let Some(bucket) = bucket {
+            bucket.insert(row);
             return;
         }
         let values = cols.iter().filter_map(|c| row.get(*c).cloned()).collect();
@@ -81,7 +86,9 @@ impl Index {
         match self {
             Self::Packed { layout, rows, .. } => {
                 if let Some(key) = layout.probe_key(&values) {
-                    rows.entry(key.owned()).or_default().insert(row);
+                    rows.entry_by(&key, |k, q| q.owns(k), || key.owned())
+                        .or_default()
+                        .insert(row);
                     return;
                 }
                 // Preserve exact data even if an internal caller supplies a value outside the schema.
@@ -96,7 +103,7 @@ impl Index {
     pub(crate) fn make_ordered(&mut self) {
         if let Self::Packed { cols, rows, .. } = self {
             let mut ordered = BTreeMap::<Vec<Value>, RowBucket>::new();
-            for bucket in std::mem::take(rows).into_values() {
+            for (_, bucket) in rows.drain() {
                 for row in bucket.iter() {
                     let values = cols.iter().filter_map(|c| row.get(*c).cloned()).collect();
                     ordered.entry(values).or_default().insert(row.clone());

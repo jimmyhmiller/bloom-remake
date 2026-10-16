@@ -147,7 +147,7 @@ pub(crate) struct KeyRef<'a> {
     bytes: SmallVec<[&'a BytesValue; 1]>,
 }
 impl KeyRef<'_> {
-    fn owns(&self, key: &Key) -> bool {
+    pub(crate) fn owns(&self, key: &Key) -> bool {
         self.words == key.words
             && self.bytes.len() == key.bytes.len()
             && self.bytes.iter().zip(&key.bytes).all(|(a, b)| *a == b)

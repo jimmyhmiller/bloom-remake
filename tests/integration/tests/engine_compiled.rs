@@ -85,8 +85,10 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
                 ingress: &[],
                 blobs: &blossom_value::NoBlobs,
             };
-            let x = reference.step(&input, &[]).unwrap();
-            let y = candidate.step(&input, &[]).unwrap();
+            let observe = ["transient_wide", "key_projection", "persistent_wide"].map(|n| a.rel_named(n).unwrap());
+            let x = reference.step(&input, &observe).unwrap();
+            let y = candidate.step(&input, &observe).unwrap();
+            assert_eq!(x.observed, y.observed, "observed relation at tick {t}");
             assert_eq!(x.changes, y.changes, "tick {t}");
             let report = candidate.plan_report();
             assert!(
@@ -95,6 +97,15 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
                     .iter()
                     .any(|r| r.head == "transient_wide:main" && r.operator == "fused-observation")
             );
+            for head in ["key_projection:main", "persistent_wide:main"] {
+                assert!(
+                    report
+                        .rules
+                        .iter()
+                        .any(|r| r.head == head && r.operator == "fused-observation"),
+                    "{head}"
+                );
+            }
             assert!(
                 report
                     .rules
@@ -108,7 +119,11 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
                     .iter()
                     .filter(|r| matches!(
                         r.head.as_str(),
-                        "lossy:main" | "negative_boundary:main" | "expression_boundary:main" | "filtered_identity:main"
+                        "persistent_lossy:main"
+                            | "lossy:main"
+                            | "negative_boundary:main"
+                            | "expression_boundary:main"
+                            | "filtered_identity:main"
                     ))
                     .all(|r| r.operator != "fused-observation")
             );

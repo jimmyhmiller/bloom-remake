@@ -44,3 +44,11 @@ view negative_boundary(k, a, b) = put_left(k, a, b);
 view negative_consumer(k) = put_right(k, _), not negative_boundary(k, _, _);
 view expression_boundary(k, a, b) = put_left(k, a, b);
 view expression_consumer(k, a, b) = expression_boundary(k, a, b), a > 0u64;
+// A projected key still determines the complete source tuple: no distinct boundary.
+view key_projection(k) = left(k, _, _);
+view key_projection_result(k, v) = key_projection(k), right(k, v);
+view persistent_wide(k, a, b, v) = left(k, a, b), right(k, v);
+view persistent_result(k, a) = persistent_wide(k, a, _, _);
+// Omitting the key can collapse distinct source rows and must retain set semantics.
+view persistent_lossy(a) = left(_, a, _);
+view persistent_lossy_result(a) = persistent_lossy(a), not blocked(a);
