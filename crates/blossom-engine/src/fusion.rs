@@ -187,6 +187,7 @@ pub(crate) fn compile(
     let keys = crate::functional_keys::infer(p, &running.iter().copied().collect(), &recursive);
     let mut physical = p.clone();
     let mut virtuals = BTreeMap::new();
+    let mut purity = BTreeMap::new();
     for id in strata.iter().filter(|s| !s.recursive).flat_map(|s| &s.rules) {
         let Some(producer) = physical.rules.get(*id).cloned() else {
             continue;
@@ -209,7 +210,8 @@ pub(crate) fn compile(
         {
             continue;
         }
-        // Every consumer must be a pure relational term with no special native construct boundary.
+        // Consumers may compute expressions: expansion only substitutes the relational producer.
+        // Keep effectful expressions and native construct boundaries materialized.
         let consumers: Vec<_> = physical.rules.iter().filter(|r| reads(r, rel)).collect();
         if consumers.is_empty()
             // Persistent shared results retain their computation reuse. A single consumer
@@ -218,7 +220,7 @@ pub(crate) fn compile(
             || consumers.iter().any(|r| {
                 !ordinary(p, r)
                     || r.role != producer.role
-                    || !Kernel::eligible(r)
+                    || !crate::purity::rule_is_pure(p, r, &mut purity)
                     || r.body.lits.iter().any(|lit| match lit {
                         Literal::Pos(a) if a.rel == rel => {
                             a.sender.is_some() || a.principal.is_some() || a.spec.is_some()

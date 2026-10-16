@@ -97,7 +97,11 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
                     .iter()
                     .any(|r| r.head == "transient_wide:main" && r.operator == "fused-observation")
             );
-            for head in ["key_projection:main", "persistent_wide:main"] {
+            for head in [
+                "key_projection:main",
+                "persistent_wide:main",
+                "expression_boundary:main",
+            ] {
                 assert!(
                     report
                         .rules
@@ -119,11 +123,7 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
                     .iter()
                     .filter(|r| matches!(
                         r.head.as_str(),
-                        "persistent_lossy:main"
-                            | "lossy:main"
-                            | "negative_boundary:main"
-                            | "expression_boundary:main"
-                            | "filtered_identity:main"
+                        "persistent_lossy:main" | "lossy:main" | "negative_boundary:main" | "filtered_identity:main"
                     ))
                     .all(|r| r.operator != "fused-observation")
             );
