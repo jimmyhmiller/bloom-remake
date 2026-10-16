@@ -459,10 +459,15 @@ impl Engine {
             cfg.roles.get(node.0 as usize).copied().flatten()
         };
         let runs = |rule: &Rule| rule.role.is_none_or(|r| Some(r) == my_role);
-        let (execution, virtual_rules) = if cfg.fuse_relations {
-            crate::fusion::compile(&program, &runs)?
+        let normalized = if cfg.compiled_joins {
+            crate::normalize::guards(&program)?
         } else {
-            (program.clone(), BTreeMap::new())
+            program.clone()
+        };
+        let (execution, virtual_rules) = if cfg.fuse_relations {
+            crate::fusion::compile(&normalized, &runs)?
+        } else {
+            (normalized, BTreeMap::new())
         };
         let p = execution.get();
 

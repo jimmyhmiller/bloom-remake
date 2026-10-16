@@ -52,3 +52,7 @@ view persistent_result(k, a) = persistent_wide(k, a, _, _);
 // Omitting the key can collapse distinct source rows and must retain set semantics.
 view persistent_lossy(a) = left(_, a, _);
 view persistent_lossy_result(a) = persistent_lossy(a), not blocked(a);
+// Split infallible conjuncts can reject a left row before probing the right table.
+view early_guard(k, v) = left(k, a, _), right(k, v) where a > 0u64 && v > 0u64;
+// A short-circuited division must remain inside its fallible guard.
+view short_circuit(k) = left(k, a, _) where a > 0u64 && 9u64 / a > 1u64;

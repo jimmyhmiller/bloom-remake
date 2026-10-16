@@ -19,6 +19,7 @@ mod functional_keys;
 mod fusion;
 mod inspection;
 mod map_cache;
+mod normalize;
 mod probe_cache;
 mod purity;
 mod row_bucket;
