@@ -42,10 +42,10 @@ view fetch_part(c, j, tid, p, off, pmax, end, start) = fetch_entry(c, j, tid, fp
 /// chunk index finds, or the batch not materialized yet holding it. Reject reads at the
 /// watermark before probing batches: waiting consumers have no readable first batch.
 view fetch_first(c, j, base) {
-    fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end,
-            readable_batch(tid, p, off, _l, _t, _blob), let base = off;
-    fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end, not readable_batch(tid, p, off, _, _, _), let ch = off / CHUNK,
-            batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob)
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end, readable_batch(tid, p, off, _l, _t, _blob),
+            let base = off;
+    fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end, not readable_batch(tid, p, off, _, _, _),
+            let ch = off / CHUNK, batch_chunk(tid, p, ch, base), batch(tid, p, base, last, _t, _blob)
             where base <= off && last >= off;
     fetch_part(c, j, tid, p, off, _pmax, end, _start), off < end, not readable_batch(tid, p, off, _, _, _),
             pending_batch(tid, p, base, last, _t, _blob)

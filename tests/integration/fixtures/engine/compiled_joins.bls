@@ -58,7 +58,9 @@ view early_guard(k, v) = left(k, a, _), right(k, v) where a > 0u64 && v > 0u64;
 view short_circuit(k) = left(k, a, _) where a > 0u64 && 9u64 / a > 1u64;
 // Tuple bindings and field reads compile to source paths, without an environment copy.
 table nested(k: u64, pair: (u64, u64)) key(k);
-write_nested: on put_left(k, a, b) { upsert nested(k, (a, b)); }
+write_nested: on put_left(k, a, b) {
+    upsert nested(k, (a, b));
+}
 view nested_result(k, a, b) = nested(k, pair), let (a, b) = pair, right(k, v) where pair.0 == v;
 view nested_constant(k) = nested(k, pair), let (2u64, _) = pair;
 view nested_repeated(k) = nested(k, pair), let (a, a) = pair;
