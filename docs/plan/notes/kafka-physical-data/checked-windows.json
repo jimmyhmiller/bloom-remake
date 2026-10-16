@@ -1,0 +1,29 @@
+[
+  {
+    "window": "max-late",
+    "ticks": 84,
+    "timing_ns": {
+      "engine_step": 1468450879,
+      "other": 69519084,
+      "prepare": 633807
+    }
+  },
+  {
+    "window": "fixed",
+    "ticks": 799,
+    "timing_ns": {
+      "engine_step": 1851569578,
+      "other": 54381355,
+      "prepare": 2706173
+    }
+  },
+  {
+    "window": "recovery",
+    "ticks": 735,
+    "timing_ns": {
+      "engine_step": 1228244185,
+      "other": 75170294,
+      "prepare": 2484341
+    }
+  }
+]

@@ -1,0 +1,36 @@
+system=kafka topics=10 partitions=12 producers=4 consumers=4 size=1024
+max_seconds=60 rate=2000 fixed_seconds=60 kill_at=20 down=10
+broker_cpus=0-1,16-17 2-3,18-19 4-5,20-21 client_cpus=6-7,22-23
+0 1792116904.900271060 up kafka
+19 1792116923.980278495 topics created: 10 x 12
+19 1792116923.984542548 max: 4 producers unthrottled for 60 s
+83 1792116987.259175787 max done
+90 1792116994.761495795 drained (lag 0)
+90 1792116994.765024781 fixed: 2000 records/s for 60 s
+111 1792117015.943762949 killed broker 1 (kill -9)
+121 1792117025.956165499 restarted broker 1
+151 1792117055.233572722 fixed done
+158 1792117062.772805920 drained (lag 0)
+161 1792117065.477957020 catchup: a new group of 4 reads 2847613 records
+174 1792117078.359522445 catchup done: 2847613 records in 12.2 s
+174 1792117078.363194535 verify
+177 1792117081.480389241 verify: # verify OK acked=2847613 lost=0 misplaced=0 duplicates=0 present_unacknowledged=0 records=2847613 foreign=0 read_seconds=2.7
+phase,seconds,produce_acked_per_s,ack_p50_ms,ack_p99_ms,ack_p999_ms,ack_max_ms,consumed_per_s,e2e_p50_ms,e2e_p99_ms,e2e_p999_ms,e2e_max_ms
+"max",63,43108,2639.87,3348.48,3598.34,4120.58,42536,2664.45,6254.59,6529.02,7454.72
+"fixed, broker down and back (60 s after)",39,2040,156.80,8204.29,9617.41,9854.98,1983,153.73,8179.71,9625.60,9846.78
+producer-fixed-1: # produce id=201 sent=30000 acked=30000 failed=0 seconds=60.2 acked_per_s=499 ack_p50_ms=141.82 ack_p99_ms=7880.70 ack_p999_ms=9068.54 ack_max_ms=9854.98 errors={}
+producer-fixed-2: # produce id=202 sent=30000 acked=30000 failed=0 seconds=60.1 acked_per_s=499 ack_p50_ms=142.85 ack_p99_ms=7839.74 ack_p999_ms=9592.83 ack_max_ms=9814.02 errors={}
+producer-fixed-3: # produce id=203 sent=30000 acked=30000 failed=0 seconds=60.2 acked_per_s=499 ack_p50_ms=139.90 ack_p99_ms=8204.29 ack_p999_ms=9166.85 ack_max_ms=9838.59 errors={}
+producer-fixed-4: # produce id=204 sent=30000 acked=30000 failed=0 seconds=60.1 acked_per_s=499 ack_p50_ms=142.46 ack_p99_ms=7925.76 ack_p999_ms=9461.76 ack_max_ms=9854.98 errors={}
+producer-max-1: # produce id=101 sent=681206 acked=681206 failed=0 seconds=62.7 acked_per_s=10869 ack_p50_ms=2643.97 ack_p99_ms=3334.14 ack_p999_ms=3579.90 ack_max_ms=3868.67 errors={}
+producer-max-2: # produce id=102 sent=674871 acked=674871 failed=0 seconds=62.8 acked_per_s=10753 ack_p50_ms=2635.78 ack_p99_ms=3346.43 ack_p999_ms=3596.29 ack_max_ms=4098.05 errors={}
+producer-max-3: # produce id=103 sent=683775 acked=683775 failed=0 seconds=62.8 acked_per_s=10894 ack_p50_ms=2639.87 ack_p99_ms=3352.58 ack_p999_ms=3622.91 ack_max_ms=4120.58 errors={}
+producer-max-4: # produce id=104 sent=687761 acked=687761 failed=0 seconds=62.8 acked_per_s=10958 ack_p50_ms=2637.82 ack_p99_ms=3358.72 ack_p999_ms=3600.38 ack_max_ms=3862.53 errors={}
+consumer-catchup-1: # consume id=catchup1 read=711715 foreign=0 assignments=1 seconds=12.5 read_per_s=71654 e2e_p50_ms=118882.30 e2e_p99_ms=145752.06 e2e_p999_ms=146014.21 e2e_max_ms=146669.57
+consumer-catchup-2: # consume id=catchup2 read=711466 foreign=0 assignments=1 seconds=12.5 read_per_s=71456 e2e_p50_ms=118685.70 e2e_p99_ms=146014.21 e2e_p999_ms=146276.35 e2e_max_ms=146800.64
+consumer-catchup-3: # consume id=catchup3 read=711915 foreign=0 assignments=1 seconds=12.7 read_per_s=70020 e2e_p50_ms=118620.16 e2e_p99_ms=145883.14 e2e_p999_ms=146145.28 e2e_max_ms=146276.35
+consumer-catchup-4: # consume id=catchup4 read=712517 foreign=0 assignments=1 seconds=12.6 read_per_s=70644 e2e_p50_ms=118882.30 e2e_p99_ms=146014.21 e2e_p999_ms=146276.35 e2e_max_ms=147324.93
+consumer-live-1: # consume id=live1 read=711715 foreign=0 assignments=1 seconds=139.0 read_per_s=5435 e2e_p50_ms=2660.35 e2e_p99_ms=6225.92 e2e_p999_ms=7475.20 e2e_max_ms=8781.82
+consumer-live-2: # consume id=live2 read=711466 foreign=0 assignments=1 seconds=138.9 read_per_s=5438 e2e_p50_ms=2650.11 e2e_p99_ms=6189.06 e2e_p999_ms=6807.55 e2e_max_ms=9846.78
+consumer-live-3: # consume id=live3 read=711915 foreign=0 assignments=1 seconds=138.8 read_per_s=5445 e2e_p50_ms=2654.21 e2e_p99_ms=6279.17 e2e_p999_ms=7200.77 e2e_max_ms=9609.22
+consumer-live-4: # consume id=live4 read=712517 foreign=0 assignments=1 seconds=138.9 read_per_s=5443 e2e_p50_ms=2643.97 e2e_p99_ms=6393.86 e2e_p999_ms=6926.34 e2e_max_ms=9838.59

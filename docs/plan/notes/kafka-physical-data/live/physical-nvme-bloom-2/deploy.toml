@@ -1,0 +1,52 @@
+format = 1
+
+[deployment]
+id = "bench"
+program = "kafka"
+version = 1
+source = "/home/jimmyhmiller/bloom-kafka-physical/examples/kafka/broker.bls"
+secrets = "k.secrets"
+
+[[node]]
+name = "b1"
+role = "Broker"
+addr = "127.0.0.1:19192"
+principal = "spiffe://bench/kafka/b1"
+streams = { kafka = "127.0.0.1:19092" }
+dial = { b2 = "127.0.0.1:19193", b3 = "127.0.0.1:19194" }
+
+[[node]]
+name = "b2"
+role = "Broker"
+addr = "127.0.0.1:19193"
+principal = "spiffe://bench/kafka/b2"
+streams = { kafka = "127.0.0.1:19093" }
+dial = { b1 = "127.0.0.1:19192", b3 = "127.0.0.1:19194" }
+
+[[node]]
+name = "b3"
+role = "Broker"
+addr = "127.0.0.1:19194"
+principal = "spiffe://bench/kafka/b3"
+streams = { kafka = "127.0.0.1:19094" }
+dial = { b1 = "127.0.0.1:19192", b2 = "127.0.0.1:19193" }
+
+[statics]
+broker = [["b1", 1, "127.0.0.1", 19092], ["b2", 2, "127.0.0.1", 19093], ["b3", 3, "127.0.0.1", 19094]]
+
+[security]
+mode = "insecure-dev"
+
+[storage]
+data_dir = "data"
+tail_certification = "strict"
+tiered = true
+eval_workers = 1
+map_cache_rows = 8192
+map_cache_joins = true
+fuse_relations = true
+packed_indexes = true
+compiled_joins = true
+lazy_indexes = true
+hot_rows = 262144
+cache_bytes = 33554432

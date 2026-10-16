@@ -1,0 +1,15 @@
+0 1792117444.585250646 up kafka
+19 1792117463.812191860 topics created: 10 x 12
+19 1792117463.817081936 max: 4 producers unthrottled for 60 s
+83 1792117527.179973037 max done
+90 1792117534.689281192 drained (lag 0)
+90 1792117534.692457161 fixed: 2000 records/s for 60 s
+111 1792117555.830196910 killed broker 1 (kill -9)
+121 1792117565.842055223 restarted broker 1
+151 1792117595.197850375 fixed done
+158 1792117602.801532510 drained (lag 0)
+161 1792117605.377435537 catchup: a new group of 4 reads 2827594 records
+174 1792117618.179290953 catchup done: 2827594 records in 12.2 s
+174 1792117618.182616044 verify
+177 1792117621.392664710 verify: # verify OK acked=2827594 lost=0 misplaced=0 duplicates=0 present_unacknowledged=0 records=2827594 foreign=0 read_seconds=2.8
+177 1792117621.706497161 done: /mnt/data/bloom-physical-results/physical-nvme-kafka-2

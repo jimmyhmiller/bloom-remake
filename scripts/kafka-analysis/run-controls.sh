@@ -11,8 +11,15 @@ export MAP_CACHE_ROWS=8192 MAP_CACHE_JOINS=true LAZY_INDEXES=true EVAL_WORKERS=1
 export COMPILED_JOINS=true PACKED_INDEXES=true FUSE_RELATIONS=true
 unset PIPELINE_BATCHES INFER_KEYS
 for trial in ${TRIALS:-kafka-1 bloom-1 bloom-2 kafka-2}; do
- export BENCH_DIR="/tmp/${RUN_PREFIX:-gap-control}-$trial" OUT="$HOME/soak-results/${RUN_PREFIX:-gap-control}-$trial"
+ export BENCH_DIR="${BENCH_ROOT:-/tmp}/${RUN_PREFIX:-gap-control}-$trial" OUT="${RESULT_ROOT:-$HOME/soak-results}/${RUN_PREFIX:-gap-control}-$trial"
  test ! -e "$OUT" || { echo "Refusing to overwrite $OUT" >&2; exit 1; }
+ mkdir -p "${BENCH_ROOT:-/tmp}"
+ available_kib=$(df -Pk "${BENCH_ROOT:-/tmp}" | awk 'NR == 2 { print $4 }')
+ required_kib=$(( ${MIN_FREE_GIB:-16} * 1024 * 1024 ))
+ if (( available_kib < required_kib )); then
+  echo "Insufficient benchmark disk headroom: ${available_kib} KiB free; ${required_kib} KiB required. Set BENCH_ROOT to a roomy physical filesystem." >&2
+  exit 1
+ fi
  mkdir -p "$OUT"
  python3 scripts/kafka-analysis/sample-processes.py --bench-dir "$BENCH_DIR" --out "$OUT" & sampler=$!
  iostat -x -y 1 > "$OUT/iostat.txt" & iostat_pid=$!
