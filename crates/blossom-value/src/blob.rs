@@ -44,7 +44,14 @@ pub struct BlobMap(pub BTreeMap<BlobRef, Arc<[u8]>>);
 
 impl BlobSource for BlobMap {
     fn get(&self, b: &BlobRef) -> Option<Arc<[u8]>> {
-        self.0.get(b).cloned()
+        BlobSource::get(&self.0, b)
+    }
+}
+
+/// A borrowed map is a blob source too: replay can read its history without cloning it.
+impl BlobSource for BTreeMap<BlobRef, Arc<[u8]>> {
+    fn get(&self, b: &BlobRef) -> Option<Arc<[u8]>> {
+        self.get(b).cloned()
     }
 }
 

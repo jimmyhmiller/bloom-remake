@@ -20,7 +20,6 @@ use blossom_ir::tick::{
 use blossom_node::{Backend, Executor, Executors};
 use blossom_oracle::Oracle;
 use blossom_trace::node::{NodeRecord, NodeTraceHeader, TraceError, TraceReader, outcome_digest};
-use blossom_value::blob::BlobMap;
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::{BlobRef, ExternRegistry, Seed};
 
@@ -82,7 +81,7 @@ pub struct Inputs {
 /// One replayed tick.
 #[derive(Debug)]
 pub struct Replayed {
-    /// Opt-in offline preparation time, including trace decoding and blob-map cloning.
+    /// Opt-in offline preparation time, including trace decoding.
     pub prepare_elapsed_ns: Option<u128>,
     /// Opt-in time inside Executor::step; excludes replay verification and cleanup.
     pub engine_elapsed_ns: Option<u128>,
@@ -351,7 +350,6 @@ impl<R: Read> Replay<R> {
                 None => break,
             }
         }
-        let blobs = BlobMap(self.blobs.clone());
         let examined = if examine {
             let carried = self.engine.carried()?;
             Some(self.oracle.tick(&TickInput {
@@ -364,7 +362,7 @@ impl<R: Read> Replay<R> {
                 delivered: &inputs.delivered,
                 ingress: &inputs.ingress,
                 capture: true,
-                blobs: &blobs,
+                blobs: &self.blobs,
             })?)
         } else {
             None
@@ -387,7 +385,7 @@ impl<R: Read> Replay<R> {
                 events: &inputs.events,
                 delivered: &inputs.delivered,
                 ingress: &inputs.ingress,
-                blobs: &blobs,
+                blobs: &self.blobs,
             },
             &self.observe,
         );
@@ -491,7 +489,6 @@ impl<R: Read> Replay<R> {
                 replayed.inputs.tick.0
             )));
         };
-        let blobs = BlobMap(self.blobs.clone());
         let carried = Instance::default();
         let input = TickInput {
             node: self.node,
@@ -503,7 +500,7 @@ impl<R: Read> Replay<R> {
             delivered: &replayed.inputs.delivered,
             ingress: &replayed.inputs.ingress,
             capture: false,
-            blobs: &blobs,
+            blobs: &self.blobs,
         };
         Ok(self.oracle.why_not(&input, &out.instance, rel, pattern, samples)?)
     }
