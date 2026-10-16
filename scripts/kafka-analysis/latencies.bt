@@ -1,0 +1,39 @@
+// Usage: sudo bpftrace latencies.bt BROKER_PID_1 BROKER_PID_2 BROKER_PID_3
+// Thirty-second diagnostic window. No stack collection; bounded aggregate maps.
+// Off-CPU totals include runnable waiting; wakeup-to-run delay is reported separately.
+BEGIN { printf("diagnostic_start_ns %llu\n", nsecs); }
+tracepoint:syscalls:sys_enter_fsync,
+tracepoint:syscalls:sys_enter_fdatasync
+/pid == $1 || pid == $2 || pid == $3/
+{ @sync_start[tid] = nsecs; @sync_kind[tid] = probe; }
+tracepoint:syscalls:sys_exit_fsync,
+tracepoint:syscalls:sys_exit_fdatasync
+/@sync_start[tid]/
+{
+ $d = nsecs - @sync_start[tid];
+ @sync_count[pid, comm, @sync_kind[tid]] = count();
+ @sync_ns[pid, comm, @sync_kind[tid]] = sum($d);
+ @sync_us[pid, comm, @sync_kind[tid]] = hist($d / 1000);
+ @sync_return[pid, args.ret] = count();
+ delete(@sync_start[tid]); delete(@sync_kind[tid]);
+}
+tracepoint:sched:sched_switch
+{
+ if (pid == $1 || pid == $2 || pid == $3) {
+  @off[args.prev_pid] = nsecs; @owner[args.prev_pid] = pid;
+  @name[args.prev_pid] = comm; @state[args.prev_pid] = args.prev_state;
+  if ((args.prev_state == 0 || args.prev_state == 256)) { @ready[args.prev_pid] = nsecs; }
+ }
+ $t = args.next_pid;
+ if (@off[$t]) {
+  @off_ns[@owner[$t], @name[$t], @state[$t]] = sum(nsecs - @off[$t]);
+  @switches[@owner[$t], @name[$t], @state[$t]] = count();
+  if (@ready[$t]) { @runqueue_ns[@owner[$t], @name[$t]] = sum(nsecs - @ready[$t]); }
+  delete(@off[$t]); delete(@ready[$t]); delete(@state[$t]); delete(@owner[$t]); delete(@name[$t]);
+ }
+}
+tracepoint:sched:sched_wakeup
+/@off[args.pid]/
+{ @ready[args.pid] = nsecs; }
+interval:s:30 { printf("diagnostic_end_ns %llu\n", nsecs); exit(); }
+END { clear(@sync_start); clear(@sync_kind); clear(@off); clear(@ready); clear(@state); clear(@owner); clear(@name); }

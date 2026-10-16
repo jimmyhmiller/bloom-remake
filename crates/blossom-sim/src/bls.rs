@@ -146,6 +146,7 @@ impl<'a> BlsSim<'a> {
                     crate::fabric::StreamsConfig::of(self.artifact.program.get(), &names, &self.artifact.roles)
                 }),
                 links: crate::sync::Links::of(self.artifact.program.get(), &self.artifact.roles, self.oracle.members()),
+                peers: crate::sync::Peers::of(self.artifact.program.get(), &self.artifact.roles),
             },
             faults,
         )

@@ -1,0 +1,66 @@
+program compiled_joins version 1;
+input put_left(k: u64, a: u64, b: u64);
+input put_right(k: u64, v: u64);
+input remove_left(k: u64);
+input remove_right(k: u64);
+input block(k: u64);
+input unblock(k: u64);
+table left(k: u64, a: u64, b: u64) key(k);
+table right(k: u64, v: u64) key(k);
+table blocked(k: u64) key(k);
+write_left: on put_left(k, a, b) {
+    upsert left(k, a, b);
+}
+write_right: on put_right(k, v) {
+    upsert right(k, v);
+}
+erase_left: on remove_left(k), left(k, a, b) {
+    delete left(k, a, b);
+}
+erase_right: on remove_right(k), right(k, v) {
+    delete right(k, v);
+}
+write_block: on block(k) {
+    upsert blocked(k);
+}
+erase_block: on unblock(k) {
+    delete blocked(k);
+}
+view joined(k, a, v) = left(k, a, _), right(k, v), not blocked(k);
+view repeated(k) = left(k, a, a), right(k, _);
+view constant(k, v) = left(k, 2u64, _), right(k, v);
+view projected(a) = left(k, a, _), right(k, _);
+view self_join(a, b) = left(k, a, _), left(k, _, b);
+view absent() = not blocked(_);
+view no_match(k) = left(k, _, _), not right(k, 7u64);
+view filtered_identity(k, a, b) = left(k, a, b), not blocked(k);
+view transient_wide(k, a, b, v) = put_left(k, a, b), right(k, v);
+view transient_permuted(v, b, a, k) = transient_wide(k, a, b, v);
+view transient_result(k, a) = transient_permuted(_, _, a, k), not blocked(k);
+view transient_twice(k) = transient_wide(k, a, _, _), transient_wide(k, _, a, _);
+view lossy(a) = put_left(_, a, _);
+view lossy_result(a) = lossy(a), not blocked(a);
+view negative_boundary(k, a, b) = put_left(k, a, b);
+view negative_consumer(k) = put_right(k, _), not negative_boundary(k, _, _);
+view expression_boundary(k, a, b) = put_left(k, a, b);
+view expression_consumer(k, a, b) = expression_boundary(k, a, b), a > 0u64;
+// A projected key still determines the complete source tuple: no distinct boundary.
+view key_projection(k) = left(k, _, _);
+view key_projection_result(k, v) = key_projection(k), right(k, v);
+view persistent_wide(k, a, b, v) = left(k, a, b), right(k, v);
+view persistent_result(k, a) = persistent_wide(k, a, _, _);
+// Omitting the key can collapse distinct source rows and must retain set semantics.
+view persistent_lossy(a) = left(_, a, _);
+view persistent_lossy_result(a) = persistent_lossy(a), not blocked(a);
+// Split infallible conjuncts can reject a left row before probing the right table.
+view early_guard(k, v) = left(k, a, _), right(k, v) where a > 0u64 && v > 0u64;
+// A short-circuited division must remain inside its fallible guard.
+view short_circuit(k) = left(k, a, _) where a > 0u64 && 9u64 / a > 1u64;
+// Tuple bindings and field reads compile to source paths, without an environment copy.
+table nested(k: u64, pair: (u64, u64)) key(k);
+write_nested: on put_left(k, a, b) {
+    upsert nested(k, (a, b));
+}
+view nested_result(k, a, b) = nested(k, pair), let (a, b) = pair, right(k, v) where pair.0 == v;
+view nested_constant(k) = nested(k, pair), let (2u64, _) = pair;
+view nested_repeated(k) = nested(k, pair), let (a, a) = pair;

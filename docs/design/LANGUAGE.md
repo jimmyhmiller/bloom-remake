@@ -1293,6 +1293,7 @@ ticks), §15.2.
 | `localtick()` | scratch | `next localtick();` requests another tick (a staged change, SEM-009) |
 | `session_open(s: Session, p: Principal, at: Instant)`, `session_closed(s: Session, reason: String)` | event | external sessions, on roles that receive from an external role (§18.4) |
 | `Q.connected(n: Node<Q>, resumed: bool)`, `Q.disconnected(n: Node<Q>)` | event | a client link (docs/design/CLIENTS.md): at a client role of a process, cluster or keyed role `Q`'s node or member (KEYED.md: `n` is then the member), at a process, cluster or keyed role of a client role `Q`'s member; `resumed` when the link took up where the last one left off (BLS0404 elsewhere; written only by the runtime, BLS0400) |
+| `R.up(n: Node<R>, incarnation: u64)`, `R.down(n: Node<R>)` | event | the runtime's view of a node of cluster role `R` (ARCHITECTURE §5.13): up (its liveness heard, its engine making progress; again with a new incarnation after a restart) or down (silent for the deployment's liveness session); raised when the view changes; a node is its own peer, so it learns its incarnation from `R.up(self, i)`; read at a cluster role (BLS0404 elsewhere; written only by the runtime, BLS0400) |
 | `node_dir(node: Node, addr: String, principal: Principal, role: String)` | static | the node directory (LANG-240) |
 | `catalog.rule`, `catalog.depends`, `catalog.stratum`, `catalog.schema`, `catalog.interface` | static | the compiled program's catalog, after `use std::catalog;` (LANG-202) |
 

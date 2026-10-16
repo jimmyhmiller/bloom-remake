@@ -1,0 +1,664 @@
+[
+  {
+    "trial": "physical-initial-bloom-1",
+    "max_phase_s": 67.83024740219116,
+    "sampled_s": 68.00698137283325,
+    "boundary_error_s": [
+      0.3108041286468506,
+      0.48753809928894043
+    ],
+    "records": 1109892,
+    "throughput": 16363,
+    "sampler_max_ms": 216.1716099944897,
+    "brokers": [
+      {
+        "broker": 1,
+        "cpu_s": 65.57,
+        "system_cpu_s": 3.23,
+        "cpu_cores": 0.9641657176419426,
+        "io": {
+          "rchar": 7460498260,
+          "wchar": 2633644088,
+          "syscr": 259237,
+          "syscw": 162892,
+          "read_bytes": 4096,
+          "write_bytes": 2646614016,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 367426,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2831965,
+            "name": "engine",
+            "cpu_s": 57.67810341,
+            "cpu_cores": 0.8481203289084769,
+            "voluntary": 1048,
+            "involuntary": 359
+          },
+          {
+            "tid": 2831957,
+            "name": "database",
+            "cpu_s": 4.262297292,
+            "cpu_cores": 0.06267440792045889,
+            "voluntary": 10947,
+            "involuntary": 63
+          },
+          {
+            "tid": 2831956,
+            "name": "committer",
+            "cpu_s": 2.543175325,
+            "cpu_cores": 0.03739579780872206,
+            "voluntary": 31468,
+            "involuntary": 31
+          },
+          {
+            "tid": 2831986,
+            "name": "peer-reader",
+            "cpu_s": 0.246735866,
+            "cpu_cores": 0.0036280961310034498,
+            "voluntary": 3110,
+            "involuntary": 7
+          },
+          {
+            "tid": 2831984,
+            "name": "peer-reader",
+            "cpu_s": 0.226155563,
+            "cpu_cores": 0.0033254756855057585,
+            "voluntary": 3773,
+            "involuntary": 6
+          },
+          {
+            "tid": 2831958,
+            "name": "peer-writer",
+            "cpu_s": 0.101259619,
+            "cpu_cores": 0.0014889591767772562,
+            "voluntary": 1894,
+            "involuntary": 2
+          },
+          {
+            "tid": 2831959,
+            "name": "peer-writer",
+            "cpu_s": 0.07925744,
+            "cpu_cores": 0.0011654309366488213,
+            "voluntary": 1924,
+            "involuntary": 9
+          },
+          {
+            "tid": 2831963,
+            "name": "peer-listener",
+            "cpu_s": 0.04319381,
+            "cpu_cores": 0.0006351378803773024,
+            "voluntary": 3390,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831964,
+            "name": "stream-listener",
+            "cpu_s": 0.041716693,
+            "cpu_cores": 0.0006134178014944884,
+            "voluntary": 3394,
+            "involuntary": 2
+          },
+          {
+            "tid": 2831962,
+            "name": "liveness",
+            "cpu_s": 0.037880217,
+            "cpu_cores": 0.0005570048285532639,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831961,
+            "name": "liveness",
+            "cpu_s": 0.035013105,
+            "cpu_cores": 0.0005148457451456107,
+            "voluntary": 1358,
+            "involuntary": 1
+          },
+          {
+            "tid": 2831987,
+            "name": "peer-reader",
+            "cpu_s": 0.021023786,
+            "cpu_cores": 0.0003091415848137964,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831985,
+            "name": "peer-reader",
+            "cpu_s": 0.019859582,
+            "cpu_cores": 0.0002920226953042399,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831966,
+            "name": "stats",
+            "cpu_s": 0.012008105,
+            "cpu_cores": 0.00017657165128633217,
+            "voluntary": 73,
+            "involuntary": 1
+          },
+          {
+            "tid": 2831954,
+            "name": "metadata",
+            "cpu_s": 0.010345413,
+            "cpu_cores": 0.0001521228084405564,
+            "voluntary": 319,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831960,
+            "name": "liveness-check",
+            "cpu_s": 0.009378403,
+            "cpu_cores": 0.00013790353300031032,
+            "voluntary": 1359,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831955,
+            "name": "promoter",
+            "cpu_s": 0.005058487,
+            "cpu_cores": 7.438187812318802e-05,
+            "voluntary": 177,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831553,
+            "name": "blossom-physica",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831563,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 3622,
+          "wal_records": 1145,
+          "wal_batches": 1127,
+          "released": 3622,
+          "delivered": 206116,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 94,
+          "tick_nanos": 54446301746,
+          "ticks_over_4ms": 2141,
+          "ticks_over_16ms": 1327,
+          "db_apply_nanos": 2020797752,
+          "db_flush_nanos": 8963918569,
+          "wal_sync_nanos": 4372227800,
+          "wal_syncs_over_4ms": 100,
+          "wal_syncs_over_16ms": 34,
+          "wal_syncs_over_64ms": 12,
+          "blob_promote_nanos": 48790328,
+          "blobs_promoted": 0,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 160474,
+          "stream_waits_over_4ms": 7064,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 137147059,
+          "db_apply_max_nanos": 5760693,
+          "db_flush_max_nanos": 2733081506,
+          "wal_sync_max_nanos": 620399530,
+          "blob_promote_max_nanos": 30186649,
+          "peer_wait_max_nanos": 128117986,
+          "stream_wait_max_nanos": 117598338
+        }
+      },
+      {
+        "broker": 2,
+        "cpu_s": 67.69,
+        "system_cpu_s": 3.18,
+        "cpu_cores": 0.9953389877563382,
+        "io": {
+          "rchar": 7540787558,
+          "wchar": 2663009289,
+          "syscr": 267475,
+          "syscw": 163656,
+          "read_bytes": 8192,
+          "write_bytes": 2673033216,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 381374,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2831978,
+            "name": "engine",
+            "cpu_s": 59.704847799,
+            "cpu_cores": 0.8779223337627847,
+            "voluntary": 764,
+            "involuntary": 304
+          },
+          {
+            "tid": 2831970,
+            "name": "database",
+            "cpu_s": 4.155721664,
+            "cpu_cores": 0.061107280166093146,
+            "voluntary": 11278,
+            "involuntary": 61
+          },
+          {
+            "tid": 2831969,
+            "name": "committer",
+            "cpu_s": 2.56854696,
+            "cpu_cores": 0.03776887178565549,
+            "voluntary": 25344,
+            "involuntary": 46
+          },
+          {
+            "tid": 2831990,
+            "name": "peer-reader",
+            "cpu_s": 0.302615971,
+            "cpu_cores": 0.004449778021185425,
+            "voluntary": 2316,
+            "involuntary": 4
+          },
+          {
+            "tid": 2831988,
+            "name": "peer-reader",
+            "cpu_s": 0.294047154,
+            "cpu_cores": 0.004323778942458148,
+            "voluntary": 2449,
+            "involuntary": 5
+          },
+          {
+            "tid": 2831971,
+            "name": "peer-writer",
+            "cpu_s": 0.102982189,
+            "cpu_cores": 0.0015142884880512914,
+            "voluntary": 1463,
+            "involuntary": 6
+          },
+          {
+            "tid": 2831972,
+            "name": "peer-writer",
+            "cpu_s": 0.09011674,
+            "cpu_cores": 0.0013251101310607345,
+            "voluntary": 1448,
+            "involuntary": 4
+          },
+          {
+            "tid": 2831977,
+            "name": "stream-listener",
+            "cpu_s": 0.058688529,
+            "cpu_cores": 0.0008629780033648768,
+            "voluntary": 3389,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831976,
+            "name": "peer-listener",
+            "cpu_s": 0.054908085,
+            "cpu_cores": 0.0008073889458345248,
+            "voluntary": 3389,
+            "involuntary": 1
+          },
+          {
+            "tid": 2831991,
+            "name": "peer-reader",
+            "cpu_s": 0.036673939,
+            "cpu_cores": 0.0005392672672669183,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831975,
+            "name": "liveness",
+            "cpu_s": 0.034881766,
+            "cpu_cores": 0.0005129144875401604,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831974,
+            "name": "liveness",
+            "cpu_s": 0.033849283,
+            "cpu_cores": 0.0004977324727064239,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831989,
+            "name": "peer-reader",
+            "cpu_s": 0.026578434,
+            "cpu_cores": 0.0003908191991979413,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831967,
+            "name": "metadata",
+            "cpu_s": 0.015034361,
+            "cpu_cores": 0.00022107084738223325,
+            "voluntary": 305,
+            "involuntary": 1
+          },
+          {
+            "tid": 2831973,
+            "name": "liveness-check",
+            "cpu_s": 0.013524829,
+            "cpu_cores": 0.00019887412625849564,
+            "voluntary": 1359,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831979,
+            "name": "stats",
+            "cpu_s": 0.012526433,
+            "cpu_cores": 0.00018419333937682954,
+            "voluntary": 71,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831968,
+            "name": "promoter",
+            "cpu_s": 0.005407219,
+            "cpu_cores": 7.950976342202452e-05,
+            "voluntary": 158,
+            "involuntary": 2
+          },
+          {
+            "tid": 2831554,
+            "name": "blossom-physica",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831565,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 2099,
+          "wal_records": 823,
+          "wal_batches": 807,
+          "released": 2099,
+          "delivered": 210961,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 92,
+          "tick_nanos": 56470759690,
+          "ticks_over_4ms": 1190,
+          "ticks_over_16ms": 1033,
+          "db_apply_nanos": 2107214037,
+          "db_flush_nanos": 8466594432,
+          "wal_sync_nanos": 2873837680,
+          "wal_syncs_over_4ms": 71,
+          "wal_syncs_over_16ms": 23,
+          "wal_syncs_over_64ms": 5,
+          "blob_promote_nanos": 22915004,
+          "blobs_promoted": 0,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 190572,
+          "stream_waits_over_4ms": 6165,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 145034528,
+          "db_apply_max_nanos": 6799130,
+          "db_flush_max_nanos": 2466558385,
+          "wal_sync_max_nanos": 620278903,
+          "blob_promote_max_nanos": 4665118,
+          "peer_wait_max_nanos": 141466888,
+          "stream_wait_max_nanos": 126303052
+        }
+      },
+      {
+        "broker": 3,
+        "cpu_s": 65.52,
+        "system_cpu_s": 3.21,
+        "cpu_cores": 0.9634304990071691,
+        "io": {
+          "rchar": 7457554137,
+          "wchar": 2634516974,
+          "syscr": 258759,
+          "syscw": 163009,
+          "read_bytes": 8192,
+          "write_bytes": 2647687168,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 376373,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2831952,
+            "name": "engine",
+            "cpu_s": 57.570402153,
+            "cpu_cores": 0.8465366494857784,
+            "voluntary": 1066,
+            "involuntary": 245
+          },
+          {
+            "tid": 2831944,
+            "name": "database",
+            "cpu_s": 3.972151986,
+            "cpu_cores": 0.058408003205193806,
+            "voluntary": 9538,
+            "involuntary": 44
+          },
+          {
+            "tid": 2831943,
+            "name": "committer",
+            "cpu_s": 2.717129247,
+            "cpu_cores": 0.03995368110964871,
+            "voluntary": 29449,
+            "involuntary": 36
+          },
+          {
+            "tid": 2831980,
+            "name": "peer-reader",
+            "cpu_s": 0.278308589,
+            "cpu_cores": 0.004092353217006275,
+            "voluntary": 2290,
+            "involuntary": 8
+          },
+          {
+            "tid": 2831982,
+            "name": "peer-reader",
+            "cpu_s": 0.261189134,
+            "cpu_cores": 0.0038406223703429544,
+            "voluntary": 2924,
+            "involuntary": 8
+          },
+          {
+            "tid": 2831945,
+            "name": "peer-writer",
+            "cpu_s": 0.115436023,
+            "cpu_cores": 0.0016974143046748025,
+            "voluntary": 1844,
+            "involuntary": 12
+          },
+          {
+            "tid": 2831946,
+            "name": "peer-writer",
+            "cpu_s": 0.104370286,
+            "cpu_cores": 0.0015346995836767548,
+            "voluntary": 1797,
+            "involuntary": 15
+          },
+          {
+            "tid": 2831951,
+            "name": "stream-listener",
+            "cpu_s": 0.06016272,
+            "cpu_cores": 0.0008846550572531838,
+            "voluntary": 3391,
+            "involuntary": 3
+          },
+          {
+            "tid": 2831950,
+            "name": "peer-listener",
+            "cpu_s": 0.057560532,
+            "cpu_cores": 0.000846391515077505,
+            "voluntary": 3388,
+            "involuntary": 2
+          },
+          {
+            "tid": 2831981,
+            "name": "peer-reader",
+            "cpu_s": 0.034533696,
+            "cpu_cores": 0.0005077963365360483,
+            "voluntary": 1358,
+            "involuntary": 1
+          },
+          {
+            "tid": 2831948,
+            "name": "liveness",
+            "cpu_s": 0.032465947,
+            "cpu_cores": 0.0004773913845993637,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831983,
+            "name": "peer-reader",
+            "cpu_s": 0.031967377,
+            "cpu_cores": 0.00047006022550458333,
+            "voluntary": 1358,
+            "involuntary": 2
+          },
+          {
+            "tid": 2831949,
+            "name": "liveness",
+            "cpu_s": 0.030101275,
+            "cpu_cores": 0.0004426203662088221,
+            "voluntary": 1358,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831953,
+            "name": "stats",
+            "cpu_s": 0.013919965,
+            "cpu_cores": 0.0002046843532678927,
+            "voluntary": 71,
+            "involuntary": 1
+          },
+          {
+            "tid": 2831941,
+            "name": "metadata",
+            "cpu_s": 0.013718793,
+            "cpu_cores": 0.00020172624520399968,
+            "voluntary": 327,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831947,
+            "name": "liveness-check",
+            "cpu_s": 0.01228888,
+            "cpu_cores": 0.00018070027152990265,
+            "voluntary": 1359,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831942,
+            "name": "promoter",
+            "cpu_s": 0.005514051,
+            "cpu_cores": 8.108066096582693e-05,
+            "voluntary": 165,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831556,
+            "name": "blossom-physica",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2831567,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 3663,
+          "wal_records": 1169,
+          "wal_batches": 1146,
+          "released": 3663,
+          "delivered": 205353,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 94,
+          "tick_nanos": 54293624439,
+          "ticks_over_4ms": 2203,
+          "ticks_over_16ms": 1338,
+          "db_apply_nanos": 2054059802,
+          "db_flush_nanos": 8466276940,
+          "wal_sync_nanos": 6299691099,
+          "wal_syncs_over_4ms": 111,
+          "wal_syncs_over_16ms": 37,
+          "wal_syncs_over_64ms": 12,
+          "blob_promote_nanos": 20701685,
+          "blobs_promoted": 0,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 149996,
+          "stream_waits_over_4ms": 6937,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 103825617,
+          "db_apply_max_nanos": 7262399,
+          "db_flush_max_nanos": 2698131291,
+          "wal_sync_max_nanos": 893802491,
+          "blob_promote_max_nanos": 3692304,
+          "peer_wait_max_nanos": 104870336,
+          "stream_wait_max_nanos": 97220541
+        }
+      }
+    ],
+    "cluster_cpu_s": 198.77999999999997,
+    "cluster_cpu_us_per_record": 179.09850688175064,
+    "cluster_write_bytes_per_record": 7178.477185167566
+  }
+]

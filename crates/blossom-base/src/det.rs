@@ -336,6 +336,32 @@ impl<K: Hash + Eq, V> DetMap<K, V> {
         self.table.find(hash, |(k, _)| k.borrow() == key).map(|(k, v)| (k, v))
     }
 
+    /// Look up a borrowed representation that cannot implement `Borrow` (for example a composite view).
+    /// `query` must hash identically to a stored key for which `equivalent` returns true.
+    pub fn get_by<Q: Hash + ?Sized>(&self, query: &Q, mut equivalent: impl FnMut(&K, &Q) -> bool) -> Option<&V> {
+        let hash = self.hash_of(query);
+        self.table.find(hash, |(k, _)| equivalent(k, query)).map(|(_, v)| v)
+    }
+
+    /// Mutable lookup by a borrowed composite query; equivalent queries must hash identically to keys.
+    pub fn get_mut_by<Q: Hash + ?Sized>(
+        &mut self,
+        query: &Q,
+        mut equivalent: impl FnMut(&K, &Q) -> bool,
+    ) -> Option<&mut V> {
+        let hash = self.hash_of(query);
+        self.table.find_mut(hash, |(k, _)| equivalent(k, query)).map(|(_, v)| v)
+    }
+
+    /// Remove by a borrowed composite query; equivalent queries must hash identically to keys.
+    pub fn remove_by<Q: Hash + ?Sized>(&mut self, query: &Q, mut equivalent: impl FnMut(&K, &Q) -> bool) -> Option<V> {
+        let hash = self.hash_of(query);
+        self.table
+            .find_entry(hash, |(k, _)| equivalent(k, query))
+            .ok()
+            .map(|entry| entry.remove().0.1)
+    }
+
     /// The value for `key`, mutably.
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
@@ -374,6 +400,25 @@ impl<K: Hash + Eq, V> DetMap<K, V> {
         match self.table.find_entry(hash, |(k, _)| k.borrow() == key) {
             Ok(entry) => Some(entry.remove().0),
             Err(_) => None,
+        }
+    }
+
+    /// An entry using a borrowed composite query; constructs the owned key only on a miss.
+    /// Equivalent queries and owned keys must have identical hashes, and `make` must own this query's key.
+    pub fn entry_by<Q: Hash + ?Sized>(
+        &mut self,
+        query: &Q,
+        mut equivalent: impl FnMut(&K, &Q) -> bool,
+        make: impl FnOnce() -> K,
+    ) -> Entry<'_, K, V> {
+        let state = self.state;
+        let hash = state.hash_one(query);
+        match self
+            .table
+            .entry(hash, |(k, _)| equivalent(k, query), |(k, _)| state.hash_one(k))
+        {
+            hash_table::Entry::Occupied(inner) => Entry::Occupied(OccupiedEntry { inner }),
+            hash_table::Entry::Vacant(inner) => Entry::Vacant(VacantEntry { inner, key: make() }),
         }
     }
 
@@ -1203,6 +1248,39 @@ mod tests {
             }
             prop_assert_eq!(map.len(), model.len());
             prop_assert_eq!(map.into_sorted_vec(), model.into_iter().collect::<Vec<_>>());
+        }
+    }
+}
+
+#[cfg(test)]
+mod borrowed_mutation_tests {
+    use super::*;
+    #[derive(PartialEq, Eq)]
+    struct Key(u64, u64);
+    impl Hash for Key {
+        fn hash<H: Hasher>(&self, h: &mut H) {
+            self.0.hash(h);
+        }
+    }
+    struct Query(u64, u64);
+    impl Hash for Query {
+        fn hash<H: Hasher>(&self, h: &mut H) {
+            self.0.hash(h);
+        }
+    }
+    #[test]
+    fn borrowed_mutations_select_the_exact_key_among_hash_collisions() {
+        for state in [DetState::fixed(), DetState::from_nonce(123)] {
+            let mut map = DetMap::with_capacity_and_state(2, state);
+            map.insert(Key(1, 2), 10);
+            map.insert(Key(1, 3), 20);
+            let eq = |k: &Key, q: &Query| k.0 == q.0 && k.1 == q.1;
+            *map.get_mut_by(&Query(1, 3), eq).unwrap() += 5;
+            assert_eq!(map.remove_by(&Query(1, 2), eq), Some(10));
+            assert_eq!(map.get_by(&Query(1, 3), eq), Some(&25));
+            assert!(map.remove_by(&Query(1, 2), eq).is_none());
+            assert_eq!(map.remove_by(&Query(1, 3), eq), Some(25));
+            assert!(map.is_empty());
         }
     }
 }

@@ -9,15 +9,28 @@
 //! compares the two at every tick. The word-level kernel, the planner's physical plans and generated code are later
 //! work.
 
+mod arrangement;
 mod cold;
+mod compiled;
 mod engine;
-mod purity;
 mod expr;
 mod func;
+mod functional_keys;
+mod fusion;
+mod inspection;
+mod map_cache;
+mod normalize;
+mod probe_cache;
+mod purity;
+mod row_bucket;
+mod row_support;
 mod rule;
 mod store;
 mod strata;
+mod upsert;
 
 pub use cold::{ColRange, ColdTables, Resume};
 pub use engine::{Engine, EngineConfig};
+pub use inspection::{PlanReport, RuleReport, StoreOperations, StoreReport, WorkReport};
 
+pub use map_cache::MapCacheReport;

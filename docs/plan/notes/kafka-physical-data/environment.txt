@@ -1,0 +1,25 @@
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+Linux metaphysics 7.0.0-38-generic #38~24.04.4-Ubuntu SMP PREEMPT_DYNAMIC Mon Sep 14 16:37:11 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+SOURCE       FSTYPE OPTIONS
+/dev/nvme0n1 ext4   rw,relatime,stripe=64
+61c018e6195b4ca5011f05ff61e46cd510cb947134b681cdf6bc735ec2c78e47  /home/jimmyhmiller/soak-results/blossom-physical-verified
+-rw-rw-r-- 1 jimmyhmiller jimmyhmiller 68M Oct 16 02:14 /home/jimmyhmiller/soak-results/blossom-physical-bdc989fe.gz
+-rw-rw-r-- 1 jimmyhmiller jimmyhmiller 68M Oct 16 02:14 /home/jimmyhmiller/soak-results/blossom-physical-columns.gz
+-rw-rw-r-- 1 jimmyhmiller jimmyhmiller 68M Oct 16 02:14 /home/jimmyhmiller/soak-results/blossom-physical-expression.gz
+-rw-rw-r-- 1 jimmyhmiller jimmyhmiller 68M Oct 16 02:14 /home/jimmyhmiller/soak-results/blossom-physical-history-guards.gz
+161 1792117065.477957020 catchup: a new group of 4 reads 2847613 records
+174 1792117078.359522445 catchup done: 2847613 records in 12.2 s
+174 1792117078.363194535 verify
+177 1792117081.480389241 verify: # verify OK acked=2847613 lost=0 misplaced=0 duplicates=0 present_unacknowledged=0 records=2847613 foreign=0 read_seconds=2.7
+177 1792117081.800774881 done: /mnt/data/bloom-physical-results/physical-nvme-kafka-1
+13 1792117097.770026723 topics created: 10 x 12
+13 1792117097.775746253 max: 4 producers unthrottled for 60 s
+80 1792117164.997241102 max done
+88 1792117172.534086570 drained (lag 0)
+88 1792117172.536872296 fixed: 2000 records/s for 60 s

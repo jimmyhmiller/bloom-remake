@@ -1,0 +1,670 @@
+Attaching 9 probes...
+diagnostic_start_ns 278154785576878
+diagnostic_end_ns 278184788799302
+
+
+
+
+@off_ns[2707818, broker-3-Thrott, 0]: 4348
+@off_ns[2707816, share-group-loc, 0]: 4528
+@off_ns[2707815, ExpirationReape, 0]: 5430
+@off_ns[2707815, share-group-loc, 0]: 5471
+@off_ns[2707818, VM Periodic Tas, 0]: 5520
+@off_ns[2707815, metrics-meter-t, 256]: 5821
+@off_ns[2707816, broker-2-to-con, 0]: 6493
+@off_ns[2707815, metrics-meter-t, 0]: 9288
+@off_ns[2707815, C2 CompilerThre, 256]: 9398
+@off_ns[2707816, kafka-2-raft-ou, 0]: 10320
+@off_ns[2707818, share-group-loc, 0]: 10590
+@off_ns[2707816, G1 Conc#0, 0]: 13646
+@off_ns[2707816, metrics-meter-t, 0]: 14999
+@off_ns[2707818, broker-3-lifecy, 0]: 15079
+@off_ns[2707818, client-metrics-, 0]: 19097
+@off_ns[2707816, C2 CompilerThre, 256]: 19568
+@off_ns[2707816, G1 Main Marker, 2]: 20448
+@off_ns[2707818, broker-3-to-con, 0]: 22462
+@off_ns[2707818, G1 Main Marker, 0]: 24376
+@off_ns[2707818, metrics-meter-t, 0]: 24717
+@off_ns[2707815, Monitor Deflati, 0]: 32411
+@off_ns[2707818, G1 Conc#0, 0]: 36469
+@off_ns[2707815, quorum-controll, 0]: 40717
+@off_ns[2707815, Service Thread, 0]: 60293
+@off_ns[2707815, group-coordinat, 0]: 60814
+@off_ns[2707816, GC Thread#0, 0]: 61786
+@off_ns[2707818, quorum-controll, 0]: 61947
+@off_ns[2707816, GC Thread#1, 0]: 69681
+@off_ns[2707816, raft-expiration, 0]: 69791
+@off_ns[2707818, GC Thread#1, 0]: 77175
+@off_ns[2707818, GC Thread#3, 0]: 81744
+@off_ns[2707816, ReplicaFetcherT, 256]: 84246
+@off_ns[2707815, G1 Main Marker, 0]: 95770
+@off_ns[2707818, GC Thread#0, 0]: 108715
+@off_ns[2707816, ExpirationReape, 0]: 109024
+@off_ns[2707815, ReplicaFetcherT, 256]: 109418
+@off_ns[2707816, kafka-2-metadat, 0]: 112772
+@off_ns[2707816, quorum-controll, 0]: 154731
+@off_ns[2707815, kafka-scheduler, 0]: 169848
+@off_ns[2707815, G1 Conc#0, 0]: 187503
+@off_ns[2707815, GC Thread#2, 0]: 198283
+@off_ns[2707818, ReplicaFetcherT, 256]: 203392
+@off_ns[2707818, group-coordinat, 0]: 211027
+@off_ns[2707815, data-plane-kafk, 256]: 214500
+@off_ns[2707815, kafka-1-raft-io, 0]: 215064
+@off_ns[2707815, kafka-1-raft-ou, 0]: 221026
+@off_ns[2707818, ExpirationReape, 0]: 231016
+@off_ns[2707818, data-plane-kafk, 256]: 237523
+@off_ns[2707816, data-plane-kafk, 256]: 261622
+@off_ns[2707816, kafka-scheduler, 0]: 280999
+@off_ns[2707815, GC Thread#0, 0]: 324771
+@off_ns[2707815, Reference Handl, 0]: 329710
+@off_ns[2707816, GC Thread#2, 0]: 385264
+@off_ns[2707816, kafka-2-raft-io, 0]: 463379
+@off_ns[2707816, VM Thread, 2]: 494048
+@off_ns[2707818, C1 CompilerThre, 0]: 526744
+@off_ns[2707818, kafka-3-raft-ou, 0]: 584901
+@off_ns[2707816, C1 CompilerThre, 0]: 585152
+@off_ns[2707815, kafka-1-metadat, 0]: 598255
+@off_ns[2707816, group-coordinat, 0]: 606087
+@off_ns[2707815, G1 Refine#0, 0]: 671873
+@off_ns[2707815, C1 CompilerThre, 0]: 705877
+@off_ns[2707818, kafka-3-metadat, 0]: 721578
+@off_ns[2707818, kafka-3-raft-io, 0]: 740794
+@off_ns[2707818, G1 Refine#0, 0]: 761892
+@off_ns[2707816, G1 Refine#0, 0]: 1052198
+@off_ns[2707816, C2 CompilerThre, 0]: 1960705
+@off_ns[2707818, ReplicaFetcherT, 0]: 2265501
+@off_ns[2707818, VM Thread, 0]: 3405674
+@off_ns[2707815, GC Thread#1, 0]: 3526271
+@off_ns[2707816, VM Thread, 0]: 3932334
+@off_ns[2707818, C2 CompilerThre, 0]: 3977810
+@off_ns[2707815, GC Thread#3, 0]: 4136539
+@off_ns[2707816, GC Thread#3, 0]: 4511433
+@off_ns[2707816, ReplicaFetcherT, 0]: 4670255
+@off_ns[2707815, C2 CompilerThre, 0]: 4769846
+@off_ns[2707818, GC Thread#2, 0]: 5467071
+@off_ns[2707815, ReplicaFetcherT, 0]: 6061883
+@off_ns[2707815, VM Thread, 0]: 7462212
+@off_ns[2707818, data-plane-kafk, 0]: 14920236
+@off_ns[2707816, data-plane-kafk, 0]: 21529354
+@off_ns[2707815, data-plane-kafk, 0]: 23314584
+@off_ns[2707816, kafka-scheduler, 2]: 29845106
+@off_ns[2707815, kafka-scheduler, 2]: 47798758
+@off_ns[2707818, kafka-scheduler, 2]: 51369722
+@off_ns[2707815, group-coordinat, 2]: 55742626
+@off_ns[2707815, kafka-1-raft-io, 2]: 325990154
+@off_ns[2707818, kafka-3-raft-io, 2]: 328643852
+@off_ns[2707816, kafka-2-raft-io, 2]: 335301864
+@off_ns[2707818, executor-Fetch, 1]: 4634977255
+@off_ns[2707815, executor-Fetch, 1]: 5344512071
+@off_ns[2707815, kafka-log-clean, 1]: 15000058745
+@off_ns[2707816, kafka-log-clean, 1]: 15000073842
+@off_ns[2707818, kafka-log-clean, 1]: 15000145529
+@off_ns[2707816, ReplicaFetcherT, 1]: 15340638063
+@off_ns[2707818, ReplicaFetcherT, 1]: 15439525222
+@off_ns[2707815, ReplicaFetcherT, 1]: 15799619411
+@off_ns[2707816, executor-Fetch, 1]: 17818829538
+@off_ns[2707816, transaction-log, 1]: 19999792172
+@off_ns[2707818, transaction-log, 1]: 19999847185
+@off_ns[2707815, transaction-log, 1]: 19999868856
+@off_ns[2707818, VM Periodic Tas, 1]: 25000264756
+@off_ns[2707816, VM Periodic Tas, 1]: 25000266688
+@off_ns[2707815, VM Periodic Tas, 1]: 25000278904
+@off_ns[2707815, executor-group-, 1]: 25011556773
+@off_ns[2707818, controller-3-to, 1]: 25111444603
+@off_ns[2707815, controller-1-to, 1]: 25121463453
+@off_ns[2707816, controller-2-to, 1]: 25124423659
+@off_ns[2707815, GC Thread#2, 1]: 26626270887
+@off_ns[2707815, GC Thread#3, 1]: 26626512296
+@off_ns[2707815, GC Thread#1, 1]: 26626810672
+@off_ns[2707815, GC Thread#0, 1]: 26631320052
+@off_ns[2707815, VM Thread, 1]: 26655863833
+@off_ns[2707815, G1 Main Marker, 1]: 26660121343
+@off_ns[2707815, G1 Conc#0, 1]: 26660655829
+@off_ns[2707815, Reference Handl, 1]: 26660688882
+@off_ns[2707818, GC Thread#0, 1]: 27182176700
+@off_ns[2707818, GC Thread#2, 1]: 27182200867
+@off_ns[2707818, GC Thread#3, 1]: 27182376868
+@off_ns[2707818, GC Thread#1, 1]: 27188957604
+@off_ns[2707818, G1 Main Marker, 1]: 27213612145
+@off_ns[2707818, G1 Conc#0, 1]: 27214111818
+@off_ns[2707818, Reference Handl, 1]: 27214151420
+@off_ns[2707818, VM Thread, 1]: 27214545434
+@off_ns[2707818, broker-3-to-con, 1]: 28007344506
+@off_ns[2707815, broker-1-to-con, 1]: 28007374532
+@off_ns[2707816, broker-2-to-con, 1]: 28007968680
+@off_ns[2707818, broker-3-lifecy, 1]: 28008915829
+@off_ns[2707815, broker-1-lifecy, 1]: 28008991873
+@off_ns[2707816, broker-2-lifecy, 1]: 28009928798
+@off_ns[2707818, C2 CompilerThre, 1]: 28124173664
+@off_ns[2707815, C2 CompilerThre, 1]: 28705343332
+@off_ns[2707816, C2 CompilerThre, 1]: 28935280140
+@off_ns[2707816, Service Thread, 1]: 29001510959
+@off_ns[2707818, Service Thread, 1]: 29001543748
+@off_ns[2707815, Service Thread, 1]: 29466162337
+@off_ns[2707815, kafka-1-metadat, 1]: 29490344839
+@off_ns[2707818, kafka-3-metadat, 1]: 29490876143
+@off_ns[2707816, kafka-2-metadat, 1]: 29492350170
+@off_ns[2707815, kafka-1-raft-ou, 1]: 29497081768
+@off_ns[2707818, kafka-3-raft-ou, 1]: 29497734343
+@off_ns[2707815, quorum-controll, 1]: 29498560489
+@off_ns[2707818, quorum-controll, 1]: 29498865320
+@off_ns[2707816, quorum-controll, 1]: 29508155926
+@off_ns[2707818, C1 CompilerThre, 1]: 29569949493
+@off_ns[2707816, kafka-2-raft-io, 1]: 29596936503
+@off_ns[2707818, kafka-3-raft-io, 1]: 29626020526
+@off_ns[2707815, kafka-1-raft-io, 1]: 29630929672
+@off_ns[2707816, GC Thread#0, 1]: 29775655710
+@off_ns[2707816, GC Thread#3, 1]: 29775965800
+@off_ns[2707816, GC Thread#1, 1]: 29778845464
+@off_ns[2707816, GC Thread#2, 1]: 29781550543
+@off_ns[2707816, VM Thread, 1]: 29803432583
+@off_ns[2707816, G1 Main Marker, 1]: 29804763095
+@off_ns[2707816, Reference Handl, 1]: 29805376510
+@off_ns[2707816, G1 Conc#0, 1]: 29805384635
+@off_ns[2707815, G1 Refine#0, 1]: 29871308538
+@off_ns[2707816, G1 Refine#0, 1]: 29900362368
+@off_ns[2707816, kafka-2-raft-ou, 1]: 29996411252
+@off_ns[2707815, G1 Service, 1]: 30003448759
+@off_ns[2707818, G1 Service, 1]: 30005328029
+@off_ns[2707818, Monitor Deflati, 1]: 30006076182
+@off_ns[2707815, Monitor Deflati, 1]: 30006197916
+@off_ns[2707816, Monitor Deflati, 1]: 30006733564
+@off_ns[2707816, client-metrics-, 1]: 30007649192
+@off_ns[2707818, raft-expiration, 1]: 30007667416
+@off_ns[2707815, share-group-loc, 1]: 30007776953
+@off_ns[2707818, client-metrics-, 1]: 30007833638
+@off_ns[2707818, share-group-loc, 1]: 30007906909
+@off_ns[2707816, share-group-loc, 1]: 30007933036
+@off_ns[2707815, raft-expiration, 1]: 30008132068
+@off_ns[2707815, client-metrics-, 1]: 30010604693
+@off_ns[2707815, C1 CompilerThre, 1]: 30058454828
+@off_ns[2707818, G1 Refine#0, 1]: 30070153058
+@off_ns[2707816, G1 Service, 1]: 30079876016
+@off_ns[2707816, C1 CompilerThre, 1]: 30094266059
+@off_ns[2707816, raft-expiration, 1]: 30192593181
+@off_ns[2707815, ReplicaFetcherT, 2]: 42893205491
+@off_ns[2707818, ReplicaFetcherT, 2]: 43305825381
+@off_ns[2707816, ReplicaFetcherT, 2]: 43461391835
+@off_ns[2707818, metrics-meter-t, 1]: 58957992641
+@off_ns[2707815, metrics-meter-t, 1]: 59093035025
+@off_ns[2707816, metrics-meter-t, 1]: 59104232492
+@off_ns[2707815, data-plane-kafk, 2]: 67656693281
+@off_ns[2707818, data-plane-kafk, 2]: 68287429695
+@off_ns[2707816, data-plane-kafk, 2]: 68671421785
+@off_ns[2707816, broker-2-Thrott, 1]: 116005899494
+@off_ns[2707818, broker-3-Thrott, 1]: 119006225155
+@off_ns[2707815, broker-1-Thrott, 1]: 119008086531
+@off_ns[2707815, controller-1-Th, 1]: 120006229041
+@off_ns[2707816, controller-2-Th, 1]: 120006286836
+@off_ns[2707818, controller-3-Th, 1]: 120006408227
+@off_ns[2707816, group-coordinat, 1]: 149809096723
+@off_ns[2707818, group-coordinat, 1]: 149825461774
+@off_ns[2707815, group-coordinat, 1]: 149899667352
+@off_ns[2707816, kafka-scheduler, 1]: 165300398785
+@off_ns[2707818, kafka-scheduler, 1]: 165302285975
+@off_ns[2707815, kafka-scheduler, 1]: 170281594918
+@off_ns[2707815, ExpirationReape, 1]: 240345806495
+@off_ns[2707818, ExpirationReape, 1]: 240399487346
+@off_ns[2707816, ExpirationReape, 1]: 240542389702
+@off_ns[2707816, data-plane-kafk, 1]: 648132287822
+@off_ns[2707818, data-plane-kafk, 1]: 649739226361
+@off_ns[2707815, data-plane-kafk, 1]: 650571261292
+
+
+@runqueue_ns[2707815, kafka-log-clean]: 6291
+@runqueue_ns[2707816, kafka-log-clean]: 9076
+@runqueue_ns[2707815, transaction-log]: 9938
+@runqueue_ns[2707816, transaction-log]: 10560
+@runqueue_ns[2707818, transaction-log]: 11592
+@runqueue_ns[2707818, kafka-log-clean]: 17403
+@runqueue_ns[2707818, controller-3-to]: 18783
+@runqueue_ns[2707816, controller-2-to]: 18794
+@runqueue_ns[2707815, VM Periodic Tas]: 20258
+@runqueue_ns[2707816, VM Periodic Tas]: 20307
+@runqueue_ns[2707818, VM Periodic Tas]: 30335
+@runqueue_ns[2707818, executor-Fetch]: 31400
+@runqueue_ns[2707816, Reference Handl]: 32872
+@runqueue_ns[2707815, executor-group-]: 39283
+@runqueue_ns[2707815, controller-1-to]: 44284
+@runqueue_ns[2707816, executor-Fetch]: 51168
+@runqueue_ns[2707818, G1 Main Marker]: 59673
+@runqueue_ns[2707815, executor-Fetch]: 60102
+@runqueue_ns[2707816, G1 Conc#0]: 66514
+@runqueue_ns[2707816, broker-2-lifecy]: 78079
+@runqueue_ns[2707815, broker-1-lifecy]: 78415
+@runqueue_ns[2707816, Service Thread]: 86463
+@runqueue_ns[2707816, broker-2-to-con]: 91414
+@runqueue_ns[2707818, G1 Conc#0]: 92744
+@runqueue_ns[2707818, broker-3-to-con]: 102984
+@runqueue_ns[2707818, broker-3-lifecy]: 108252
+@runqueue_ns[2707818, Service Thread]: 115516
+@runqueue_ns[2707815, G1 Main Marker]: 124452
+@runqueue_ns[2707816, kafka-2-raft-ou]: 133017
+@runqueue_ns[2707816, G1 Service]: 143887
+@runqueue_ns[2707815, G1 Service]: 179326
+@runqueue_ns[2707815, broker-1-to-con]: 192090
+@runqueue_ns[2707816, broker-2-Thrott]: 261428
+@runqueue_ns[2707815, Service Thread]: 266093
+@runqueue_ns[2707818, G1 Service]: 277242
+@runqueue_ns[2707815, quorum-controll]: 279280
+@runqueue_ns[2707815, G1 Conc#0]: 284825
+@runqueue_ns[2707818, Monitor Deflati]: 365670
+@runqueue_ns[2707816, controller-2-Th]: 387504
+@runqueue_ns[2707818, broker-3-Thrott]: 389333
+@runqueue_ns[2707818, quorum-controll]: 394030
+@runqueue_ns[2707818, controller-3-Th]: 399669
+@runqueue_ns[2707816, GC Thread#0]: 405774
+@runqueue_ns[2707815, Reference Handl]: 409741
+@runqueue_ns[2707818, raft-expiration]: 429497
+@runqueue_ns[2707815, Monitor Deflati]: 431190
+@runqueue_ns[2707815, controller-1-Th]: 441287
+@runqueue_ns[2707818, client-metrics-]: 446318
+@runqueue_ns[2707816, client-metrics-]: 446412
+@runqueue_ns[2707818, share-group-loc]: 484065
+@runqueue_ns[2707815, share-group-loc]: 484302
+@runqueue_ns[2707816, share-group-loc]: 526806
+@runqueue_ns[2707816, G1 Main Marker]: 528671
+@runqueue_ns[2707815, GC Thread#2]: 533661
+@runqueue_ns[2707818, GC Thread#0]: 580991
+@runqueue_ns[2707818, kafka-scheduler]: 645153
+@runqueue_ns[2707818, GC Thread#3]: 707041
+@runqueue_ns[2707816, quorum-controll]: 732853
+@runqueue_ns[2707818, Reference Handl]: 754541
+@runqueue_ns[2707815, raft-expiration]: 757696
+@runqueue_ns[2707815, client-metrics-]: 960355
+@runqueue_ns[2707816, Monitor Deflati]: 1071375
+@runqueue_ns[2707816, G1 Refine#0]: 1697788
+@runqueue_ns[2707818, kafka-3-raft-ou]: 1957550
+@runqueue_ns[2707818, G1 Refine#0]: 2096567
+@runqueue_ns[2707816, raft-expiration]: 2191804
+@runqueue_ns[2707815, kafka-1-raft-ou]: 2224924
+@runqueue_ns[2707816, metrics-meter-t]: 2273796
+@runqueue_ns[2707815, broker-1-Thrott]: 2296659
+@runqueue_ns[2707816, kafka-2-metadat]: 2665165
+@runqueue_ns[2707815, G1 Refine#0]: 2783388
+@runqueue_ns[2707816, kafka-scheduler]: 2918166
+@runqueue_ns[2707815, metrics-meter-t]: 3136350
+@runqueue_ns[2707815, kafka-1-metadat]: 3300708
+@runqueue_ns[2707816, GC Thread#1]: 3485182
+@runqueue_ns[2707818, VM Thread]: 3555966
+@runqueue_ns[2707815, ExpirationReape]: 3848803
+@runqueue_ns[2707818, metrics-meter-t]: 3908940
+@runqueue_ns[2707816, VM Thread]: 4086207
+@runqueue_ns[2707818, kafka-3-metadat]: 4129211
+@runqueue_ns[2707815, GC Thread#1]: 4178097
+@runqueue_ns[2707815, kafka-scheduler]: 4207071
+@runqueue_ns[2707815, GC Thread#3]: 4748632
+@runqueue_ns[2707815, kafka-1-raft-io]: 4953821
+@runqueue_ns[2707818, kafka-3-raft-io]: 5013771
+@runqueue_ns[2707816, GC Thread#3]: 5039753
+@runqueue_ns[2707816, kafka-2-raft-io]: 5459006
+@runqueue_ns[2707816, group-coordinat]: 5703775
+@runqueue_ns[2707815, GC Thread#0]: 5771958
+@runqueue_ns[2707818, group-coordinat]: 5919386
+@runqueue_ns[2707818, GC Thread#2]: 6092298
+@runqueue_ns[2707816, GC Thread#2]: 6694984
+@runqueue_ns[2707818, GC Thread#1]: 7485234
+@runqueue_ns[2707816, C1 CompilerThre]: 8040836
+@runqueue_ns[2707816, C2 CompilerThre]: 8388503
+@runqueue_ns[2707815, VM Thread]: 9210495
+@runqueue_ns[2707815, group-coordinat]: 9495341
+@runqueue_ns[2707818, C1 CompilerThre]: 10120987
+@runqueue_ns[2707818, ExpirationReape]: 10168316
+@runqueue_ns[2707818, C2 CompilerThre]: 11828312
+@runqueue_ns[2707815, C2 CompilerThre]: 12158977
+@runqueue_ns[2707815, C1 CompilerThre]: 12199921
+@runqueue_ns[2707816, ExpirationReape]: 15463828
+@runqueue_ns[2707816, ReplicaFetcherT]: 278997241
+@runqueue_ns[2707818, ReplicaFetcherT]: 285893884
+@runqueue_ns[2707815, ReplicaFetcherT]: 293314098
+@runqueue_ns[2707818, data-plane-kafk]: 542803226
+@runqueue_ns[2707816, data-plane-kafk]: 568234641
+@runqueue_ns[2707815, data-plane-kafk]: 639701636
+
+@switches[2707815, Reference Handl, 0]: 1
+@switches[2707815, G1 Conc#0, 0]: 1
+@switches[2707816, broker-2-to-con, 0]: 1
+@switches[2707815, ExpirationReape, 0]: 1
+@switches[2707815, Service Thread, 0]: 1
+@switches[2707815, metrics-meter-t, 256]: 1
+@switches[2707815, share-group-loc, 0]: 1
+@switches[2707818, G1 Main Marker, 0]: 1
+@switches[2707818, broker-3-Thrott, 0]: 1
+@switches[2707818, VM Periodic Tas, 0]: 1
+@switches[2707816, G1 Conc#0, 0]: 1
+@switches[2707816, share-group-loc, 0]: 1
+@switches[2707815, kafka-log-clean, 1]: 2
+@switches[2707816, kafka-2-raft-ou, 0]: 2
+@switches[2707816, C2 CompilerThre, 256]: 2
+@switches[2707816, G1 Main Marker, 2]: 2
+@switches[2707818, broker-3-to-con, 0]: 2
+@switches[2707818, client-metrics-, 0]: 2
+@switches[2707818, G1 Conc#0, 0]: 2
+@switches[2707815, transaction-log, 1]: 2
+@switches[2707815, C2 CompilerThre, 256]: 2
+@switches[2707818, GC Thread#1, 0]: 2
+@switches[2707816, transaction-log, 1]: 2
+@switches[2707818, transaction-log, 1]: 2
+@switches[2707816, GC Thread#0, 0]: 2
+@switches[2707816, raft-expiration, 0]: 2
+@switches[2707815, metrics-meter-t, 0]: 2
+@switches[2707818, share-group-loc, 0]: 2
+@switches[2707816, metrics-meter-t, 0]: 3
+@switches[2707815, G1 Main Marker, 0]: 3
+@switches[2707818, broker-3-lifecy, 0]: 3
+@switches[2707818, GC Thread#0, 0]: 3
+@switches[2707815, Monitor Deflati, 0]: 3
+@switches[2707815, quorum-controll, 0]: 4
+@switches[2707816, VM Thread, 2]: 4
+@switches[2707818, GC Thread#3, 0]: 4
+@switches[2707818, kafka-3-metadat, 0]: 4
+@switches[2707815, GC Thread#2, 0]: 4
+@switches[2707816, kafka-2-metadat, 0]: 4
+@switches[2707816, GC Thread#3, 0]: 4
+@switches[2707816, kafka-log-clean, 1]: 4
+@switches[2707815, GC Thread#1, 0]: 4
+@switches[2707816, GC Thread#1, 0]: 4
+@switches[2707816, G1 Refine#0, 0]: 4
+@switches[2707815, GC Thread#0, 0]: 4
+@switches[2707818, quorum-controll, 0]: 4
+@switches[2707818, G1 Refine#0, 0]: 4
+@switches[2707818, GC Thread#2, 0]: 5
+@switches[2707816, quorum-controll, 0]: 5
+@switches[2707816, VM Thread, 0]: 5
+@switches[2707815, VM Periodic Tas, 1]: 5
+@switches[2707816, VM Periodic Tas, 1]: 5
+@switches[2707815, controller-1-to, 1]: 5
+@switches[2707818, controller-3-to, 1]: 5
+@switches[2707816, controller-2-to, 1]: 5
+@switches[2707818, kafka-3-raft-io, 0]: 5
+@switches[2707816, GC Thread#2, 0]: 5
+@switches[2707815, group-coordinat, 0]: 5
+@switches[2707818, metrics-meter-t, 0]: 5
+@switches[2707818, VM Periodic Tas, 1]: 5
+@switches[2707816, ExpirationReape, 0]: 6
+@switches[2707815, G1 Refine#0, 0]: 6
+@switches[2707818, G1 Conc#0, 1]: 6
+@switches[2707818, kafka-log-clean, 1]: 7
+@switches[2707815, kafka-scheduler, 0]: 7
+@switches[2707815, GC Thread#3, 0]: 7
+@switches[2707818, ExpirationReape, 0]: 7
+@switches[2707815, Reference Handl, 1]: 7
+@switches[2707816, G1 Conc#0, 1]: 7
+@switches[2707816, Reference Handl, 1]: 8
+@switches[2707818, VM Thread, 0]: 8
+@switches[2707818, executor-Fetch, 1]: 9
+@switches[2707818, Reference Handl, 1]: 9
+@switches[2707815, kafka-1-raft-io, 0]: 10
+@switches[2707816, kafka-scheduler, 0]: 10
+@switches[2707815, G1 Conc#0, 1]: 10
+@switches[2707815, executor-Fetch, 1]: 11
+@switches[2707815, executor-group-, 1]: 12
+@switches[2707816, kafka-2-raft-io, 0]: 12
+@switches[2707815, kafka-1-raft-ou, 0]: 12
+@switches[2707815, VM Thread, 0]: 12
+@switches[2707816, C1 CompilerThre, 0]: 12
+@switches[2707815, C1 CompilerThre, 0]: 13
+@switches[2707816, G1 Main Marker, 1]: 13
+@switches[2707815, G1 Main Marker, 1]: 13
+@switches[2707816, group-coordinat, 0]: 14
+@switches[2707816, executor-Fetch, 1]: 14
+@switches[2707818, group-coordinat, 0]: 15
+@switches[2707818, G1 Main Marker, 1]: 15
+@switches[2707818, C1 CompilerThre, 0]: 16
+@switches[2707816, ReplicaFetcherT, 256]: 16
+@switches[2707818, kafka-3-raft-ou, 0]: 18
+@switches[2707815, kafka-1-metadat, 0]: 18
+@switches[2707815, ReplicaFetcherT, 256]: 18
+@switches[2707815, data-plane-kafk, 256]: 26
+@switches[2707818, data-plane-kafk, 256]: 26
+@switches[2707818, ReplicaFetcherT, 256]: 27
+@switches[2707815, broker-1-to-con, 1]: 29
+@switches[2707816, data-plane-kafk, 256]: 29
+@switches[2707816, broker-2-lifecy, 1]: 29
+@switches[2707818, broker-3-lifecy, 1]: 29
+@switches[2707815, broker-1-lifecy, 1]: 29
+@switches[2707818, Service Thread, 1]: 29
+@switches[2707816, broker-2-to-con, 1]: 29
+@switches[2707816, Service Thread, 1]: 29
+@switches[2707818, broker-3-to-con, 1]: 29
+@switches[2707815, Service Thread, 1]: 32
+@switches[2707815, kafka-scheduler, 1]: 39
+@switches[2707818, kafka-scheduler, 1]: 41
+@switches[2707816, kafka-scheduler, 2]: 41
+@switches[2707815, kafka-scheduler, 2]: 42
+@switches[2707818, kafka-scheduler, 2]: 43
+@switches[2707816, C2 CompilerThre, 0]: 44
+@switches[2707818, C2 CompilerThre, 0]: 44
+@switches[2707818, G1 Service, 1]: 44
+@switches[2707816, G1 Service, 1]: 45
+@switches[2707815, G1 Service, 1]: 46
+@switches[2707816, kafka-scheduler, 1]: 46
+@switches[2707818, GC Thread#2, 1]: 55
+@switches[2707816, GC Thread#2, 1]: 57
+@switches[2707815, C2 CompilerThre, 0]: 58
+@switches[2707815, GC Thread#3, 1]: 58
+@switches[2707818, GC Thread#3, 1]: 59
+@switches[2707816, GC Thread#3, 1]: 60
+@switches[2707816, GC Thread#0, 1]: 60
+@switches[2707815, GC Thread#1, 1]: 60
+@switches[2707815, GC Thread#0, 1]: 60
+@switches[2707818, GC Thread#1, 1]: 61
+@switches[2707818, GC Thread#0, 1]: 62
+@switches[2707815, kafka-1-metadat, 1]: 63
+@switches[2707815, quorum-controll, 1]: 63
+@switches[2707815, GC Thread#2, 1]: 64
+@switches[2707818, quorum-controll, 1]: 64
+@switches[2707816, GC Thread#1, 1]: 64
+@switches[2707816, kafka-2-metadat, 1]: 66
+@switches[2707818, kafka-3-metadat, 1]: 69
+@switches[2707816, kafka-2-raft-ou, 1]: 71
+@switches[2707818, VM Thread, 1]: 73
+@switches[2707816, VM Thread, 1]: 74
+@switches[2707815, VM Thread, 1]: 79
+@switches[2707815, group-coordinat, 2]: 84
+@switches[2707816, G1 Refine#0, 1]: 106
+@switches[2707816, broker-2-Thrott, 1]: 116
+@switches[2707815, G1 Refine#0, 1]: 118
+@switches[2707815, broker-1-Thrott, 1]: 119
+@switches[2707818, Monitor Deflati, 1]: 120
+@switches[2707816, Monitor Deflati, 1]: 120
+@switches[2707818, controller-3-Th, 1]: 120
+@switches[2707815, Monitor Deflati, 1]: 120
+@switches[2707818, broker-3-Thrott, 1]: 120
+@switches[2707818, kafka-3-raft-ou, 1]: 120
+@switches[2707815, controller-1-Th, 1]: 120
+@switches[2707816, controller-2-Th, 1]: 121
+@switches[2707815, kafka-1-raft-ou, 1]: 122
+@switches[2707818, raft-expiration, 1]: 150
+@switches[2707816, client-metrics-, 1]: 150
+@switches[2707815, raft-expiration, 1]: 150
+@switches[2707815, share-group-loc, 1]: 150
+@switches[2707816, share-group-loc, 1]: 150
+@switches[2707818, client-metrics-, 1]: 150
+@switches[2707818, share-group-loc, 1]: 150
+@switches[2707815, client-metrics-, 1]: 152
+@switches[2707816, ReplicaFetcherT, 0]: 153
+@switches[2707818, ReplicaFetcherT, 0]: 156
+@switches[2707815, ReplicaFetcherT, 0]: 166
+@switches[2707818, G1 Refine#0, 1]: 169
+@switches[2707816, quorum-controll, 1]: 177
+@switches[2707818, kafka-3-raft-io, 1]: 188
+@switches[2707815, kafka-1-raft-io, 1]: 200
+@switches[2707816, raft-expiration, 1]: 273
+@switches[2707816, kafka-2-raft-io, 2]: 302
+@switches[2707815, kafka-1-raft-io, 2]: 304
+@switches[2707818, kafka-3-raft-io, 2]: 309
+@switches[2707818, C1 CompilerThre, 1]: 310
+@switches[2707818, C2 CompilerThre, 1]: 323
+@switches[2707816, C1 CompilerThre, 1]: 356
+@switches[2707816, kafka-2-raft-io, 1]: 369
+@switches[2707816, C2 CompilerThre, 1]: 370
+@switches[2707815, C1 CompilerThre, 1]: 373
+@switches[2707815, C2 CompilerThre, 1]: 399
+@switches[2707818, data-plane-kafk, 0]: 737
+@switches[2707816, data-plane-kafk, 0]: 741
+@switches[2707815, data-plane-kafk, 0]: 785
+@switches[2707816, group-coordinat, 1]: 790
+@switches[2707818, group-coordinat, 1]: 792
+@switches[2707815, group-coordinat, 1]: 866
+@switches[2707818, metrics-meter-t, 1]: 963
+@switches[2707816, metrics-meter-t, 1]: 1018
+@switches[2707815, metrics-meter-t, 1]: 1110
+@switches[2707815, ExpirationReape, 1]: 1242
+@switches[2707818, ExpirationReape, 1]: 1251
+@switches[2707816, ExpirationReape, 1]: 1271
+@switches[2707816, ReplicaFetcherT, 1]: 2301
+@switches[2707815, ReplicaFetcherT, 1]: 2322
+@switches[2707818, ReplicaFetcherT, 1]: 2434
+@switches[2707818, data-plane-kafk, 1]: 21043
+@switches[2707816, data-plane-kafk, 1]: 21664
+@switches[2707815, data-plane-kafk, 1]: 21825
+@switches[2707816, ReplicaFetcherT, 2]: 100944
+@switches[2707815, ReplicaFetcherT, 2]: 101164
+@switches[2707818, ReplicaFetcherT, 2]: 101765
+@switches[2707818, data-plane-kafk, 2]: 136702
+@switches[2707815, data-plane-kafk, 2]: 137151
+@switches[2707816, data-plane-kafk, 2]: 138271
+@sync_count[2707815, group-coordinat, tracepoint:syscalls:sys_enter_fsync]: 13
+@sync_count[2707816, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 16
+@sync_count[2707815, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 16
+@sync_count[2707818, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 16
+@sync_count[2707818, kafka-3-raft-io, tracepoint:syscalls:sys_enter_fsync]: 60
+@sync_count[2707816, kafka-2-raft-io, tracepoint:syscalls:sys_enter_fsync]: 60
+@sync_count[2707815, kafka-1-raft-io, tracepoint:syscalls:sys_enter_fsync]: 60
+@sync_count[2707816, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 13648
+@sync_count[2707815, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 13705
+@sync_count[2707818, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 13779
+@sync_count[2707818, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 19762
+@sync_count[2707815, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 19797
+@sync_count[2707816, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 19941
+
+@sync_ns[2707816, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 28816404
+@sync_ns[2707815, group-coordinat, tracepoint:syscalls:sys_enter_fsync]: 35251132
+@sync_ns[2707815, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 48119990
+@sync_ns[2707818, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 51771592
+@sync_ns[2707816, kafka-2-raft-io, tracepoint:syscalls:sys_enter_fsync]: 168359089
+@sync_ns[2707815, kafka-1-raft-io, tracepoint:syscalls:sys_enter_fsync]: 171173174
+@sync_ns[2707818, kafka-3-raft-io, tracepoint:syscalls:sys_enter_fsync]: 174676598
+@sync_ns[2707815, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 22092384633
+@sync_ns[2707816, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 22250205261
+@sync_ns[2707818, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 22517468409
+@sync_ns[2707815, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 34165614335
+@sync_ns[2707818, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 34779658094
+@sync_ns[2707816, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 35252299098
+@sync_return[2707815, 0]: 33591
+@sync_return[2707818, 0]: 33617
+@sync_return[2707816, 0]: 33664
+
+@sync_us[2707815, group-coordinat, tracepoint:syscalls:sys_enter_fsync]: 
+[256, 512)             1 |@@@@@@@@@@@@@                                       |
+[512, 1K)              4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[1K, 2K)               2 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2K, 4K)               4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4K, 8K)               1 |@@@@@@@@@@@@@                                       |
+[8K, 16K)              1 |@@@@@@@@@@@@@                                       |
+
+@sync_us[2707815, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 
+[512, 1K)              2 |@@@@@@@@@@@@@                                       |
+[1K, 2K)               8 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)               3 |@@@@@@@@@@@@@@@@@@@                                 |
+[4K, 8K)               2 |@@@@@@@@@@@@@                                       |
+[8K, 16K)              1 |@@@@@@                                              |
+
+@sync_us[2707816, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 
+[512, 1K)              5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[1K, 2K)               7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)               4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       |
+
+@sync_us[2707818, kafka-scheduler, tracepoint:syscalls:sys_enter_fsync]: 
+[512, 1K)              3 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[1K, 2K)               6 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)               2 |@@@@@@@@@@@@@@@@@                                   |
+[4K, 8K)               4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[8K, 16K)              1 |@@@@@@@@                                            |
+
+@sync_us[2707815, kafka-1-raft-io, tracepoint:syscalls:sys_enter_fsync]: 
+[512, 1K)             18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@             |
+[1K, 2K)              24 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)               6 |@@@@@@@@@@@@@                                       |
+[4K, 8K)               7 |@@@@@@@@@@@@@@@                                     |
+[8K, 16K)              4 |@@@@@@@@                                            |
+[16K, 32K)             1 |@@                                                  |
+
+@sync_us[2707816, kafka-2-raft-io, tracepoint:syscalls:sys_enter_fsync]: 
+[128, 256)             1 |@@                                                  |
+[256, 512)             1 |@@                                                  |
+[512, 1K)             19 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[1K, 2K)              21 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)               5 |@@@@@@@@@@@@                                        |
+[4K, 8K)               8 |@@@@@@@@@@@@@@@@@@@                                 |
+[8K, 16K)              4 |@@@@@@@@@                                           |
+[16K, 32K)             1 |@@                                                  |
+
+@sync_us[2707818, kafka-3-raft-io, tracepoint:syscalls:sys_enter_fsync]: 
+[512, 1K)             17 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                |
+[1K, 2K)              24 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)               6 |@@@@@@@@@@@@@                                       |
+[4K, 8K)               8 |@@@@@@@@@@@@@@@@@                                   |
+[8K, 16K)              4 |@@@@@@@@                                            |
+[16K, 32K)             1 |@@                                                  |
+
+@sync_us[2707816, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 
+[256, 512)           114 |                                                    |
+[512, 1K)           4352 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      |
+[1K, 2K)            7483 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)             972 |@@@@@@                                              |
+[4K, 8K)             510 |@@@                                                 |
+[8K, 16K)            189 |@                                                   |
+[16K, 32K)            27 |                                                    |
+[32K, 64K)             1 |                                                    |
+
+@sync_us[2707815, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 
+[256, 512)            93 |                                                    |
+[512, 1K)           4605 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    |
+[1K, 2K)            7339 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)             963 |@@@@@@                                              |
+[4K, 8K)             497 |@@@                                                 |
+[8K, 16K)            175 |@                                                   |
+[16K, 32K)            31 |                                                    |
+[32K, 64K)             2 |                                                    |
+
+@sync_us[2707818, ReplicaFetcherT, tracepoint:syscalls:sys_enter_fsync]: 
+[256, 512)           118 |                                                    |
+[512, 1K)           4512 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[1K, 2K)            7384 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)            1022 |@@@@@@@                                             |
+[4K, 8K)             518 |@@@                                                 |
+[8K, 16K)            198 |@                                                   |
+[16K, 32K)            26 |                                                    |
+[32K, 64K)             1 |                                                    |
+
+@sync_us[2707818, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 
+[256, 512)            62 |                                                    |
+[512, 1K)           4438 |@@@@@@@@@@@@@@@@@@                                  |
+[1K, 2K)           12534 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)            1589 |@@@@@@                                              |
+[4K, 8K)             761 |@@@                                                 |
+[8K, 16K)            349 |@                                                   |
+[16K, 32K)            29 |                                                    |
+
+@sync_us[2707815, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 
+[256, 512)            61 |                                                    |
+[512, 1K)           4845 |@@@@@@@@@@@@@@@@@@@@                                |
+[1K, 2K)           12220 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)            1557 |@@@@@@                                              |
+[4K, 8K)             757 |@@@                                                 |
+[8K, 16K)            325 |@                                                   |
+[16K, 32K)            31 |                                                    |
+[32K, 64K)             1 |                                                    |
+
+@sync_us[2707816, data-plane-kafk, tracepoint:syscalls:sys_enter_fsync]: 
+[256, 512)            25 |                                                    |
+[512, 1K)           3870 |@@@@@@@@@@@@@@@                                     |
+[1K, 2K)           13329 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)            1626 |@@@@@@                                              |
+[4K, 8K)             749 |@@                                                  |
+[8K, 16K)            296 |@                                                   |
+[16K, 32K)            44 |                                                    |
+[32K, 64K)             2 |                                                    |
+

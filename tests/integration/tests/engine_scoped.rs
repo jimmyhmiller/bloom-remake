@@ -151,3 +151,58 @@ fn a_scoped_rule_does_no_work_in_a_tick_without_its_event() {
     // Evaluated in the three ticks with a poke only (the quiet ticks after them do not retract row by row).
     assert_eq!(evals, [0, 1, 1, 2, 2, 3]);
 }
+
+#[test]
+fn identity_chains_remain_observable_without_physical_maintenance() {
+    let artifact = compile();
+    let mirrors = [
+        artifact.rel_named("mirror").unwrap(),
+        artifact.rel_named("mirror_chain").unwrap(),
+    ];
+    let ids: Vec<_> = artifact
+        .program
+        .get()
+        .rules
+        .iter()
+        .filter(|r| mirrors.contains(&r.head.rel))
+        .map(|r| r.id)
+        .collect();
+    let poke = artifact.rel_named("poke").unwrap();
+    let mut engine =
+        blossom_engine::Engine::new(artifact.program.clone(), NodeId(0), engine_config(&artifact)).unwrap();
+    for t in 0..8u64 {
+        let events: Vec<_> = if t % 2 == 0 {
+            vec![(poke, Arc::from(vec![Value::Int(IntValue::U64(t))]))]
+        } else {
+            vec![]
+        };
+        let out = engine
+            .step(
+                &StepInput {
+                    node: NodeId(0),
+                    incarnation: 1,
+                    tick: Tick(t),
+                    now: Instant(t as i64),
+                    events: &events,
+                    delivered: &[],
+                    ingress: &[],
+                    blobs: &blossom_value::NoBlobs,
+                },
+                &mirrors,
+            )
+            .unwrap();
+        for rel in mirrors {
+            assert_eq!(
+                out.observed[&rel],
+                events.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>()
+            );
+            assert!(!engine.resident_by_store().iter().any(|(r, _, _)| *r == rel));
+        }
+        for id in &ids {
+            assert!(engine.work_by_rule().get(id).is_none_or(|w| w.writes == 0));
+        }
+        if t == 3 {
+            engine.reset(engine.carried_instance().unwrap()).unwrap();
+        }
+    }
+}

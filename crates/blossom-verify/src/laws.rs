@@ -391,7 +391,7 @@ impl Gen<'_> {
                 .map(|x| Value::F64(blossom_value::float::canonical(x)))
                 .collect(),
             TypeDef::Str => ["", "a", "b"].into_iter().map(|s| Value::Str(Arc::from(s))).collect(),
-            TypeDef::Bytes => vec![Value::Bytes(Arc::from(&b""[..])), Value::Bytes(Arc::from(&b"a"[..]))],
+            TypeDef::Bytes => vec![Value::Bytes((&b""[..]).into()), Value::Bytes((&b"a"[..]).into())],
             TypeDef::Duration => vec![
                 Value::Duration(Duration::from_nanos(0)),
                 Value::Duration(Duration::from_nanos(1_000_000)),

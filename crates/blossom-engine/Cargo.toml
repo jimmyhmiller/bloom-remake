@@ -8,12 +8,16 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+serde.workspace = true
 blossom-base.workspace = true
 blossom-value.workspace = true
 blossom-lattice.workspace = true
 blossom-ir.workspace = true
 blossom-kernel.workspace = true
 blake3.workspace = true
+smallvec.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true

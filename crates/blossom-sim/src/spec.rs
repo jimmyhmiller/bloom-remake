@@ -168,6 +168,7 @@ impl<'a> SpecSim<'a> {
                     &self.artifact.roles,
                     self.protocol.members(),
                 ),
+                peers: crate::sync::Peers::of(self.artifact.protocol.get(), &self.artifact.roles),
             },
             faults,
         )

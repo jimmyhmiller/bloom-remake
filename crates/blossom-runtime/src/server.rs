@@ -9,6 +9,7 @@
 //! - the **database thread** flushes the node's database when the engine asks (its memtable full, or the WAL past
 //!   its threshold); the engine applies each released tick to it, and the committer truncates the WAL behind each
 //!   flush (docs/design/DATABASE.md);
+//! - the **metadata thread** persists reservations and acknowledges only durable bounds;
 //! - **listeners** accept peer and client connections; a **reader thread** per connection decodes batches, and a
 //!   **writer thread** per peer and per session sends frames.
 //!
@@ -33,18 +34,18 @@ use std::time::Duration;
 
 use blossom_artifact::bls::BlsArtifact;
 use blossom_base::{RelId, RoleId, internal_error};
+use blossom_ir::core::{EventSource, RelClass};
 use blossom_node::acl::{AclTable, Source};
 use blossom_node::durable::{DurableCodec, DurableSchema};
 use blossom_node::env::{Clock, Entropy};
 use blossom_node::recovery::{self, StoreSpec, tick_record};
 use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, NodeState, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
-use blossom_store::{
-    FileWal, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf, WalWriter,
-};
-use blossom_value::Seed;
+use blossom_store::lsm::Flushed;
+use blossom_store::{FileWal, Lsn, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf, WalWriter};
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::value::SessionId;
+use blossom_value::{Seed, Value};
 use blossom_wire::frame::{Frame, Peer, RejectReason};
 
 use crate::RuntimeError;
@@ -128,6 +129,13 @@ pub struct Stats {
     pub wal_syncs_over_4ms: AtomicU64,
     pub wal_syncs_over_16ms: AtomicU64,
     pub wal_syncs_over_64ms: AtomicU64,
+    /// The time the promoter took making durable the blobs logged in the records each database flush covers (so the
+    /// WAL behind the flush can go), in total and at most, and how many blobs it made durable.
+    pub blob_promote_nanos: AtomicU64,
+    pub blob_promote_max_nanos: AtomicU64,
+    pub blobs_promoted: AtomicU64,
+    /// Blob packs compacted (their live blobs copied out, the pack removed).
+    pub blob_packs_compacted: AtomicU64,
     /// How long messages from peers, and clients' stream data, waited between their reader queueing them and the
     /// engine taking them: at most, and how many waited over 4 ms.
     pub peer_wait_max_nanos: AtomicU64,
@@ -200,6 +208,10 @@ impl Stats {
             ("wal_syncs_over_4ms", r(&self.wal_syncs_over_4ms)),
             ("wal_syncs_over_16ms", r(&self.wal_syncs_over_16ms)),
             ("wal_syncs_over_64ms", r(&self.wal_syncs_over_64ms)),
+            ("blob_promote_nanos", r(&self.blob_promote_nanos)),
+            ("blob_promote_max_nanos", r(&self.blob_promote_max_nanos)),
+            ("blobs_promoted", r(&self.blobs_promoted)),
+            ("blob_packs_compacted", r(&self.blob_packs_compacted)),
             ("peer_wait_max_nanos", r(&self.peer_wait_max_nanos)),
             ("peer_waits_over_4ms", r(&self.peer_waits_over_4ms)),
             ("stream_wait_max_nanos", r(&self.stream_wait_max_nanos)),
@@ -259,11 +271,14 @@ enum Data {
 /// What else reaches the engine thread.
 enum Control {
     Synced(SyncedTick),
+    Reserved(Result<blossom_node::node::Reservation, String>),
     WalFailed(String),
     /// The database flushed: what its tables cover (the WAL may truncate behind it), or why it failed.
-    DatabaseFlushed(Result<blossom_store::lsm::Flushed, String>),
+    DatabaseFlushed(Result<Flushed, String>),
     /// Data was queued.
     Wake,
+    /// The node's view of a peer changed (ARCHITECTURE §5.13).
+    Peer(crate::liveness::PeerChange),
     Stop,
 }
 
@@ -275,9 +290,20 @@ enum Commit {
         /// The blobs the record references that are not durable yet: made durable before the record syncs.
         blobs: Vec<(blossom_value::BlobRef, Arc<[u8]>)>,
     },
-    /// The database flushed: the WAL truncates the records its tables cover.
-    Truncate(blossom_store::lsm::Flushed),
+    /// The database flushed: the WAL truncates the records its tables cover, once the promoter has made the blobs
+    /// logged in them durable.
+    Truncate(Flushed),
 }
+
+/// A database flush handed to the promoter: the pending blobs logged in the records it covers (those before `below`)
+/// are made durable, and then the WAL behind it can be truncated.
+struct Promotion {
+    below: Option<Lsn>,
+    flushed: Flushed,
+}
+
+/// How long the committer waits for work before it looks for promotions that finished (their truncations).
+const TRUNCATE_POLL: Duration = Duration::from_millis(100);
 
 /// The bounded data queue between the readers and the engine.
 struct DataQueue {
@@ -383,6 +409,8 @@ type Sessions = Arc<Mutex<BTreeMap<SessionId, SyncSender<Vec<u8>>>>>;
 
 /// A running node.
 pub struct Server {
+    // Held until shutdown_io has joined every writer, including pending metadata writes.
+    _lock: StoreLock,
     engine: Option<JoinHandle<Result<Stopped, RuntimeError>>>,
     control: Sender<Control>,
     data: Arc<DataQueue>,
@@ -482,7 +510,7 @@ impl Server {
             )
             .into());
         }
-        let executors = Executors::new(
+        let mut executors = Executors::new(
             cfg.backend,
             artifact.program.clone(),
             artifact.roles.clone(),
@@ -491,7 +519,19 @@ impl Server {
             cfg.externs.clone(),
             members.clone(),
         )?
-        .tiered(spec.tiered);
+        .tiered(spec.tiered)
+        .with_workers(spec.eval_workers)
+        .with_map_cache_rows(spec.map_cache_rows)
+        .with_map_cache_joins(spec.map_cache_joins)
+        .with_lazy_indexes(spec.lazy_indexes)
+        .with_pipeline_batches(spec.pipeline_batches)
+        .with_inferred_keys(spec.infer_keys)
+        .with_compiled_joins(spec.compiled_joins)
+        .with_packed_indexes(spec.packed_indexes)
+        .with_fused_relations(spec.fuse_relations);
+        if let Some(rows) = spec.hot_rows {
+            executors = executors.with_hot_rows(rows);
+        }
         let oracle = executors.oracle().clone();
         let nonce = OsEntropy.boot_nonce().map_err(RuntimeError::Config)?;
         let dir = cfg.dir.clone().unwrap_or_else(|| spec.data_dir.join(&entry.name));
@@ -504,6 +544,9 @@ impl Server {
                 certification: spec.tail_certification,
                 database: blossom_store::lsm::LsmOptions {
                     history: spec.history_ticks,
+                    cache_bytes: spec
+                        .cache_bytes
+                        .unwrap_or_else(|| blossom_store::lsm::LsmOptions::default().cache_bytes),
                     ..blossom_store::lsm::LsmOptions::default()
                 },
             },
@@ -655,11 +698,30 @@ impl Server {
         // The node's database (docs/design/DATABASE.md): the engine applies each released tick to it; its thread
         // flushes when the engine asks, and the committer truncates the WAL behind each flush.
         let db = database;
+        let reserve = {
+            let control = ctl_tx.clone();
+            let (requests, handle) = crate::metadata::start(meta, record, lock.clone(), move |r| {
+                let _ = control.send(Control::Reserved(r));
+            })?;
+            threads.push(handle);
+            requests
+        };
         {
+            let (promote_tx, promote_rx) = mpsc::channel::<Promotion>();
+            let (promoted_tx, promoted_rx) = mpsc::channel::<Flushed>();
+            let (tx, promoter_stats) = (ctl_tx.clone(), stats.clone());
+            let blobs = blob_store.clone();
+            let store_lock = lock.clone();
+            threads.push(spawn("promoter", move || {
+                let _lock = store_lock;
+                promoter(&blobs, promote_rx, promoted_tx, tx, promoter_stats)
+            })?);
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();
+            let store_lock = lock.clone();
             threads.push(spawn("committer", move || {
-                committer(wal, &blobs, commit_rx, tx, stats)
+                let _lock = store_lock;
+                committer(wal, &blobs, commit_rx, promote_tx, promoted_rx, tx, stats)
             })?);
         }
         let flush = {
@@ -667,6 +729,7 @@ impl Server {
             let (tx, handle) = crate::db::start(
                 db.clone(),
                 stats.clone(),
+                lock.clone(),
                 Box::new(move |r| {
                     // The engine is gone only when the node stops.
                     let _ = control.send(Control::DatabaseFlushed(r));
@@ -690,6 +753,42 @@ impl Server {
                 peer_writer(addr, id, me, restarts, nonce, catalog, rx, stop)
             })?);
         }
+        // Liveness (ARCHITECTURE §5.13): a connection to each peer that carries `ALIVE` frames alone, the views its
+        // readers feed, and the checker that takes silent peers down.
+        let progress = Arc::new(crate::liveness::EngineProgress::new());
+        let liveness = {
+            let control = ctl_tx.clone();
+            Arc::new(crate::liveness::PeerViews::new(
+                spec.liveness.session,
+                Box::new(move |c| {
+                    // The engine is gone only when the node stops.
+                    let _ = control.send(Control::Peer(c));
+                }),
+            ))
+        };
+        {
+            let (views, cfg, stop) = (liveness.clone(), spec.liveness, stop.clone());
+            threads.push(spawn("liveness-check", move || {
+                crate::liveness::checker(views, cfg, stop)
+            })?);
+        }
+        for (i, n) in spec.nodes.iter().enumerate() {
+            let to = NodeId(u32::try_from(i).map_err(|_| RuntimeError::Config("too many nodes".into()))?);
+            if to == me {
+                continue;
+            }
+            let addr = entry.dial.get(&n.name).copied().unwrap_or(n.addr);
+            let (id, catalog, stop, progress, cfg) = (
+                id.clone(),
+                catalog.clone(),
+                stop.clone(),
+                progress.clone(),
+                spec.liveness,
+            );
+            threads.push(spawn("liveness", move || {
+                crate::liveness::sender(addr, id, me, restarts, nonce, catalog, progress, cfg, stop)
+            })?);
+        }
         // Listeners.
         {
             let ctx = Accept {
@@ -709,6 +808,7 @@ impl Server {
                 spec: Arc::new(spec.clone()),
                 keyed: members.clone(),
                 routing: routing.clone(),
+                liveness,
             };
             let c = ctx.clone();
             threads.push(spawn("peer-listener", move || accept_loop(peer_listener, c, false))?);
@@ -773,6 +873,7 @@ impl Server {
         }
         let engine = {
             let e = Engine {
+                _lock: lock.clone(),
                 db: db.clone(),
                 streams: stream_env.clone(),
                 backlog_bytes: spec.stream_limits.backlog_bytes,
@@ -801,13 +902,26 @@ impl Server {
                 flush_wal_bytes: spec.checkpoint_wal_bytes,
                 flush_busy: false,
                 last_flush_lsn: 0,
-                meta,
-                record,
-                _lock: lock,
+                reserve,
                 clock: SystemClock::anchored_at(boot.now),
                 stats: stats.clone(),
                 resident_noted: None,
+                progress,
+                peer_rels: program
+                    .rels
+                    .iter_enumerated()
+                    .filter_map(|(id, r)| match &r.class {
+                        RelClass::Event(EventSource::Peer { peer, up }) => Some(((*peer, *up), id)),
+                        _ => None,
+                    })
+                    .collect(),
             };
+            // A node is its own peer: its first tick learns its incarnation (ARCHITECTURE §5.13).
+            let mut e = e;
+            e.peer_changed(crate::liveness::PeerChange {
+                peer: me,
+                up: Some(restarts),
+            });
             let (data, env) = (data.clone(), stream_env.clone());
             std::thread::Builder::new()
                 .name("engine".into())
@@ -825,6 +939,7 @@ impl Server {
                 .map_err(RuntimeError::Io)?
         };
         Ok(Server {
+            _lock: lock,
             database: db,
             engine: Some(engine),
             control: ctl_tx,
@@ -862,9 +977,10 @@ impl Server {
 
     fn wait_engine(&mut self) -> Result<Stopped, RuntimeError> {
         let result = match self.engine.take() {
-            Some(h) => h
-                .join()
-                .map_err(|_| RuntimeError::Internal(internal_error!("the engine thread panicked")))?,
+            Some(h) => match h.join() {
+                Ok(result) => result,
+                Err(_) => Err(RuntimeError::Internal(internal_error!("the engine thread panicked"))),
+            },
             None => Err(internal_error!("the engine was already joined").into()),
         };
         self.shutdown_io();
@@ -903,19 +1019,47 @@ pub(crate) fn spawn(name: &str, f: impl FnOnce() + Send + 'static) -> Result<Joi
 
 /// The committer (Invariant B): append everything submitted as one batch, sync once, report; and truncate the WAL
 /// behind the database's flushes.
+/// Appends each released tick's record to the WAL and syncs them in batches (the engine releases a tick's messages
+/// once its record is synced). A database flush's truncation goes to the promoter first, so its blob syncs never
+/// hold a WAL sync back; the WAL segments the flush covers go once the promoter is done with it.
 fn committer(
     mut wal: FileWal,
     blob_store: &blossom_store::BlobStore,
     rx: Receiver<Commit>,
+    promote: Sender<Promotion>,
+    promoted: Receiver<Flushed>,
     tx: Sender<Control>,
     stats: Arc<Stats>,
 ) {
     let mut batch: u64 = 0;
-    let mut truncates: Vec<blossom_store::lsm::Flushed> = Vec::new();
-    while let Ok(first) = rx.recv() {
-        let mut work = vec![first];
+    loop {
+        let mut work = match rx.recv_timeout(TRUNCATE_POLL) {
+            Ok(first) => vec![first],
+            Err(RecvTimeoutError::Timeout) => Vec::new(),
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
         while let Ok(more) = rx.try_recv() {
             work.push(more);
+        }
+        // The pack is the canonical durable payload backing. Persist all new payloads in
+        // this group before writing any referencing WAL record; the WAL carries only row
+        // changes and references. A crash between these barriers leaves harmless orphan
+        // payloads, never an acknowledged reference to missing bytes. Recovery of older
+        // WAL-inline blobs remains supported by tick_record and the promoter.
+        let blobs: Vec<_> = work
+            .iter()
+            .filter_map(|w| match w {
+                Commit::Append { blobs, .. } => Some(blobs.as_slice()),
+                Commit::Truncate(_) => None,
+            })
+            .flatten()
+            .cloned()
+            .collect();
+        if !blobs.is_empty()
+            && let Err(e) = blob_store.put_all(&blobs)
+        {
+            let _ = tx.send(Control::WalFailed(format!("payload group persistence failed: {e}")));
+            return;
         }
         let mut appended = 0u64;
         for w in work {
@@ -957,7 +1101,18 @@ fn committer(
                     }
                     appended += 1;
                 }
-                Commit::Truncate(f) => truncates.push(f),
+                Commit::Truncate(f) => {
+                    let below = match wal.covered(&f) {
+                        Ok(below) => below,
+                        Err(e) => {
+                            let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
+                            return;
+                        }
+                    };
+                    if promote.send(Promotion { below, flushed: f }).is_err() {
+                        return;
+                    }
+                }
             }
         }
         if appended > 0 {
@@ -992,20 +1147,52 @@ fn committer(
                 }
             }
         }
-        // Truncation happens at a batch boundary, after the sync: the blobs logged in the records a flush covers become
-        // files, and the older segments it wholly covers go.
-        for f in truncates.drain(..) {
-            let truncated = (|| -> Result<(), blossom_store::StoreError> {
-                if let Some(lsn) = wal.covered(&f)? {
-                    blob_store.sync_logged_below(lsn)?;
-                }
-                match wal.truncation(&f)? {
-                    Some(token) => wal.truncate_through(token),
-                    None => Ok(()),
-                }
-            })();
+        // Truncation happens at a batch boundary, after the sync: for each flush whose blobs the promoter made
+        // durable, the older segments it wholly covers go.
+        while let Ok(f) = promoted.try_recv() {
+            let truncated = wal.truncation(&f).and_then(|token| match token {
+                Some(token) => wal.truncate_through(token),
+                None => Ok(()),
+            });
             if let Err(e) = truncated {
                 let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
+                return;
+            }
+        }
+    }
+}
+
+/// Makes durable the blobs logged in the records each database flush covers (a sync of each pack holding them), hands
+/// the flush back to the committer to truncate the WAL behind it, then compacts a blob pack the collections after
+/// earlier flushes left mostly dead. Ends when the committer does.
+fn promoter(
+    blob_store: &blossom_store::BlobStore,
+    rx: Receiver<Promotion>,
+    done: Sender<Flushed>,
+    tx: Sender<Control>,
+    stats: Arc<Stats>,
+) {
+    while let Ok(p) = rx.recv() {
+        let clock = Stopwatch::start();
+        if let Some(below) = p.below {
+            match blob_store.sync_logged_below(below) {
+                Ok(n) => bump(&stats.blobs_promoted, n as u64),
+                Err(e) => {
+                    let _ = tx.send(Control::WalFailed(format!("WAL truncation failed: {e}")));
+                    return;
+                }
+            }
+        }
+        let took = clock.nanos();
+        bump(&stats.blob_promote_nanos, took);
+        stats.blob_promote_max_nanos.fetch_max(took, Ordering::Relaxed);
+        if done.send(p.flushed).is_err() {
+            return;
+        }
+        match blob_store.compact() {
+            Ok(n) => bump(&stats.blob_packs_compacted, n as u64),
+            Err(e) => {
+                let _ = tx.send(Control::WalFailed(format!("blob compaction failed: {e}")));
                 return;
             }
         }
@@ -1099,6 +1286,8 @@ struct Accept {
     /// The keyed members this node has met, and their hosts (docs/design/KEYED.md).
     keyed: Arc<blossom_ir::members::Members>,
     routing: Arc<crate::keyed::Routing>,
+    /// The node's views of its peers' liveness, which their `ALIVE` frames feed (ARCHITECTURE §5.13).
+    liveness: Arc<crate::liveness::PeerViews>,
 }
 
 fn accept_loop(listener: TcpListener, ctx: Accept, clients: bool) {
@@ -1187,6 +1376,10 @@ fn peer_reader(stream: TcpStream, ctx: &Accept) -> Result<(), RuntimeError> {
         // A batch from the peer, or one a keyed member it hosts sent (docs/design/KEYED.md): a member is a sender
         // only through the host that runs it.
         let (sender, b) = match frame {
+            Frame::Alive => {
+                ctx.liveness.heard(from, hello.restarts);
+                continue;
+            }
             Frame::Batch(b) => (from, b),
             Frame::FromMember { role, key, batch } => {
                 let m = crate::keyed::member_of(program, role, key)?;
@@ -1403,6 +1596,8 @@ pub(crate) fn web_accept_loop(
 }
 
 struct Engine {
+    /// Every writer keeps the directory locked even when startup fails after spawning it.
+    _lock: StoreLock,
     /// The node's database: each released tick's durable delta goes to it.
     db: Arc<crate::db::Database>,
     node: Node<Box<dyn Executor>>,
@@ -1440,13 +1635,15 @@ struct Engine {
     flush_wal_bytes: u64,
     flush_busy: bool,
     last_flush_lsn: u64,
-    meta: MetaStore,
-    record: MetaRecord,
-    _lock: StoreLock,
+    reserve: SyncSender<blossom_node::node::Reservation>,
     clock: SystemClock,
     stats: Arc<Stats>,
     /// When the stats last took the stores holding the most rows.
     resident_noted: Option<Stopwatch>,
+    /// When the tick the engine is in began, for the liveness senders (ARCHITECTURE §5.13).
+    progress: Arc<crate::liveness::EngineProgress>,
+    /// The program's `R.up` and `R.down` relations, by role and whether up.
+    peer_rels: BTreeMap<(RoleId, bool), RelId>,
 }
 
 impl Engine {
@@ -1493,10 +1690,10 @@ impl Engine {
             while self.node.ready(self.clock.now())? {
                 let now = self.clock.now();
                 let clock = Stopwatch::start();
-                let fx = self
-                    .node
-                    .run_tick(now)
-                    .map_err(|f| RuntimeError::Fault(f.to_string()))?;
+                self.progress.tick_begins();
+                let fx = self.node.run_tick(now);
+                self.progress.tick_ends();
+                let fx = fx.map_err(|f| RuntimeError::Fault(f.to_string()))?;
                 let took = clock.nanos();
                 bump(&self.stats.ticks, 1);
                 bump(&self.stats.tick_nanos, took);
@@ -1517,11 +1714,13 @@ impl Engine {
                 }
                 self.note_resident();
                 if let Some(r) = fx.reserve {
-                    self.record.reserved_tick = r.ticks.0;
-                    self.record.last_now = self.record.last_now.max(r.now.0);
-                    self.meta.write(&self.record)?;
-                    let released = self.node.reserved(r)?;
-                    self.dispatch(released, &codec)?;
+                    // Node permits one reservation in flight. Never wait for filesystem I/O here.
+                    self.reserve.try_send(r).map_err(|e| match e {
+                        TrySendError::Full(_) => {
+                            RuntimeError::Internal(internal_error!("duplicate metadata reservation"))
+                        }
+                        TrySendError::Disconnected(_) => RuntimeError::Fault("the metadata writer stopped".into()),
+                    })?;
                 }
                 match fx.wal {
                     Some(delta) => {
@@ -1655,6 +1854,25 @@ impl Engine {
         Ok(())
     }
 
+    /// A peer is up in an incarnation, or down: `R.up(n, incarnation)` or `R.down(n)` for its role `R`, if the
+    /// program reads it, in the next tick.
+    fn peer_changed(&mut self, c: crate::liveness::PeerChange) {
+        let Some(role) = self.roles.get(c.peer.0 as usize).copied().flatten() else {
+            return;
+        };
+        let Some(&rel) = self.peer_rels.get(&(role, c.up.is_some())) else {
+            return;
+        };
+        let row = match c.up {
+            Some(incarnation) => Row::from(vec![
+                Value::Node(c.peer),
+                Value::Int(blossom_value::value::IntValue::U64(incarnation)),
+            ]),
+            None => Row::from(vec![Value::Node(c.peer)]),
+        };
+        self.node.offer_input(rel, row);
+    }
+
     fn control(&mut self, m: Control, codec: &blossom_wire::codec::Codec<'_>) -> Result<Option<Stopped>, RuntimeError> {
         match m {
             Control::Synced(t) => {
@@ -1666,6 +1884,11 @@ impl Engine {
                     self.last_flush_lsn = t.lsn().0;
                     self.ask_flush()?;
                 }
+            }
+            Control::Reserved(r) => {
+                let r = r.map_err(|e| RuntimeError::Fault(format!("metadata reservation: {e}")))?;
+                let released = self.node.reserved(r)?;
+                self.dispatch(released, codec)?;
             }
             Control::WalFailed(e) => return Err(RuntimeError::Fault(e)),
             Control::DatabaseFlushed(r) => {
@@ -1686,6 +1909,7 @@ impl Engine {
                 }
             }
             Control::Wake => {}
+            Control::Peer(c) => self.peer_changed(c),
             Control::Stop => return Ok(Some(Stopped::Stopped)),
         }
         Ok(None)

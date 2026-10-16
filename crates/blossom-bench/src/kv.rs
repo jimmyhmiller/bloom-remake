@@ -131,7 +131,8 @@ pub fn run(store: Arc<dyn KvStore>, w: &Workload, stop: Arc<AtomicBool>) -> Outc
         Err(shared) => shared.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default(),
     };
     for c in panicked {
-        o.protocol_errors.push(format!("client {c} panicked; its history is lost"));
+        o.protocol_errors
+            .push(format!("client {c} panicked; its history is lost"));
     }
     o.elapsed = epoch.elapsed();
     o

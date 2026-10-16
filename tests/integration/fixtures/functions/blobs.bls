@@ -22,3 +22,8 @@ view v_read(b, x) = e(b), let x = Blob::of(b).read(1, 3);
 view v_bytewise(b, x) = e(b), let x = bytewise(b);
 /// Blobs made in earlier ticks, read whole.
 view v_kept(k, x) = kept(k), let x = k.read(0, k.len());
+/// A shared interior slice becomes a standalone blob and is read in a later tick.
+keep_slice: on e(b), let Some(s) = b.slice(32, 512), let Some(nested) = s.slice(16, 400) {
+    emit kept(Blob::of(nested));
+}
+view v_large_read(b, x) = e(b), let x = Blob::of(b).read(32, 512);

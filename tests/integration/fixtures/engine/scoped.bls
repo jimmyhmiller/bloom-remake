@@ -30,3 +30,9 @@ forget: on stop(n), seen(n) {
     delete seen(n);
     upsert stopped(n);
 }
+
+/// Identity chains remain observable and serve negations without duplicate physical stores.
+view mirror(n) = poke(n);
+view mirror_chain(n) = mirror(n);
+view quiet_mirror(n) = seen(n), not mirror_chain(n);
+view multiple(n) { poke(n); stop(n); }

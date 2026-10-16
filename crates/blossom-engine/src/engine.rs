@@ -66,6 +66,24 @@ pub struct EngineConfig {
     /// Keep every durable table in memory even when started on the node's database ([`Engine::reset_on`] tiers
     /// none): a deployment's `storage.tiered = false`, for state that fits in memory and the in-memory engine's speed.
     pub in_memory: bool,
+    /// Bounded read-only evaluation workers (zero or one: serial). All state writes and tick release remain serial.
+    pub workers: usize,
+    /// Retained pure-map input/output rows, globally bounded. Zero disables this experimental operator.
+    pub map_cache_rows: usize,
+    /// Extend retained maps to pure joins, tracking other dependency deltas.
+    pub map_cache_joins: bool,
+    /// Estimate join candidates without creating indexes for rejected alternatives.
+    pub lazy_indexes: bool,
+    /// Share consolidated bags between single-writer pipeline stages (experimental).
+    pub pipeline_batches: bool,
+    /// Infer physical keys for single-writer deterministic derived relations.
+    pub infer_keys: bool,
+    /// Compile pure relational joins/projections to source-column execution kernels.
+    pub compiled_joins: bool,
+    /// Compile equality arrangement keys from relation schemas.
+    pub packed_indexes: bool,
+    /// Fuse lossless transient relational views into pure consumers.
+    pub fuse_relations: bool,
 }
 
 /// The per-group state of an aggregate rule: per aggregate column, the support of each distinct argument tuple, and
@@ -78,9 +96,18 @@ struct Group {
 
 pub struct Engine {
     program: ValidatedProgram,
+    execution: ValidatedProgram,
+    virtuals: BTreeMap<RelId, crate::compiled::Kernel>,
     shared: Shared,
     node: NodeId,
     plans: Plans,
+    workers: Option<rayon::ThreadPool>,
+    parallel_rules: BTreeSet<RuleId>,
+    parallel_terms: std::cell::Cell<u64>,
+    plan_times: Option<BTreeMap<RuleId, u64>>,
+    map_rules: BTreeSet<RuleId>,
+    lazy_indexes: bool,
+    map_cache: std::cell::RefCell<crate::map_cache::MapCache>,
     strata: Arc<[Stratum]>,
     inductive: Arc<[RuleId]>,
     asynchronous: Arc<[RuleId]>,
@@ -109,6 +136,7 @@ pub struct Engine {
     examined: u64,
     /// The work of each rule (rows examined, expression nodes evaluated).
     examined_by: BTreeMap<RuleId, RuleWork>,
+    compiled_by: BTreeMap<RuleId, u64>,
     /// The work of each rule in the last tick (cleared at each tick's start).
     tick_work: BTreeMap<RuleId, RuleWork>,
     /// The blobs the current tick created (`Blob::of`), with their bytes.
@@ -129,6 +157,9 @@ pub struct Engine {
     /// to the next (docs/design/DATABASE.md §7). A lattice table's next state merges the frame's rows with the other
     /// contributions, so its `Next` store holds them all.
     framed: BTreeMap<RelId, rule::FramePlan>,
+    /// A framed table whose only other next-state writer is the generated identity copy of its upsert
+    /// staging relation. Read that contribution directly: it needs no second store or support maintenance.
+    upsert_next: BTreeMap<RelId, (RuleId, StoreKey)>,
     /// The framed tables that may be tiered (durable, and written by no rule but their next state's), with their key
     /// columns.
     tierable: BTreeMap<RelId, Vec<usize>>,
@@ -322,7 +353,7 @@ fn cell_spec(p: &Program, kinds: &[Option<Kind>], rel: RelId, extra: usize) -> R
 /// read one positively and aggregate nothing, that has no facts, merges no lattice and is in no recursive stratum. Its
 /// rules can be evaluated from scratch each tick instead of retracting the last tick's rows one by one
 /// ([`Regime::Scoped`]); readers that are not themselves scoped see the retraction as a change, as before.
-fn tick_scoped(p: &Program, rules: &[RuleId], recursive: &BTreeSet<RelId>) -> BTreeSet<RelId> {
+pub(crate) fn tick_scoped(p: &Program, rules: &[RuleId], recursive: &BTreeSet<RelId>) -> BTreeSet<RelId> {
     let mut scoped: BTreeSet<RelId> = p
         .rels
         .iter_enumerated()
@@ -428,6 +459,18 @@ impl Engine {
             cfg.roles.get(node.0 as usize).copied().flatten()
         };
         let runs = |rule: &Rule| rule.role.is_none_or(|r| Some(r) == my_role);
+        let normalized = if cfg.compiled_joins {
+            crate::normalize::guards(&program)?
+        } else {
+            program.clone()
+        };
+        let (execution, virtual_rules) = if cfg.fuse_relations {
+            crate::fusion::compile(&normalized, &runs)?
+        } else {
+            (normalized, BTreeMap::new())
+        };
+        let p = execution.get();
+
         let mut plans = Plans::default();
         let mut inductive = Vec::new();
         let mut asynchronous = Vec::new();
@@ -436,6 +479,8 @@ impl Engine {
                 continue;
             }
             let mut plan = Plan::new(rule)?;
+            plan.compiled = (cfg.compiled_joins || cfg.fuse_relations) && crate::compiled::Kernel::eligible(rule);
+            plan.upsert_delete = crate::upsert::UpsertDelete::of(p, rule);
             plan.frame = p
                 .rels
                 .get(rule.head.rel)
@@ -466,6 +511,11 @@ impl Engine {
             .filter(|(id, _)| plans.contains_key(id))
             .map(|(id, _)| id)
             .collect();
+        let inferred_keys = if cfg.infer_keys {
+            crate::functional_keys::infer(p, &running.iter().copied().collect(), &recursive)
+        } else {
+            BTreeMap::new()
+        };
         let scoped_rels = tick_scoped(p, &running, &recursive);
         let mut scoped_derived = Vec::new();
         for id in &running {
@@ -493,7 +543,10 @@ impl Engine {
         let mut stores = Stores::default();
         for (id, r) in p.rels.iter_enumerated() {
             let blobs = rel_holds_blobs(p, id);
-            stores.insert(StoreKey::Main(id), Store::new(cell_spec(p, &kinds, id, 0)?, blobs));
+            stores.insert(
+                StoreKey::Main(id),
+                Store::new(cell_spec(p, &kinds, id, 0)?, blobs).with_schema(&r.schema, &p.types),
+            );
             if matches!(r.class, RelClass::Channel(_)) {
                 stores.insert(StoreKey::Sent(id), Store::new(cell_spec(p, &kinds, id, 1)?, blobs));
             }
@@ -506,7 +559,84 @@ impl Engine {
                     .map(|r| r.head.rel)
                     .ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let spec = cell_spec(p, &kinds, rel, 0)?;
-                stores.insert_absent(plan.head, || Store::new(spec, rel_holds_blobs(p, rel)));
+                stores.insert_absent(plan.head, || {
+                    let store = Store::new(spec, rel_holds_blobs(p, rel));
+                    match p.rels.get(rel) {
+                        Some(r) => store.with_schema(&r.schema, &p.types),
+                        None => store,
+                    }
+                });
+            }
+        }
+        for (rel, key) in &inferred_keys {
+            if let (Some(store), Some(r)) = (stores.get_mut(&StoreKey::Main(*rel)), p.rels.get(*rel)) {
+                store.physical_key(&r.schema, key, &p.types);
+            }
+        }
+        for store in stores.values_mut() {
+            store.lazy_estimates(cfg.lazy_indexes);
+            store.packed_indexes(cfg.packed_indexes);
+        }
+        // Scoped identity stages share their source. Stratification has already ruled out cycles;
+        // no facts, carry, second writer or lattice contribution can be hidden by this physical fusion.
+        for s in &strata_list {
+            if s.recursive {
+                continue;
+            }
+            for id in &s.rules {
+                let Some(rule) = p.rules.get(*id) else { continue };
+                let Some(plan) = plans.get(id) else { continue };
+                if plan.regime != Regime::Scoped
+                    || !scoped_derived.contains(&rule.head.rel)
+                    || rule.head.mode != HeadMode::Insert
+                    || p.rels
+                        .get(rule.head.rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable)
+                    || p.facts.iter().any(|f| f.rel == rule.head.rel)
+                    || p.rules
+                        .iter_enumerated()
+                        .filter(|(id, r)| plans.contains_key(id) && r.head.rel == rule.head.rel)
+                        .count()
+                        != 1
+                    || stores.get(&plan.head).is_none_or(|s| s.cell.is_some())
+                {
+                    continue;
+                }
+                let [Literal::Pos(a)] = rule.body.lits.as_slice() else {
+                    continue;
+                };
+                if crate::upsert::is_identity_atom(rule, a) {
+                    stores.alias(plan.head, rule::atom_store(a))?;
+                }
+            }
+        }
+        if cfg.pipeline_batches {
+            for plan in plans.values() {
+                let Some(rule) = p.rules.get(plan.rule) else { continue };
+                let rel = rule.head.rel;
+                if rule.kind != RuleKind::Deductive
+                    || rule.head.mode != HeadMode::Insert
+                    || plan.aggregate
+                    || plan.frame.is_some()
+                    || plan.upsert_delete.is_some()
+                    || !matches!(plan.regime, Regime::Delta | Regime::Scoped)
+                    || recursive.contains(&rel)
+                    || stores.is_alias(plan.head)
+                    || p.rels
+                        .get(rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
+                    || p.facts.iter().any(|f| f.rel == rel)
+                    || p.rules
+                        .iter_enumerated()
+                        .filter(|(id, r)| plans.contains_key(id) && r.head.rel == rel)
+                        .count()
+                        != 1
+                {
+                    continue;
+                }
+                if let Some(store) = stores.get_mut(&plan.head) {
+                    store.make_batch();
+                }
             }
         }
         let mut framed = BTreeMap::new();
@@ -518,12 +648,74 @@ impl Engine {
                 framed.insert(rel, frame.clone());
             }
         }
+        let mut upsert_next = BTreeMap::new();
+        for c in &p.constructs {
+            let ConstructKind::Upsert { rel, staging, .. } = c.kind else {
+                continue;
+            };
+            if !framed.contains_key(&rel) {
+                continue;
+            }
+            let writers: Vec<_> = inductive
+                .iter()
+                .filter_map(|id| {
+                    let plan = plans.get(id)?;
+                    (plan.head == StoreKey::Next(rel) && plan.frame.is_none()).then_some((*id, plan))
+                })
+                .collect();
+            let [(id, plan)] = writers.as_slice() else { continue };
+            let Some(rule) = p.rules.get(*id) else { continue };
+            if c.rules.contains(id)
+                && crate::upsert::is_identity_next(rule, rel, staging)
+                && plan.regime == Regime::Delta
+            {
+                upsert_next.insert(rel, (*id, StoreKey::Main(staging)));
+            }
+        }
         let deduced: BTreeSet<RelId> = p
             .rules
             .iter_enumerated()
             .filter(|(id, r)| plans.contains_key(id) && r.kind == RuleKind::Deductive)
             .map(|(_, r)| r.head.rel)
             .collect();
+        // The private upsert deletion view is only a boolean guard of its table's frame. A valid
+        // prior tick has at most one staged row and one carried row per key. Its join's support is
+        // therefore 0/1: keep membership/deltas directly, without a counted map or full-row index.
+        // Extra writers/readers, facts or same-tick table derivations retain the general implementation.
+        for c in &p.constructs {
+            let ConstructKind::Upsert { rel, del, .. } = c.kind else {
+                continue;
+            };
+            if !upsert_next.contains_key(&rel)
+                || deduced.contains(&rel)
+                || p.facts.iter().any(|f| f.rel == rel || f.rel == del)
+            {
+                continue;
+            }
+            let Some(frame) = framed.get(&rel) else { continue };
+            if frame.del != StoreKey::Main(del) {
+                continue;
+            }
+            let Some(id) = c
+                .rules
+                .iter()
+                .copied()
+                .find(|id| plans.get(id).is_some_and(|pl| pl.upsert_delete.is_some()))
+            else {
+                continue;
+            };
+            let sole = p.rules.iter_enumerated().all(|(rid, r)| {
+                if !plans.contains_key(&rid) {
+                    return true;
+                }
+                let Some(plan) = plans.get(&rid) else { return false };
+                (plan.head != StoreKey::Main(del) || rid == id)
+                    && (!plan.dep_keys.contains(&StoreKey::Main(del)) || (r.head.rel == rel && plan.frame.is_some()))
+            });
+            if sole && let Some(store) = stores.get_mut(&StoreKey::Main(del)) {
+                store.make_boolean();
+            }
+        }
         let tierable = framed
             .keys()
             .filter_map(|rel| {
@@ -550,6 +742,82 @@ impl Engine {
             .filter(|(id, r)| plans.contains_key(id) && matches!(r.head.mode, HeadMode::Violation { .. }))
             .map(|(id, _)| id)
             .collect();
+        let mut pure = BTreeMap::new();
+        let parallel_rules = p
+            .rules
+            .iter_enumerated()
+            .filter(|(id, r)| plans.contains_key(id) && crate::purity::rule_is_pure(p, r, &mut pure))
+            .map(|(id, _)| id)
+            .collect();
+        let workers = if cfg.workers > 1 {
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(cfg.workers)
+                    .stack_size(blossom_ir::depth::EVAL_STACK_BYTES)
+                    .thread_name(|i| format!("blossom-eval-{i}"))
+                    .build()
+                    .map_err(|e| internal_error!("starting evaluation workers: {e}"))?,
+            )
+        } else {
+            None
+        };
+        let mut map_purity = BTreeMap::new();
+        let map_rules: BTreeSet<RuleId> = plans
+            .values()
+            .filter_map(|plan| {
+                let rule = p.rules.get(plan.rule)?;
+                (cfg.map_cache_rows > 0
+                    && plan.regime == Regime::Delta
+                    && !plan.aggregate
+                    && plan.copy.is_none()
+                    && plan.frame.is_none()
+                    && plan.upsert_delete.is_none()
+                    && plan
+                        .atoms
+                        .first()
+                        .is_some_and(|primary| plan.dep_pos.get(*primary).copied().flatten() == Some(0))
+                    && (cfg.map_cache_joins || (plan.atoms.len() == 1 && plan.deps == plan.atoms))
+                    && !strata_list.iter().any(|s| s.recursive && s.rules.contains(&plan.rule))
+                    && crate::purity::rule_is_pure(p, rule, &mut map_purity)
+                    && crate::purity::benefits_from_retention(rule))
+                .then_some(plan.rule)
+            })
+            .collect();
+        let map_layouts = plans
+            .values()
+            .filter(|plan| map_rules.contains(&plan.rule))
+            .filter_map(|plan| {
+                let rule = p.rules.get(plan.rule)?;
+                let Literal::Pos(atom) = rule.body.lits.get(*plan.atoms.first()?)? else {
+                    return None;
+                };
+                {
+                    let mut schema = p.rels.get(atom.rel)?.schema.clone();
+                    if let Some(key) = inferred_keys.get(&atom.rel) {
+                        schema.key = key.iter().map(|c| blossom_base::ColIdx::from_raw(*c as u32)).collect();
+                        schema.payload = (0..schema.cols.len())
+                            .filter(|c| !key.contains(c))
+                            .map(|c| blossom_base::ColIdx::from_raw(c as u32))
+                            .collect();
+                    }
+                    crate::row_support::Layout::of(&schema, &p.types).map(|layout| (plan.rule, layout))
+                }
+            })
+            .collect();
+        let mut virtuals = BTreeMap::new();
+        for (rel, id) in virtual_rules {
+            let rule = p
+                .rules
+                .get(id)
+                .ok_or_else(|| internal_error!("fused observer rule missing"))?;
+            let plan = plans
+                .get(&id)
+                .ok_or_else(|| internal_error!("fused observer plan missing"))?;
+            let order = plan.order_for(rule, None, &|_, _, _| 1);
+            let kernel = crate::compiled::Kernel::compile(rule, plan, &order, None)
+                .ok_or_else(|| internal_error!("fused observer cannot compile"))?;
+            virtuals.insert(rel, kernel);
+        }
         let mut engine = Engine {
             shared: Shared {
                 params: cfg.params,
@@ -565,6 +833,15 @@ impl Engine {
             },
             node,
             plans,
+            workers,
+            parallel_rules,
+            parallel_terms: std::cell::Cell::new(0),
+            plan_times: None,
+            map_rules,
+            lazy_indexes: cfg.lazy_indexes,
+            map_cache: std::cell::RefCell::new(
+                crate::map_cache::MapCache::new(cfg.map_cache_rows).with_layouts(map_layouts),
+            ),
             strata: strata_list.into(),
             inductive: inductive.into(),
             asynchronous: asynchronous.into(),
@@ -583,6 +860,7 @@ impl Engine {
             unsettled: BTreeSet::new(),
             examined: 0,
             examined_by: BTreeMap::new(),
+            compiled_by: BTreeMap::new(),
             tick_work: BTreeMap::new(),
             new_blobs: std::cell::RefCell::new(BTreeMap::new()),
             orders: std::cell::RefCell::new(BTreeMap::new()),
@@ -590,6 +868,7 @@ impl Engine {
             fn_work: None,
             scoped: scoped_derived,
             framed,
+            upsert_next,
             tierable,
             tiered: BTreeSet::new(),
             hot_rows: cfg.hot_rows.unwrap_or(crate::store::HOT_ROWS),
@@ -603,14 +882,82 @@ impl Engine {
             boot: None,
             rebuilding: false,
             program,
+            execution,
+            virtuals,
         };
+        if cfg.pipeline_batches {
+            // A non-durable declaration can still become an automatically maintained durable view.
+            // Protect every source that could be mounted on a database, including mixed views and
+            // durable lattice tables kept in memory. This is independent of the current reset mode.
+            let sources = engine
+                .program
+                .get()
+                .rels
+                .iter_enumerated()
+                .filter(|(_, r)| r.durable)
+                .map(|(id, _)| id)
+                .collect();
+            let mut protected = engine.durable_views_over(&sources);
+            let (mixed, _) = engine.mixed_relations_over(&protected, &sources);
+            protected.extend(mixed);
+            engine.fuse_persistent_identities(&protected)?;
+        }
         engine.build_indexes()?;
         Ok(engine)
     }
 
+    /// An identity stage may share an in-memory source, but never a source whose view writes
+    /// can be drained independently into the database under a different logical relation id.
+    fn fuse_persistent_identities(&mut self, protected: &BTreeSet<RelId>) -> Result<(), EvalError> {
+        let program = self.execution.clone();
+        let p = program.get();
+        for s in self.strata.iter() {
+            if s.recursive {
+                continue;
+            }
+            for id in &s.rules {
+                let Some(rule) = p.rules.get(*id) else { continue };
+                let Some(plan) = self.plans.get(id) else { continue };
+                let rel = rule.head.rel;
+                if plan.regime != Regime::Delta
+                    || rule.head.mode != HeadMode::Insert
+                    || plan.aggregate
+                    || plan.frame.is_some()
+                    || plan.upsert_delete.is_some()
+                    || protected.contains(&rel)
+                    || self.stores.is_alias(plan.head)
+                    || p.rels
+                        .get(rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
+                    || p.facts.iter().any(|f| f.rel == rel)
+                    || p.rules
+                        .iter_enumerated()
+                        .filter(|(id, r)| self.plans.contains_key(id) && r.head.rel == rel)
+                        .count()
+                        != 1
+                {
+                    continue;
+                }
+                let [Literal::Pos(atom)] = rule.body.lits.as_slice() else {
+                    continue;
+                };
+                if protected.contains(&atom.rel)
+                    || p.rels
+                        .get(atom.rel)
+                        .is_none_or(|r| r.class != RelClass::Idb || r.durable || !r.schema.lattice.is_empty())
+                    || !crate::upsert::is_identity_atom(rule, atom)
+                {
+                    continue;
+                }
+                self.stores.alias(plan.head, rule::atom_store(atom))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Creates every index a term, a check or a key check probes.
     fn build_indexes(&mut self) -> Result<(), EvalError> {
-        let p = self.program.get();
+        let p = self.execution.get();
         let mut wanted: BTreeSet<(StoreKey, Vec<usize>)> = BTreeSet::new();
         for plan in self.plans.values() {
             let rule = p
@@ -638,7 +985,9 @@ impl Engine {
             wanted.insert((StoreKey::Main(*rel), cols.clone()));
         }
         for (key, cols) in wanted {
-            if let Some(s) = self.stores.get_mut(&key) {
+            if let Some(s) = self.stores.get_mut(&key)
+                && !s.support_has_key(&cols)
+            {
                 s.ensure_index(&cols);
             }
         }
@@ -648,6 +997,7 @@ impl Engine {
     /// Starts over from `carried` (at boot: the recovered durable state): every store is emptied, and the next tick
     /// sees the carried state, the facts and its inputs as new.
     pub fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
+        self.map_cache.get_mut().clear();
         self.tiered.clear();
         self.views.clear();
         self.durable_aggs.clear();
@@ -709,7 +1059,7 @@ impl Engine {
             }
         }
         self.reset(carried)?;
-        let p = self.program.clone();
+        let p = self.execution.clone();
         let p = p.get();
         for rel in tiering.keys() {
             self.tiered.insert(*rel);
@@ -868,7 +1218,7 @@ impl Engine {
         views: &BTreeSet<RelId>,
         statics: &[(RelId, Row)],
     ) -> Result<Vec<(RelId, [u8; 32])>, EvalError> {
-        let p = self.program.get();
+        let p = self.execution.get();
         let mut done: BTreeMap<RelId, [u8; 32]> = BTreeMap::new();
         let mut pending: Vec<RelId> = views.iter().copied().collect();
         let mut guard = 0usize;
@@ -959,7 +1309,11 @@ impl Engine {
     /// atoms read tiered tables, static relations or other such relations; no fact holds a row of one, and no other
     /// rule writes one. Their rows can be kept in the database with the tables', and are the same after a restart.
     pub fn durable_views(&self) -> BTreeSet<RelId> {
-        let p = self.program.get();
+        self.durable_views_over(&self.tiered.union(&self.durable_in_memory).copied().collect())
+    }
+
+    fn durable_views_over(&self, persistent: &BTreeSet<RelId>) -> BTreeSet<RelId> {
+        let p = self.execution.get();
         let recursive: BTreeSet<RelId> = self
             .strata
             .iter()
@@ -982,6 +1336,7 @@ impl Engine {
                     .get(**rel)
                     .is_some_and(|d| d.class == RelClass::Idb && !d.durable)
                     && !self.scoped.contains(rel)
+                    && !self.stores.get(&StoreKey::Main(**rel)).is_some_and(Store::is_boolean)
                     && !recursive.contains(rel)
                     && !facts.contains(rel)
                     && ids.iter().all(|id| {
@@ -998,8 +1353,7 @@ impl Engine {
             .map(|(rel, _)| *rel)
             .collect();
         let source = |rel: &RelId, views: &BTreeSet<RelId>| {
-            self.tiered.contains(rel)
-                || self.durable_in_memory.contains(rel)
+            persistent.contains(rel)
                 || views.contains(rel)
                 || p.rels.get(*rel).is_some_and(|d| d.class == RelClass::Static)
         };
@@ -1030,7 +1384,7 @@ impl Engine {
     /// change since the views' version, and only the views' rules run; then the last tick's change is carried, to
     /// show as the first tick's change. The views' changes are the first tick's.
     fn catch_up(&mut self, input: &StepInput<'_>, c: &blossom_ir::tick::CatchUp) -> Result<(), EvalError> {
-        let program = self.program.clone();
+        let program = self.execution.clone();
         let p = program.get();
         self.stores.clear_deltas();
         let empty = Vec::new();
@@ -1128,7 +1482,15 @@ impl Engine {
     /// support can be kept on the cold side, the rest in memory (DATABASE.md §8). Not sources of durable views: part of
     /// them is lost on a restart.
     fn mixed_relations(&self, views: &BTreeSet<RelId>) -> (BTreeSet<RelId>, BTreeSet<RuleId>) {
-        let p = self.program.get();
+        self.mixed_relations_over(views, &self.tiered.union(&self.durable_in_memory).copied().collect())
+    }
+
+    fn mixed_relations_over(
+        &self,
+        views: &BTreeSet<RelId>,
+        persistent: &BTreeSet<RelId>,
+    ) -> (BTreeSet<RelId>, BTreeSet<RuleId>) {
+        let p = self.execution.get();
         let recursive: BTreeSet<RelId> = self
             .strata
             .iter()
@@ -1138,8 +1500,7 @@ impl Engine {
             .collect();
         let facts: BTreeSet<RelId> = p.facts.iter().map(|f| f.rel).collect();
         let source = |rel: &RelId| {
-            self.tiered.contains(rel)
-                || self.durable_in_memory.contains(rel)
+            persistent.contains(rel)
                 || views.contains(rel)
                 || p.rels.get(*rel).is_some_and(|d| d.class == RelClass::Static)
         };
@@ -1264,7 +1625,7 @@ impl Engine {
             }
         }
         if !self.facts_loaded {
-            let p = self.program.get();
+            let p = self.execution.get();
             let mut facts = Vec::new();
             for f in &p.facts {
                 let row = f
@@ -1328,10 +1689,12 @@ impl Engine {
         self.inputs = now_inputs;
         // The derived tick-scoped relations start every tick empty: their rules derive this tick's rows afresh.
         for rel in self.scoped.clone() {
-            self.store(StoreKey::Main(rel))?.retract_all().map_err(wrap)?;
+            if !self.stores.is_alias(StoreKey::Main(rel)) {
+                self.store(StoreKey::Main(rel))?.retract_all().map_err(wrap)?;
+            }
         }
         self.settle(tick)?;
-        let program = self.program.clone();
+        let program = self.execution.clone();
         let p = program.get();
         // 2. The strata.
         let strata_list = self.strata.clone();
@@ -1371,9 +1734,9 @@ impl Engine {
                 None => {
                     let s = self
                         .stores
-                        .get(&plan.head)
+                        .get(&self.next_source(rel))
                         .ok_or_else(|| internal_error!("no next store"))?;
-                    (s.ins.iter().cloned().collect(), s.del.iter().cloned().collect())
+                    (s.ins.iter().cloned().collect(), s.deletions().iter().cloned().collect())
                 }
             };
             if !ins.is_empty() {
@@ -1412,7 +1775,7 @@ impl Engine {
                 .get(&plan.head)
                 .ok_or_else(|| internal_error!("no async store"))?;
             let to_host = matches!(
-                self.program.get().rels.get(rel).map(|r| &r.class),
+                self.execution.get().rels.get(rel).map(|r| &r.class),
                 Some(RelClass::HostOut(_))
             );
             for row in s.present()? {
@@ -1452,13 +1815,7 @@ impl Engine {
             }
         }
         for rel in observe {
-            let rows = self
-                .stores
-                .get(&StoreKey::Main(*rel))
-                .map(Store::present_sorted)
-                .transpose()?
-                .unwrap_or_default();
-            out.observed.insert(*rel, rows);
+            out.observed.insert(*rel, self.visible_rows(*rel)?);
         }
         // The durable views' changes (DATABASE.md §8), and how their sources' rows at the tick differ from those
         // carried in: the views' rows were computed from them.
@@ -1509,7 +1866,7 @@ impl Engine {
             pending.deleted.get(&rel).into_iter().flatten().collect(),
         );
         let mut shown: Vec<Row> = s.ins.iter().filter(|r| !pins.contains(r)).cloned().collect();
-        let mut hidden: Vec<Row> = s.del.iter().filter(|r| !pdel.contains(r)).cloned().collect();
+        let mut hidden: Vec<Row> = s.deletions().iter().filter(|r| !pdel.contains(r)).cloned().collect();
         for r in &pdel {
             if s.contains(r)? {
                 shown.push((*r).clone());
@@ -1539,6 +1896,7 @@ impl Engine {
                     }
                     continue;
                 }
+                let s = self.stores.get(&self.next_source(rel)).unwrap_or(s);
                 for r in s.present()? {
                     next.insert(rel, r.clone());
                 }
@@ -1558,6 +1916,13 @@ impl Engine {
             .get(&StoreKey::Main(rel))
             .ok_or_else(|| internal_error!("no store for the tiered table {rel:?}"))?
             .present_sorted()
+    }
+
+    /// The physically maintained source of a table's non-frame next-state contribution.
+    fn next_source(&self, rel: RelId) -> StoreKey {
+        self.upsert_next
+            .get(&rel)
+            .map_or(StoreKey::Next(rel), |(_, source)| *source)
     }
 
     /// The stores a table's frame reads.
@@ -1594,7 +1959,10 @@ impl Engine {
         let (rel, del, keep) = self.frame_stores(frame)?;
         let next = self
             .stores
-            .get(next)
+            .get(&match next {
+                StoreKey::Next(rel) => self.next_source(*rel),
+                _ => *next,
+            })
             .ok_or_else(|| internal_error!("no store for {next:?}"))?;
         let mut rows: BTreeSet<&Row> = rel.delta().map(|(r, _)| r).collect();
         rows.extend(del.delta().map(|(r, _)| r));
@@ -1641,7 +2009,7 @@ impl Engine {
     pub fn changes_of(&self, rel: RelId) -> (Vec<Row>, Vec<Row>) {
         self.stores
             .get(&StoreKey::Main(rel))
-            .map(|s| (s.ins.iter().cloned().collect(), s.del.iter().cloned().collect()))
+            .map(|s| (s.ins.iter().cloned().collect(), s.deletions().iter().cloned().collect()))
             .unwrap_or_default()
     }
 
@@ -1655,7 +2023,7 @@ impl Engine {
         }
         let mut rows = self
             .stores
-            .get(&StoreKey::Next(rel))
+            .get(&self.next_source(rel))
             .map(Store::present_sorted)
             .transpose()?
             .unwrap_or_default();
@@ -1680,15 +2048,41 @@ impl Engine {
             fn_work: self.fn_work.as_ref(),
             callee_steps: std::cell::Cell::new(0),
             blobs: input.blobs,
-            new_blobs: &self.new_blobs,
+            new_blobs: expr::NewBlobs::Mutable(&self.new_blobs),
             flips_at: std::cell::Cell::new(None),
             reads_time: std::cell::Cell::new(false),
         }
     }
 
     /// Brings one rule's output up to date.
+    /// Clock is used only by explicit offline plan measurement; it cannot affect evaluation.
+    #[allow(clippy::disallowed_methods)]
     fn maintain(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
+        let start = self.plan_times.as_ref().map(|_| std::time::Instant::now());
+        let result = self.maintain_inner(p, input, id);
+        if let (Some(start), Some(times)) = (start, &mut self.plan_times) {
+            let ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            let entry = times.entry(id).or_default();
+            *entry = entry.saturating_add(ns);
+        }
+        result
+    }
+
+    fn maintain_inner(&mut self, p: &Program, input: &StepInput<'_>, id: RuleId) -> Result<(), EvalError> {
         let rule = p.rules.get(id).ok_or_else(|| internal_error!("rule {id:?}"))?;
+        if self.virtuals.contains_key(&rule.head.rel) {
+            return Ok(());
+        }
+        if self.stores.is_alias(StoreKey::Main(rule.head.rel)) {
+            return Ok(());
+        }
+        if self
+            .upsert_next
+            .get(&rule.head.rel)
+            .is_some_and(|(copy, _)| *copy == id)
+        {
+            return Ok(());
+        }
         {
             // Most rules see no change in a tick: tell so without taking a handle on the plan.
             let plan = self
@@ -1732,7 +2126,7 @@ impl Engine {
             Regime::Recompute => self.recompute_rule(p, input, rule, &plan),
             Regime::Scoped => {
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 self.apply(p, input, rule, &plan, terms)
             }
             Regime::Delta => {
@@ -1740,7 +2134,7 @@ impl Engine {
                 // tick's change).
                 let full = self.rebuilding && !self.view_rules.contains(&id);
                 let terms = self.evaluate(p, input, rule, &plan, full)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 self.apply(p, input, rule, &plan, terms)
             }
         }
@@ -1896,6 +2290,12 @@ impl Engine {
         let cx = self.ctx(p, input);
         let mut out = Terms::default();
         // A copy rule's changed rows map straight to head rows (a full evaluation takes the general way).
+        if let Some(upsert) = &plan.upsert_delete {
+            let (heads, examined) = upsert.run(&self.stores, &drivers)?;
+            out.heads = heads;
+            out.examined = examined;
+            return Ok(out);
+        }
         if let Some(copy) = &plan.copy {
             let mut rest = Vec::new();
             for (driver, pos) in drivers {
@@ -1912,6 +2312,32 @@ impl Engine {
                 return Ok(out);
             }
             drivers = rest;
+        }
+        let parallel = self.workers.is_some() && self.parallel_rules.contains(&rule.id);
+        let mut pivot_rows = 0;
+        if parallel && matches!(drivers.as_slice(), [(Driver::Full, _)]) {
+            let cost = |lit: usize, cols: &[usize], range: bool| match rule.body.lits.get(lit) {
+                Some(Literal::Pos(a)) => self
+                    .stores
+                    .get(&rule::atom_store(a))
+                    .map_or(0, |s| s.estimate_probe(cols, range)),
+                _ => usize::MAX,
+            };
+            let order = plan.order_for(rule, None, &cost);
+            if let Some(lit) = order.steps.iter().find_map(|s| match s {
+                rule::Step::Atom { lit, .. } => Some(*lit),
+                _ => None,
+            }) && let Some(Literal::Pos(a)) = rule.body.lits.get(lit)
+                && let Some(store) = self.stores.get(&rule::atom_store(a))
+                && store.present_len() >= PARALLEL_GRAIN * 2
+            {
+                let rows = store.new_rows(&[], &[])?;
+                pivot_rows = rows.len() as u64;
+                drivers = rows
+                    .into_iter()
+                    .map(|row| (Driver::Atom { lit, row, sign: 1 }, usize::MAX))
+                    .collect();
+            }
         }
         // The join order of each driver's terms, from the stores as they are now.
         let cost = |lit: usize, cols: &[usize], range: bool| -> usize {
@@ -1953,67 +2379,113 @@ impl Engine {
             };
             orders.push((lit, order));
         }
+        if self.map_rules.contains(&rule.id) && drivers.iter().all(|(d, _)| !matches!(d, Driver::Full)) {
+            let primary = plan
+                .atoms
+                .first()
+                .copied()
+                .ok_or_else(|| internal_error!("retained map without input"))?;
+            let mut buffers = self
+                .buffers
+                .try_borrow_mut()
+                .map_err(|_| internal_error!("nested map evaluation"))?;
+            for (driver, pos) in &drivers {
+                let primary_driver = matches!(driver,Driver::Atom{lit,..} if *lit==primary);
+                if let Driver::Atom { row, sign: -1, .. } = driver
+                    && primary_driver
+                    && let Some(outputs) = self.map_cache.borrow_mut().retract(rule.id, row)
+                {
+                    for (head, count) in outputs {
+                        *out.heads.entry(head).or_insert(0) -= count;
+                    }
+                    continue;
+                }
+                let mut update = |input: &Row, output: &Row, sign: i64| {
+                    self.map_cache.borrow_mut().update(rule.id, input, output, sign)
+                };
+                let capture = (!primary_driver).then_some(MapCapture {
+                    primary,
+                    update: &mut update,
+                });
+                let terms = run_terms(
+                    &self.ctx(p, input),
+                    &self.stores,
+                    rule,
+                    plan,
+                    &[(driver.clone(), *pos)],
+                    &orders,
+                    &mut buffers,
+                    capture,
+                )?;
+                if let Driver::Atom { row, sign: 1, .. } = driver
+                    && primary_driver
+                    && terms.errors.is_empty()
+                {
+                    self.map_cache.borrow_mut().insert(
+                        rule.id,
+                        row.clone(),
+                        terms.heads.iter().map(|(r, n)| (r.clone(), *n)).collect(),
+                    );
+                }
+                out.merge(terms);
+            }
+            return Ok(out);
+        }
+        if parallel
+            && drivers.len() >= PARALLEL_GRAIN * 2
+            && let Some(pool) = &self.workers
+        {
+            use rayon::prelude::*;
+            self.parallel_terms
+                .set(self.parallel_terms.get() + drivers.len() as u64);
+            let created = self.new_blobs.borrow();
+            let read = ParallelRead {
+                p,
+                input,
+                node: self.node,
+                shared: &self.shared,
+                stores: &self.stores,
+                created: &created,
+                profile: self.fn_work.is_some(),
+            };
+            // Indexed collection preserves driver-group order even when workers finish in another order.
+            let chunks: Vec<_> = pool.install(|| {
+                drivers
+                    .par_chunks(PARALLEL_GRAIN)
+                    .map(|chunk| read.run(rule, plan, chunk, &orders))
+                    .collect()
+            });
+            for chunk in chunks {
+                let (terms, functions) = chunk?;
+                out.merge(terms);
+                if let Some(profile) = &self.fn_work {
+                    let mut profile = profile.borrow_mut();
+                    for (id, w) in functions {
+                        let entry = profile.entry(id).or_default();
+                        entry.calls += w.calls;
+                        entry.steps += w.steps;
+                        entry.self_steps += w.self_steps;
+                    }
+                }
+            }
+            out.examined += pivot_rows;
+            return Ok(out);
+        }
         let mut buffers = self
             .buffers
             .try_borrow_mut()
             .map_err(|_| internal_error!("a rule evaluation inside another"))?;
-        for (driver, pos) in drivers {
-            let order = orders
-                .iter()
-                .find(|(l, _)| *l == driver.lit())
-                .map(|(_, o)| o)
-                .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
-            let old = |lit: usize| plan.dep_pos.get(lit).copied().flatten().is_some_and(|q| q > pos);
-            let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
-                if plan.aggregate {
-                    let mut group = Vec::new();
-                    let mut aggs = Vec::new();
-                    for a in &rule.head.args {
-                        match a {
-                            HeadArg::Term(t) => group.push(expr::term(&cx, f.env, t)?),
-                            HeadArg::Agg(agg) => {
-                                let mut tuple = Vec::with_capacity(agg.args.len());
-                                for t in &agg.args {
-                                    tuple.push(expr::term(&cx, f.env, t)?);
-                                }
-                                aggs.push(tuple);
-                            }
-                        }
-                    }
-                    for (col, tuple) in aggs.into_iter().enumerate() {
-                        *out.aggs.entry((group.clone(), col, tuple)).or_insert(0) += f.sign;
-                    }
-                } else {
-                    let row = rule::head_row(&cx, rule, f.env)?;
-                    *out.heads.entry(row).or_insert(0) += f.sign;
-                }
-                Ok(())
-            };
-            let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
-            let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
-            out.examined += rule::run_term(
-                &cx,
-                &self.stores,
-                rule,
-                plan,
-                order,
-                &driver,
-                &old,
-                &mut emit,
-                &mut error,
-                &mut buffers,
-            )?;
-            for (t, e, s) in errors {
-                let slot = out.errors.entry(t).or_insert((0, None));
-                slot.0 += s;
-                if slot.1.is_none() {
-                    slot.1 = Some(e);
-                }
-            }
-        }
-        out.steps = cx.steps.get();
-        out.flips_at = cx.flips_at.get();
-        out.reads_time = cx.reads_time.get();
+        out.merge(run_terms(
+            &cx,
+            &self.stores,
+            rule,
+            plan,
+            &drivers,
+            &orders,
+            &mut buffers,
+            None,
+        )?);
+        out.examined += pivot_rows;
         Ok(out)
     }
 
@@ -2035,6 +2507,23 @@ impl Engine {
         }
         if plan.aggregate {
             return self.apply_aggregates(p, rule, plan, terms.aggs, tick);
+        }
+        if plan.upsert_delete.is_some() && self.stores.get(&plan.head).is_some_and(Store::is_boolean) {
+            let store = self.store(plan.head)?;
+            for (row, w) in terms.heads {
+                if w != 0 {
+                    store
+                        .change_boolean(row, w > 0)
+                        .map_err(|e| to_eval(e, tick, Some(rule)))?;
+                }
+            }
+            return Ok(());
+        }
+        if self.stores.get(&plan.head).is_some_and(Store::is_batch) {
+            return self
+                .store(plan.head)?
+                .apply_batch(terms.heads)
+                .map_err(|e| to_eval(e, tick, Some(rule)));
         }
         let volatile = self.volatile_rules.contains(&rule.id);
         let store = self.store(plan.head)?;
@@ -2262,7 +2751,7 @@ impl Engine {
         plan: &Plan,
     ) -> Result<(), EvalError> {
         let terms = self.evaluate(p, input, rule, plan, true)?;
-        self.count(rule.id, terms.examined, terms.steps);
+        self.count(rule.id, terms.examined, terms.steps, terms.compiled);
         let (flips_at, reads_time) = (terms.flips_at, terms.reads_time);
         let tick = input.tick;
         if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
@@ -2407,7 +2896,7 @@ impl Engine {
                     .clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 if let Some((_, (_, Some(e)))) = terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     if strict {
                         return Err(to_eval(e, tick, Some(rule)));
@@ -2533,7 +3022,7 @@ impl Engine {
                     .clone();
                 let rule = p.rules.get(*id).ok_or_else(|| internal_error!("rule {id:?}"))?;
                 let terms = self.evaluate(p, input, rule, &plan, true)?;
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 return match terms.errors.into_iter().find(|(_, (n, _))| *n > 0) {
                     Some((_, (_, Some(e)))) => Err(to_eval(e, tick, Some(rule))),
                     _ => Err(internal_error!("rule {id:?} raised during the iteration and not at its fixpoint").into()),
@@ -2577,7 +3066,7 @@ impl Engine {
                         self.run_drivers(p, input, rule, &plan, drivers)?
                     }
                 };
-                self.count(rule.id, terms.examined, terms.steps);
+                self.count(rule.id, terms.examined, terms.steps, terms.compiled);
                 if terms.errors.values().any(|(n, _)| *n > 0) {
                     raised.insert(*id);
                     continue;
@@ -2708,11 +3197,9 @@ impl Engine {
             &[],
         )?;
         let mut instance = Instance::default();
-        for (key, s) in self.stores.iter() {
-            if let StoreKey::Main(rel) = key {
-                for r in s.present()? {
-                    instance.insert(rel, r.clone());
-                }
+        for (rel, rows) in self.instance_now()? {
+            for row in rows {
+                instance.insert(rel, row);
             }
         }
         Ok(TickOutput {
@@ -2747,7 +3234,7 @@ impl Engine {
     pub fn resident_by_store(&self) -> Vec<(RelId, &'static str, usize)> {
         let mut out: Vec<(RelId, &'static str, usize)> = self
             .stores
-            .iter()
+            .physical_iter()
             .map(|(key, s)| {
                 let (rel, kind) = match key {
                     StoreKey::Main(r) if self.tiered.contains(&r) => (r, "tiered"),
@@ -2770,14 +3257,202 @@ impl Engine {
     /// tick's rows by then).
     pub fn instance_now(&self) -> Result<BTreeMap<RelId, BTreeSet<Row>>, EvalError> {
         let mut out = BTreeMap::new();
-        for (key, s) in self.stores.iter() {
+        for (key, _) in self.stores.iter() {
             let StoreKey::Main(rel) = key else { continue };
             if self.tiered.contains(&rel) {
                 continue;
             }
-            out.insert(rel, s.present_sorted()?.into_iter().collect());
+            out.insert(rel, self.visible_rows(rel)?.into_iter().collect());
         }
         Ok(out)
+    }
+
+    /// Logical reads reconstruct an eliminated relation, including explicit step observations.
+    fn visible_rows(&self, rel: RelId) -> Result<Vec<Row>, EvalError> {
+        if let Some(kernel) = self.virtuals.get(&rel) {
+            let mut rows = BTreeSet::new();
+            kernel.run(
+                self.execution.get(),
+                &self.stores,
+                &Driver::Full,
+                &|_| false,
+                &mut |row, _| {
+                    rows.insert(row);
+                    Ok(())
+                },
+            )?;
+            Ok(rows.into_iter().collect())
+        } else {
+            self.stores
+                .get(&StoreKey::Main(rel))
+                .map(Store::present_sorted)
+                .transpose()
+                .map(|rows| rows.unwrap_or_default())
+        }
+    }
+
+    /// Enable/reset optional measurement. Ordinary execution never reads a measurement clock.
+    pub fn measure_plan(&mut self, on: bool) {
+        self.plan_times = on.then(BTreeMap::new);
+        for store in self.stores.values_mut() {
+            store.measure_plan(on);
+        }
+    }
+
+    /// Snapshot the selected physical execution structure and cumulative clock-free work.
+    pub fn plan_report(&self) -> crate::PlanReport {
+        use crate::inspection::{PlanReport, RuleReport, StoreReport, WorkReport};
+        let p = self.execution.get();
+        let name = |key: StoreKey| {
+            let (rel, version) = match key {
+                StoreKey::Main(r) => (r, "main"),
+                StoreKey::Next(r) => (r, "next"),
+                StoreKey::Async(r) => (r, "async"),
+                StoreKey::Sent(r) => (r, "sent"),
+            };
+            format!(
+                "{}:{version}",
+                p.rels
+                    .get(rel)
+                    .map_or_else(|| format!("{rel:?}"), |r| r.name.to_string())
+            )
+        };
+        let mut rules = Vec::new();
+        for plan in self.plans.values() {
+            let Some(rule) = p.rules.get(plan.rule) else { continue };
+            let stratum = self
+                .strata
+                .iter()
+                .enumerate()
+                .find(|(_, s)| s.rules.contains(&plan.rule) || s.aggregates.contains(&plan.rule));
+            let eliminated = self.stores.is_alias(plan.head)
+                || self
+                    .upsert_next
+                    .get(&rule.head.rel)
+                    .is_some_and(|(id, _)| *id == plan.rule);
+            let operator = if self.virtuals.contains_key(&rule.head.rel) {
+                "fused-observation"
+            } else if eliminated {
+                "alias"
+            } else if self.stores.get(&plan.head).is_some_and(Store::is_batch) {
+                if self.map_rules.contains(&plan.rule) {
+                    "retained-pipeline-batch"
+                } else {
+                    "pipeline-batch"
+                }
+            } else if self.map_rules.contains(&plan.rule) {
+                "retained-map"
+            } else if plan.frame.is_some() && self.framed.contains_key(&rule.head.rel) {
+                "virtual-frame"
+            } else if plan.upsert_delete.is_some() {
+                "native-upsert-delete"
+            } else if plan.copy.is_some() {
+                "copy"
+            } else if plan.compiled {
+                "compiled-relational"
+            } else {
+                "generic-relational"
+            };
+            let work = self.examined_by.get(&plan.rule).copied().unwrap_or_default();
+            rules.push(RuleReport {
+                id: plan.rule.index() as u32,
+                text: blossom_ir::printer::rule_text(p, rule),
+                head: name(plan.head),
+                dependencies: plan.dep_keys.iter().map(|k| name(*k)).collect(),
+                regime: format!("{:?}", plan.regime),
+                operator: operator.into(),
+                phase: stratum.map_or_else(|| format!("{:?}", rule.kind), |(i, _)| format!("stratum-{i}")),
+                recursive: stratum.is_some_and(|(_, s)| s.recursive),
+                aggregate: plan.aggregate,
+                barriers: {
+                    let mut barriers = Vec::new();
+                    if plan.aggregate {
+                        barriers.push("aggregate requires completed input for each evaluated group".into());
+                    }
+                    if stratum.is_some_and(|(_, s)| s.recursive) {
+                        barriers.push("recursive component requires fixed-point completion".into());
+                    }
+                    if rule.body.lits.iter().any(|l| matches!(l, Literal::Neg(_))) {
+                        barriers.push("negation requires completed lower-stratum dependencies".into());
+                    }
+                    if !matches!(rule.kind, RuleKind::Deductive) {
+                        barriers.push("next-state and sends consume the completed deductive state".into());
+                    }
+                    if !self.parallel_rules.contains(&plan.rule) {
+                        barriers.push("not eligible for pure read-only workers".into());
+                    }
+                    barriers
+                },
+                parallel_eligible: self.parallel_rules.contains(&plan.rule),
+                elapsed_ns: self
+                    .plan_times
+                    .as_ref()
+                    .map(|times| times.get(&plan.rule).copied().unwrap_or(0)),
+                work: WorkReport {
+                    compiled_terms: self.compiled_by.get(&plan.rule).copied().unwrap_or(0),
+                    probe_rows: work.rows,
+                    expression_steps: work.steps,
+                    support_writes: work.writes,
+                    evaluations: work.evals,
+                },
+            });
+        }
+        let stores = self
+            .stores
+            .physical_iter()
+            .map(|(key, store)| {
+                let readers: Vec<u32> = self
+                    .plans
+                    .values()
+                    .filter(|p| p.dep_keys.iter().any(|k| self.stores.physical(*k) == key))
+                    .map(|p| p.rule.index() as u32)
+                    .collect();
+                let writers = self
+                    .plans
+                    .values()
+                    .filter(|p| {
+                        p.head == key
+                            && !self.stores.is_alias(p.head)
+                            && !rules.iter().any(|r| {
+                                r.id == p.rule.index() as u32
+                                    && (r.operator == "alias" || r.operator == "virtual-frame")
+                            })
+                    })
+                    .map(|p| p.rule.index() as u32)
+                    .collect();
+                let mut reasons =
+                    vec!["current backend materializes rule heads unless a native elimination applies".into()];
+                if readers.len() > 1 {
+                    reasons.push("multiple readers: fusion must preserve computation reuse".into());
+                }
+                if let StoreKey::Main(rel) = key {
+                    if self.scoped.contains(&rel) {
+                        reasons.push("tick-scoped: cleared and rebuilt each tick".into());
+                    }
+                    if p.rels.get(rel).is_some_and(|r| r.durable) {
+                        reasons.push("declared durable state".into());
+                    }
+                }
+                StoreReport {
+                    key: name(key),
+                    readers,
+                    writers,
+                    resident_rows: store.resident_len(),
+                    indexes: store.inspection_indexes(),
+                    reasons,
+                    operations: store.inspection_operations(),
+                    physical_key: store.inspection_key(),
+                    batch_backed: store.is_batch(),
+                    packed_indexes: store.inspection_packed_indexes(),
+                }
+            })
+            .collect();
+        PlanReport { lazy_indexes:self.lazy_indexes, map_cache:self.map_cache.borrow().report(), node:self.node.0, evaluation_workers:self.workers.as_ref().map_or(1, rayon::ThreadPool::current_num_threads), schema_version: 1, program_digest: format!("{:?}", self.program.digest()), rules, stores, limitations: vec![
+            "Join order is selected dynamically per driver; this snapshot reports rule structure, not an executed join-order trace.".into(),
+            "Support writes exclude some native membership operations and are not physical index updates.".into(),
+            "Resident rows exclude cold state; index lists exclude cold and specialized primary indexes.".into(),
+            "Materialization reasons describe current structure, not proof that storage is semantically necessary.".into(),
+        ] }
     }
 
     /// The work of each rule in the last tick (the rules that did any).
@@ -2813,7 +3488,10 @@ impl Engine {
         }
     }
 
-    fn count(&mut self, rule: RuleId, examined: u64, steps: u64) {
+    fn count(&mut self, rule: RuleId, examined: u64, steps: u64, compiled: u64) {
+        if compiled != 0 {
+            *self.compiled_by.entry(rule).or_default() += compiled;
+        }
         self.examined += examined;
         let t = self.tick_work.entry(rule).or_default();
         t.rows += examined;
@@ -2823,6 +3501,11 @@ impl Engine {
         w.rows += examined;
         w.steps += steps;
         w.evals += 1;
+    }
+
+    /// Valuation terms evaluated on the bounded worker pool, cumulatively (zero in serial mode).
+    pub fn parallel_terms(&self) -> u64 {
+        self.parallel_terms.get()
     }
 
     pub fn node(&self) -> NodeId {
@@ -2839,6 +3522,7 @@ struct Terms {
     /// The rows its atom probes returned, and the expression nodes it evaluated (the work it did).
     examined: u64,
     steps: u64,
+    compiled: u64,
     heads: BTreeMap<Row, i64>,
     aggs: BTreeMap<(Vec<Value>, usize, Vec<Value>), i64>,
     errors: BTreeMap<Token, (i64, Option<ExprError>)>,
@@ -2846,6 +3530,176 @@ struct Terms {
     /// read the time otherwise (`Ctx::reads_time`).
     flips_at: Option<blossom_value::time::Instant>,
     reads_time: bool,
+}
+
+// Avoid scheduling tiny copy/probe workloads. This is a scheduling grain, not a semantic limit.
+const PARALLEL_GRAIN: usize = 32;
+std::thread_local! {
+    // Take the buffers out while running: nested work cannot retain a RefCell borrow or alias scratch state.
+    static WORKER_BUFFERS: std::cell::RefCell<rule::TermBuffers> = std::cell::RefCell::new(rule::TermBuffers::default());
+}
+
+impl Terms {
+    fn merge(&mut self, other: Self) {
+        self.examined += other.examined;
+        self.compiled += other.compiled;
+        self.steps += other.steps;
+        self.reads_time |= other.reads_time;
+        self.flips_at = self.flips_at.into_iter().chain(other.flips_at).min();
+        for (r, n) in other.heads {
+            *self.heads.entry(r).or_insert(0) += n;
+        }
+        for (r, n) in other.aggs {
+            *self.aggs.entry(r).or_insert(0) += n;
+        }
+        for (t, (n, e)) in other.errors {
+            let entry = self.errors.entry(t).or_insert((0, None));
+            entry.0 += n;
+            if entry.1.is_none() {
+                entry.1 = e;
+            }
+        }
+    }
+}
+
+struct ParallelRead<'a> {
+    p: &'a Program,
+    input: &'a StepInput<'a>,
+    node: NodeId,
+    shared: &'a Shared,
+    stores: &'a Stores,
+    created: &'a BTreeMap<blossom_value::BlobRef, Arc<[u8]>>,
+    profile: bool,
+}
+impl ParallelRead<'_> {
+    fn run(
+        &self,
+        rule: &Rule,
+        plan: &Plan,
+        drivers: &[(Driver, usize)],
+        orders: &[(Option<usize>, Arc<rule::Order>)],
+    ) -> Result<(Terms, BTreeMap<blossom_base::FnId, FnWork>), EvalError> {
+        let functions = std::cell::RefCell::new(BTreeMap::new());
+        let cx = Ctx {
+            program: self.p,
+            node: self.node,
+            incarnation: self.input.incarnation,
+            tick: self.input.tick,
+            now: self.input.now,
+            shared: self.shared,
+            fuel: crate::expr::Fuel::default(),
+            steps: std::cell::Cell::new(0),
+            fn_work: self.profile.then_some(&functions),
+            callee_steps: std::cell::Cell::new(0),
+            blobs: self.input.blobs,
+            new_blobs: expr::NewBlobs::Frozen(self.created),
+            flips_at: std::cell::Cell::new(None),
+            reads_time: std::cell::Cell::new(false),
+        };
+        let mut buffers = WORKER_BUFFERS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+        let result = run_terms(&cx, self.stores, rule, plan, drivers, orders, &mut buffers, None);
+        // Retain capacity, not rows, blobs or values from the last valuation.
+        buffers.clear();
+        WORKER_BUFFERS.with(|slot| *slot.borrow_mut() = buffers);
+        let terms = result?;
+        Ok((terms, functions.into_inner()))
+    }
+}
+
+struct MapCapture<'a> {
+    primary: usize,
+    update: &'a mut dyn FnMut(&Row, &Row, i64),
+}
+
+/// Run a disjoint group of additive valuation terms against one immutable store snapshot.
+#[allow(clippy::too_many_arguments)]
+fn run_terms(
+    cx: &Ctx<'_>,
+    stores: &Stores,
+    rule: &Rule,
+    plan: &Plan,
+    drivers: &[(Driver, usize)],
+    orders: &[(Option<usize>, Arc<rule::Order>)],
+    buffers: &mut rule::TermBuffers,
+    mut capture: Option<MapCapture<'_>>,
+) -> Result<Terms, EvalError> {
+    let mut out = Terms::default();
+    for (driver, pos) in drivers {
+        let order = orders
+            .iter()
+            .find(|(l, _)| *l == driver.lit())
+            .map(|(_, o)| o)
+            .ok_or_else(|| internal_error!("no join order for driver {:?}", driver.lit()))?;
+        let old = |lit: usize| plan.dep_pos.get(lit).copied().flatten().is_some_and(|q| q > *pos);
+        if let Some(kernel) = &order.compiled {
+            out.compiled += 1;
+            let sign = match driver {
+                Driver::Full => 1,
+                Driver::Atom { sign, .. } | Driver::Neg { sign, .. } | Driver::Lookup { sign, .. } => *sign,
+            };
+            out.examined += kernel.run(cx.program, stores, driver, &old, &mut |row, rows| {
+                if let Some(MapCapture { primary, update }) = &mut capture {
+                    let input = rows
+                        .get(*primary)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| internal_error!("compiled map lacks primary row"))?;
+                    update(input, &row, sign);
+                }
+                *out.heads.entry(row).or_insert(0) += sign;
+                Ok(())
+            })?;
+            continue;
+        }
+        let mut emit = |f: Found<'_>| -> expr::ExprResult<()> {
+            if plan.aggregate {
+                let mut group = Vec::new();
+                let mut aggs = Vec::new();
+                for a in &rule.head.args {
+                    match a {
+                        HeadArg::Term(t) => group.push(expr::term(cx, f.env, t)?),
+                        HeadArg::Agg(agg) => {
+                            let mut tuple = Vec::with_capacity(agg.args.len());
+                            for t in &agg.args {
+                                tuple.push(expr::term(cx, f.env, t)?);
+                            }
+                            aggs.push(tuple);
+                        }
+                    }
+                }
+                for (col, tuple) in aggs.into_iter().enumerate() {
+                    *out.aggs.entry((group.clone(), col, tuple)).or_insert(0) += f.sign;
+                }
+            } else {
+                let row = rule::head_row(cx, rule, f.env)?;
+                if let Some(MapCapture { primary, update }) = &mut capture {
+                    let input = f
+                        .rows
+                        .get(*primary)
+                        .and_then(Option::as_ref)
+                        .ok_or_else(|| expr::bug("a map valuation lacks its primary input".into()))?;
+                    update(input, &row, f.sign);
+                }
+                *out.heads.entry(row).or_insert(0) += f.sign;
+            }
+            Ok(())
+        };
+        let mut errors: Vec<(Token, ExprError, i64)> = Vec::new();
+        let mut error = |t: Token, e: ExprError, s: i64| errors.push((t, e, s));
+        out.examined += rule::run_term(
+            cx, stores, rule, plan, order, driver, &old, &mut emit, &mut error, buffers,
+        )?;
+        for (t, e, s) in errors {
+            let slot = out.errors.entry(t).or_insert((0, None));
+            slot.0 += s;
+            if slot.1.is_none() {
+                slot.1 = Some(e);
+            }
+        }
+    }
+    out.steps = cx.steps.get();
+    out.flips_at = cx.flips_at.get();
+    out.reads_time = cx.reads_time.get();
+    Ok(out)
 }
 
 /// An aggregate rule's head row for a group whose live argument tuples are `tuples` (per aggregate column).

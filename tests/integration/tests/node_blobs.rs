@@ -276,13 +276,13 @@ fn a_recovered_node_reads_its_blobs_and_collects_the_unreferenced_ones() {
         let mut d = k.boot(&fs);
         const LATER: i64 = 1_000_000_000_000;
         d.run_until_quiescent(Instant(LATER)).unwrap();
-        let store = BlobStore::open(Arc::new(fs.clone()), &k.dir).unwrap();
+        let store = d.blob_store().clone();
         assert_eq!(store.list().unwrap().len(), 7, "engine {engine}");
         // Forget three chunks, checkpoint: their blobs go, and so does the orphan; the others stay.
         let forget = k.artifact.rel_named("forget").unwrap();
         for c in chunks.iter().take(3) {
             d.node
-                .offer_input(forget, Arc::from(vec![Value::Bytes(Arc::from(&c[..]))]));
+                .offer_input(forget, Arc::from(vec![Value::Bytes((&c[..]).into())]));
         }
         d.run_until_quiescent(Instant(LATER + 1)).unwrap();
         d.flush().unwrap();
@@ -327,7 +327,7 @@ fn a_tick_reads_a_blob_whose_record_is_not_synced_yet() {
         let rel = |n: &str| k.artifact.rel_named(n).unwrap();
         let key: Arc<[u8]> = Arc::from(&b"pipelined blob"[..]);
         node.run_tick(Instant(1)).unwrap();
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let put = node.run_tick(Instant(2)).unwrap();
         assert_eq!(
             put.blobs.len(),
@@ -335,12 +335,12 @@ fn a_tick_reads_a_blob_whose_record_is_not_synced_yet() {
             "engine {engine}: the blob is handed over with the record"
         );
         // Neither written to the store nor synced: the next tick reads it all the same.
-        node.offer_input(rel("peek"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("peek"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         node.run_tick(Instant(3))
             .unwrap_or_else(|f| panic!("engine {engine}: {f}"));
         let peeked = node.carried_rows(rel("peeked")).unwrap();
         assert_eq!(peeked.len(), 1, "engine {engine}");
-        assert_eq!(peeked[0][1], Value::Bytes(key.clone()), "engine {engine}");
+        assert_eq!(peeked[0][1], Value::Bytes(key.clone().into()), "engine {engine}");
     }
 }
 
@@ -364,21 +364,21 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
             node.wal_synced(fx.tick).unwrap();
         };
         sync(&mut node, 1);
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         sync(&mut node, 2);
-        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         sync(&mut node, 3);
         // A checkpoint of this state holds no row with the blob: it is a candidate its installation may let go.
         let checkpoint = node.next_tick().prev().unwrap();
         let outside = node.collection_candidates();
         assert!(outside.contains(&blob), "engine {engine}");
         // After it: the row again (the blob is still durable, so it is not written again), then deleted.
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let fx = node.run_tick(Instant(4)).unwrap();
         assert!(fx.blobs.is_empty(), "engine {engine}: a durable blob is written again");
         store.put_all(&fx.blobs).unwrap();
         node.wal_synced(fx.tick).unwrap();
-        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("forget"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         sync(&mut node, 5);
         let gone = node.blob_garbage(checkpoint, &outside);
         assert!(
@@ -394,7 +394,7 @@ fn a_blob_a_record_after_the_checkpoint_references_is_kept() {
         assert_eq!(gone, vec![blob], "engine {engine}");
         assert_eq!(store.delete(&gone).unwrap(), 1, "engine {engine}");
         // Gone, it is no longer durable: a row that needs it again writes it again.
-        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let fx = node.run_tick(Instant(7)).unwrap();
         assert_eq!(
             fx.blobs.len(),
@@ -427,15 +427,15 @@ fn a_blob_only_a_derived_row_holds_survives_the_cache_trims() {
             fx
         };
         tick(&mut node);
-        node.offer_input(rel("keep"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("keep"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         tick(&mut node);
         // Ticks that make other blobs, past the cache's 64-byte budget, so it is trimmed.
         for i in 0..4u8 {
-            node.offer_input(rel("put"), Arc::from(vec![Value::Bytes(Arc::from(vec![i; 300]))]));
+            node.offer_input(rel("put"), Arc::from(vec![Value::Bytes((vec![i; 300]).into())]));
             tick(&mut node);
             tick(&mut node);
         }
-        node.offer_input(rel("commit_kept"), Arc::from(vec![Value::Bytes(key.clone())]));
+        node.offer_input(rel("commit_kept"), Arc::from(vec![Value::Bytes(key.clone().into())]));
         let fx = tick(&mut node);
         assert_eq!(
             fx.blobs.len(),
@@ -506,12 +506,12 @@ fn logged_blobs_are_synced_before_the_wal_that_logs_them_is_truncated() {
     }
 }
 
-/// From the HD review: a tick logs a new blob and stops before its record syncs; another blob's put then syncs the
-/// blob directory (as a large blob's put, the checkpointer or a collection can, while a runtime batch is unsynced);
-/// then power fails, keeping the logged blob's directory entry and losing its bytes. The record is lost, so recovery
-/// must not hold the blob (its provisional file goes), and the same bytes sent again are stored and read whole.
+/// From the HD review: a tick logs a new blob and stops before its record syncs; another blob's put then syncs (as a
+/// large blob's put or a flush's can, while a runtime batch is unsynced); then power fails. The record is lost: the
+/// store holds the blob only if its bytes survived whole (a pack entry checks itself), held by no row, and the same
+/// bytes sent again are stored and read whole.
 #[test]
-fn a_logged_blob_whose_record_is_lost_is_not_trusted_after_a_power_loss() {
+fn a_logged_blob_whose_record_is_lost_is_never_read_torn_after_a_power_loss() {
     for engine in [false, true] {
         let k = Store::new(engine);
         let fs = SimFs::default();
@@ -539,16 +539,9 @@ fn a_logged_blob_whose_record_is_lost_is_not_trusted_after_a_power_loss() {
         let mut d = k.boot(&image);
         assert!(k.stored(&d).is_empty(), "engine {engine}: the lost record's row");
         let b = BlobRef::of(&chunk);
-        let leftovers: Vec<_> = image
-            .list(&k.dir.join("blobs"))
-            .unwrap()
-            .into_iter()
-            .filter(|p| p.to_string_lossy().contains(&b.hex()))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "engine {engine}: the blob is still held: {leftovers:?}"
-        );
+        if let Some(bytes) = d.blob_store().read(&b).unwrap() {
+            assert_eq!(&bytes[..], &chunk[..], "engine {engine}");
+        }
         // The same bytes again: stored, and read back whole.
         const LATER: i64 = 1_000_000_000_000;
         d.run_until_quiescent(Instant(LATER)).unwrap();
@@ -569,5 +562,80 @@ fn a_logged_blob_whose_record_is_lost_is_not_trusted_after_a_power_loss() {
             Some(chunk.clone()),
             "engine {engine}"
         );
+    }
+}
+
+/// Canonical pack commits: every WAL reference surviving any syscall cut has durable
+/// payload bytes, even when the referencing record was not yet acknowledged.
+#[test]
+fn grouped_pack_payloads_precede_every_recoverable_wal_reference() {
+    use blossom_store::{FileWal, Lsn, SegmentHeader, WalRecordBuf, WalScan, WalWriter};
+    let fs = SimFs::default();
+    let dir = Path::new("/canonical");
+    fs.create_dir_all(dir).unwrap();
+    fs.sync_dir(Path::new("/")).unwrap();
+    let blobs = BlobStore::open(Arc::new(fs.clone()), dir).unwrap();
+    let wal_dir = dir.join("wal");
+    let mut wal = FileWal::create(
+        Arc::new(fs.clone()),
+        &wal_dir,
+        SegmentHeader {
+            format: 1,
+            store_uuid: [7; 16],
+            segment_seq: 0,
+            restarts: 1,
+            boot_nonce: 1,
+            lsn_base: Lsn(0),
+            catalog: vec![],
+        },
+        Lsn(0),
+    )
+    .unwrap();
+    let payloads: Vec<_> = [vec![31u8; 2048], vec![42u8; 3072]]
+        .into_iter()
+        .map(|v| (BlobRef::of(&v), Arc::<[u8]>::from(v)))
+        .collect();
+    fs.enable_crash_recording().unwrap();
+    blobs
+        .put_all(&[payloads[0].clone(), payloads[1].clone(), payloads[0].clone()])
+        .unwrap();
+    for (i, blob) in payloads.iter().enumerate() {
+        let r = recovery::tick_record(&blobs, std::slice::from_ref(blob), vec![i as u8]).unwrap();
+        assert!(r.logged.is_empty());
+        assert_eq!(
+            r.payload.len(),
+            1,
+            "WAL contains the reference, not another payload copy"
+        );
+        wal.append(&WalRecordBuf {
+            batch: 1,
+            tick: i as u64,
+            now: i as i64,
+            kind: r.kind,
+            payload: r.payload,
+        })
+        .unwrap();
+    }
+    wal.sync().unwrap();
+    let cuts = fs.recorded_cuts().unwrap();
+    assert!(cuts.len() > 5);
+    for (i, cut) in cuts.iter().enumerate() {
+        for fate in [WriteFate::Lost, WriteFate::Survive, WriteFate::Torn { sectors: 1 }] {
+            let mut image = cut.fork().unwrap();
+            image.crash(&mut |_| fate).unwrap();
+            let recovered = BlobStore::open(Arc::new(image.clone()), dir).unwrap();
+            let scan = WalScan::scan(&image, &wal_dir, [7; 16], true).unwrap();
+            for (_, record) in scan.records() {
+                let (b, bytes) = &payloads[record.payload[0] as usize];
+                assert_eq!(
+                    recovered.read(b).unwrap().as_deref(),
+                    Some(bytes.as_ref()),
+                    "cut {i}, {fate:?}"
+                );
+            }
+            if i + 1 == cuts.len() {
+                assert_eq!(scan.records().count(), 2, "acknowledged group, {fate:?}");
+            }
+        }
     }
 }

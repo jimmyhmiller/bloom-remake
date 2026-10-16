@@ -168,7 +168,7 @@ fn recovery_from_the_database_is_exact_across_restarts_flushes_and_compactions()
             if i % 4 == 3 {
                 let old = format!("run {run} chunk {}", i - 2).into_bytes();
                 d.node
-                    .offer_input(forget, Arc::from(vec![Value::Bytes(Arc::from(&old[..]))]));
+                    .offer_input(forget, Arc::from(vec![Value::Bytes((&old[..]).into())]));
             }
             t += 1;
             d.run_until_quiescent(Instant(t)).unwrap();
@@ -255,8 +255,8 @@ fn a_store_from_before_the_database_moves_onto_one() {
     // A row only the checkpoint holds: found after the move, it shows recovery started from the checkpoint.
     let peeked = k.artifact.rel_named("peeked").unwrap();
     let marker: blossom_oracle::Row = Arc::from(vec![
-        Value::Bytes(Arc::from(&b"marker"[..])),
-        Value::Bytes(Arc::from(&b"from the checkpoint"[..])),
+        Value::Bytes((&b"marker"[..]).into()),
+        Value::Bytes((&b"from the checkpoint"[..]).into()),
     ]);
     let mut at_mid = at_mid;
     at_mid.rows.entry(peeked).or_default().insert(marker.clone());

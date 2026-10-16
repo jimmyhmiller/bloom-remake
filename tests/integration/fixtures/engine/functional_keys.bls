@@ -1,0 +1,23 @@
+program functional_keys version 1;
+input put(k: u64, v: u64);
+input erase(k: u64);
+table source(k: u64, v: u64) key(k);
+write: on put(k, v) { upsert source(k, v); }
+remove: on erase(k), source(k, v) { delete source(k, v); }
+view decoded(k, v, twice) = source(k, v), let twice = v + v;
+view joined(k, v, twice, again) = source(k, v), decoded(k, v, twice), let again = twice + v;
+view packed(pair, twice) = decoded(k, v, twice), let pair = (k, v);
+view unpacked(k, v, twice) = packed(pair, twice), let (k, v) = pair;
+view projected(v) = source(_, v);
+view generated(k, item) = source(k, v), item in [v, v, v + 1u64];
+view multi(k, v) {
+    source(k, v);
+    source(k, _), let v = 100u64;
+}
+view timed(k, v, at) = source(k, v), let at = now();
+view observed(k, answer) = joined(k, v, twice, again), let answer = again + twice + v;
+view scoped(k, v, twice) = put(k, v), let twice = v + v;
+
+view mirror(k, v, twice) = decoded(k, v, twice);
+view mirror_chain(k, v, twice) = mirror(k, v, twice);
+view from_mirror(k, answer) = mirror_chain(k, v, twice), let answer = v + twice;

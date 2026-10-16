@@ -82,7 +82,7 @@ const QUIET_AT: i64 = 17_000_000_000;
 
 /// What a run does to the cluster besides the members' comings and goings.
 #[cfg(test)]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Scenario {
     /// No faults.
     Calm,
@@ -1111,6 +1111,7 @@ fn check_groups(seeds: std::ops::RangeInclusive<u64>, scenario: Scenario) -> u64
             duration: 20_000_000_000,
             chunk_max: 64 + (seed as usize % 5) * 200,
             externs: Arc::new(blossom_std_host::registry().unwrap()),
+            record: blossom_integration_tests::sim_record(&format!("{scenario:?}-seed{seed}")),
             ..ClusterConfig::default()
         };
         let mut cluster = Cluster::new(

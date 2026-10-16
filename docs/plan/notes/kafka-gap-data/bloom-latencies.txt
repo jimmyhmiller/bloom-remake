@@ -1,0 +1,658 @@
+Attaching 9 probes...
+diagnostic_start_ns 277970304545401
+diagnostic_end_ns 278000307030276
+
+
+
+
+@off_ns[2696182, peer-listener, 0]: 4458
+@off_ns[2696184, peer-listener, 0]: 9709
+@off_ns[2696182, stream-reader, 0]: 10199
+@off_ns[2696184, peer-writer, 256]: 12754
+@off_ns[2696182, database, 256]: 15749
+@off_ns[2696183, stream-reader, 256]: 20919
+@off_ns[2696182, peer-reader, 0]: 25008
+@off_ns[2696183, liveness, 0]: 29816
+@off_ns[2696182, peer-reader, 256]: 34024
+@off_ns[2696182, liveness-check, 0]: 34183
+@off_ns[2696183, stream-listener, 256]: 35848
+@off_ns[2696183, stream-listener, 0]: 63580
+@off_ns[2696184, committer, 256]: 64452
+@off_ns[2696184, stream-reader, 0]: 68809
+@off_ns[2696183, engine, 256]: 69300
+@off_ns[2696184, peer-reader, 0]: 80693
+@off_ns[2696182, liveness, 0]: 80782
+@off_ns[2696183, peer-reader, 0]: 85512
+@off_ns[2696182, committer, 256]: 92784
+@off_ns[2696182, stream-writer, 256]: 107713
+@off_ns[2696184, stream-writer, 256]: 121028
+@off_ns[2696183, committer, 256]: 144530
+@off_ns[2696183, stream-reader, 0]: 200016
+@off_ns[2696184, peer-writer, 0]: 271130
+@off_ns[2696182, peer-writer, 0]: 325133
+@off_ns[2696183, peer-writer, 0]: 573707
+@off_ns[2696182, database, 0]: 661294
+@off_ns[2696183, database, 0]: 1032202
+@off_ns[2696183, committer, 0]: 1686581
+@off_ns[2696182, committer, 0]: 1758428
+@off_ns[2696184, database, 0]: 1769777
+@off_ns[2696184, committer, 0]: 1843356
+@off_ns[2696182, engine, 0]: 2363618
+@off_ns[2696184, engine, 0]: 2954672
+@off_ns[2696182, stream-writer, 0]: 5347227
+@off_ns[2696183, engine, 0]: 5827407
+@off_ns[2696183, stream-writer, 0]: 7553403
+@off_ns[2696184, stream-writer, 0]: 8477696
+@off_ns[2696184, engine, 1]: 289924371
+@off_ns[2696183, promoter, 2]: 1017885616
+@off_ns[2696182, database, 2]: 1116757337
+@off_ns[2696182, promoter, 2]: 1188593579
+@off_ns[2696182, engine, 1]: 1205038163
+@off_ns[2696184, database, 2]: 1263187813
+@off_ns[2696183, engine, 1]: 1607836558
+@off_ns[2696183, stats, 2]: 2307872593
+@off_ns[2696184, stats, 2]: 2307916306
+@off_ns[2696182, stats, 2]: 2308197094
+@off_ns[2696184, promoter, 2]: 3474296379
+@off_ns[2696183, database, 2]: 3535667232
+@off_ns[2696182, engine, 2]: 4318457560
+@off_ns[2696183, engine, 2]: 4406338486
+@off_ns[2696184, engine, 2]: 4626802002
+@off_ns[2696184, committer, 2]: 5330190224
+@off_ns[2696183, committer, 2]: 5966957253
+@off_ns[2696182, committer, 2]: 8603148890
+@off_ns[2696182, committer, 1]: 19478164773
+@off_ns[2696183, committer, 1]: 22130362858
+@off_ns[2696184, committer, 1]: 22729637928
+@off_ns[2696183, database, 1]: 24393901100
+@off_ns[2696184, promoter, 1]: 26508937141
+@off_ns[2696182, database, 1]: 26829824058
+@off_ns[2696182, stats, 1]: 27001465670
+@off_ns[2696184, stats, 1]: 27001492980
+@off_ns[2696183, stats, 1]: 27001563582
+@off_ns[2696184, database, 1]: 27227258770
+@off_ns[2696182, promoter, 1]: 28129938441
+@off_ns[2696183, promoter, 1]: 28222919009
+@off_ns[2696184, liveness-check, 1]: 30187945548
+@off_ns[2696183, stream-listener, 1]: 30209261582
+@off_ns[2696183, peer-listener, 1]: 30209664069
+@off_ns[2696184, peer-listener, 1]: 30212312290
+@off_ns[2696184, stream-listener, 1]: 30213433579
+@off_ns[2696182, peer-listener, 1]: 30225245977
+@off_ns[2696182, stream-listener, 1]: 30231274856
+@off_ns[2696182, liveness-check, 1]: 30233259772
+@off_ns[2696183, liveness-check, 1]: 30235236162
+@off_ns[2696182, peer-writer, 1]: 60150302895
+@off_ns[2696184, peer-writer, 1]: 60306804008
+@off_ns[2696183, peer-writer, 1]: 60330989462
+@off_ns[2696182, liveness, 1]: 60468314197
+@off_ns[2696183, liveness, 1]: 60470954071
+@off_ns[2696184, liveness, 1]: 60473350667
+@off_ns[2696183, peer-reader, 1]: 120545806119
+@off_ns[2696184, peer-reader, 1]: 120561930171
+@off_ns[2696182, peer-reader, 1]: 120688788892
+@off_ns[2696182, stream-writer, 1]: 239518393311
+@off_ns[2696183, stream-writer, 1]: 240028291967
+@off_ns[2696184, stream-writer, 1]: 354402044182
+@off_ns[2696183, stream-reader, 1]: 391227041399
+@off_ns[2696182, stream-reader, 1]: 450885295734
+@off_ns[2696184, stream-reader, 1]: 480116814094
+
+
+@runqueue_ns[2696182, stats]: 124213
+@runqueue_ns[2696183, stats]: 131105
+@runqueue_ns[2696184, stats]: 195916
+@runqueue_ns[2696183, promoter]: 1449509
+@runqueue_ns[2696184, promoter]: 1502848
+@runqueue_ns[2696182, promoter]: 1626973
+@runqueue_ns[2696182, database]: 2237706
+@runqueue_ns[2696182, liveness-check]: 2434320
+@runqueue_ns[2696183, database]: 2449716
+@runqueue_ns[2696183, liveness-check]: 2690686
+@runqueue_ns[2696182, engine]: 3241982
+@runqueue_ns[2696184, database]: 3307501
+@runqueue_ns[2696184, engine]: 3321557
+@runqueue_ns[2696184, liveness-check]: 6065270
+@runqueue_ns[2696182, peer-listener]: 7024564
+@runqueue_ns[2696183, engine]: 7081319
+@runqueue_ns[2696182, liveness]: 7518761
+@runqueue_ns[2696183, peer-listener]: 7625870
+@runqueue_ns[2696182, peer-writer]: 7757366
+@runqueue_ns[2696183, stream-listener]: 8335608
+@runqueue_ns[2696184, peer-writer]: 8377819
+@runqueue_ns[2696184, liveness]: 8887953
+@runqueue_ns[2696182, peer-reader]: 9024089
+@runqueue_ns[2696182, committer]: 9092740
+@runqueue_ns[2696184, committer]: 9260801
+@runqueue_ns[2696184, peer-listener]: 9783967
+@runqueue_ns[2696183, liveness]: 9988875
+@runqueue_ns[2696183, committer]: 10443602
+@runqueue_ns[2696182, stream-listener]: 11249990
+@runqueue_ns[2696183, peer-writer]: 11465571
+@runqueue_ns[2696184, peer-reader]: 12360991
+@runqueue_ns[2696184, stream-listener]: 12561706
+@runqueue_ns[2696183, peer-reader]: 22382703
+@runqueue_ns[2696183, stream-reader]: 36540926
+@runqueue_ns[2696184, stream-reader]: 46022879
+@runqueue_ns[2696182, stream-reader]: 46323188
+@runqueue_ns[2696182, stream-writer]: 53080260
+@runqueue_ns[2696183, stream-writer]: 67857542
+@runqueue_ns[2696184, stream-writer]: 77061858
+
+@switches[2696182, peer-reader, 256]: 1
+@switches[2696183, stream-listener, 0]: 1
+@switches[2696182, liveness, 0]: 1
+@switches[2696182, database, 256]: 1
+@switches[2696184, peer-writer, 256]: 1
+@switches[2696183, stream-reader, 256]: 1
+@switches[2696182, stream-writer, 256]: 1
+@switches[2696182, peer-listener, 0]: 1
+@switches[2696183, stream-listener, 256]: 1
+@switches[2696182, stream-reader, 0]: 2
+@switches[2696184, peer-listener, 0]: 2
+@switches[2696183, engine, 256]: 2
+@switches[2696184, stream-reader, 0]: 2
+@switches[2696182, committer, 256]: 2
+@switches[2696183, liveness, 0]: 2
+@switches[2696184, stream-writer, 256]: 2
+@switches[2696182, liveness-check, 0]: 2
+@switches[2696184, stats, 2]: 3
+@switches[2696183, peer-reader, 0]: 3
+@switches[2696182, peer-reader, 0]: 3
+@switches[2696183, stats, 2]: 3
+@switches[2696184, committer, 256]: 3
+@switches[2696183, stream-reader, 0]: 4
+@switches[2696182, stats, 2]: 5
+@switches[2696184, peer-writer, 0]: 5
+@switches[2696184, peer-reader, 0]: 7
+@switches[2696182, peer-writer, 0]: 7
+@switches[2696183, committer, 256]: 8
+@switches[2696183, peer-writer, 0]: 9
+@switches[2696183, database, 0]: 18
+@switches[2696182, database, 0]: 23
+@switches[2696184, committer, 0]: 26
+@switches[2696183, stats, 1]: 27
+@switches[2696184, database, 0]: 27
+@switches[2696182, stats, 1]: 27
+@switches[2696184, stats, 1]: 27
+@switches[2696182, stream-writer, 0]: 32
+@switches[2696182, committer, 0]: 32
+@switches[2696183, promoter, 1]: 38
+@switches[2696184, promoter, 1]: 38
+@switches[2696182, promoter, 1]: 38
+@switches[2696183, committer, 0]: 38
+@switches[2696183, database, 1]: 39
+@switches[2696182, database, 1]: 40
+@switches[2696183, stream-writer, 0]: 40
+@switches[2696184, database, 1]: 40
+@switches[2696184, engine, 1]: 47
+@switches[2696184, stream-writer, 0]: 50
+@switches[2696183, engine, 0]: 93
+@switches[2696182, engine, 2]: 103
+@switches[2696183, engine, 2]: 107
+@switches[2696182, engine, 0]: 113
+@switches[2696184, engine, 2]: 113
+@switches[2696184, engine, 0]: 133
+@switches[2696182, engine, 1]: 189
+@switches[2696183, engine, 1]: 241
+@switches[2696184, committer, 1]: 368
+@switches[2696182, committer, 1]: 389
+@switches[2696183, committer, 1]: 437
+@switches[2696183, stream-writer, 1]: 547
+@switches[2696182, stream-writer, 1]: 554
+@switches[2696184, liveness-check, 1]: 603
+@switches[2696183, liveness-check, 1]: 604
+@switches[2696182, liveness-check, 1]: 604
+@switches[2696184, stream-writer, 1]: 673
+@switches[2696184, peer-writer, 1]: 1092
+@switches[2696183, liveness, 1]: 1208
+@switches[2696184, liveness, 1]: 1208
+@switches[2696182, liveness, 1]: 1208
+@switches[2696184, database, 2]: 1333
+@switches[2696183, peer-writer, 1]: 1363
+@switches[2696182, peer-writer, 1]: 1376
+@switches[2696183, database, 2]: 1448
+@switches[2696183, promoter, 2]: 1489
+@switches[2696184, peer-listener, 1]: 1506
+@switches[2696183, stream-listener, 1]: 1506
+@switches[2696183, peer-listener, 1]: 1506
+@switches[2696184, stream-listener, 1]: 1506
+@switches[2696182, stream-listener, 1]: 1507
+@switches[2696182, peer-listener, 1]: 1507
+@switches[2696182, database, 2]: 1631
+@switches[2696184, promoter, 2]: 1742
+@switches[2696182, promoter, 2]: 1910
+@switches[2696184, committer, 2]: 2276
+@switches[2696183, stream-reader, 1]: 2791
+@switches[2696183, peer-reader, 1]: 2835
+@switches[2696184, peer-reader, 1]: 2847
+@switches[2696182, committer, 2]: 2965
+@switches[2696183, committer, 2]: 2997
+@switches[2696182, stream-reader, 1]: 3076
+@switches[2696182, peer-reader, 1]: 3202
+@switches[2696184, stream-reader, 1]: 3230
+@sync_count[2696183, promoter, tracepoint:syscalls:sys_enter_fsync]: 14
+@sync_count[2696182, promoter, tracepoint:syscalls:sys_enter_fsync]: 14
+@sync_count[2696184, promoter, tracepoint:syscalls:sys_enter_fsync]: 14
+@sync_count[2696182, engine, tracepoint:syscalls:sys_enter_fdatasync]: 29
+@sync_count[2696183, engine, tracepoint:syscalls:sys_enter_fsync]: 29
+@sync_count[2696183, engine, tracepoint:syscalls:sys_enter_fdatasync]: 29
+@sync_count[2696182, engine, tracepoint:syscalls:sys_enter_fsync]: 29
+@sync_count[2696184, engine, tracepoint:syscalls:sys_enter_fsync]: 29
+@sync_count[2696184, engine, tracepoint:syscalls:sys_enter_fdatasync]: 29
+@sync_count[2696184, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 52
+@sync_count[2696182, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 53
+@sync_count[2696183, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 53
+@sync_count[2696184, database, tracepoint:syscalls:sys_enter_fdatasync]: 99
+@sync_count[2696183, database, tracepoint:syscalls:sys_enter_fdatasync]: 102
+@sync_count[2696182, database, tracepoint:syscalls:sys_enter_fdatasync]: 102
+@sync_count[2696184, database, tracepoint:syscalls:sys_enter_fsync]: 109
+@sync_count[2696182, database, tracepoint:syscalls:sys_enter_fsync]: 114
+@sync_count[2696183, database, tracepoint:syscalls:sys_enter_fsync]: 114
+@sync_count[2696184, committer, tracepoint:syscalls:sys_enter_fsync]: 283
+@sync_count[2696182, committer, tracepoint:syscalls:sys_enter_fsync]: 377
+@sync_count[2696183, committer, tracepoint:syscalls:sys_enter_fsync]: 391
+@sync_count[2696184, committer, tracepoint:syscalls:sys_enter_fdatasync]: 554
+@sync_count[2696182, committer, tracepoint:syscalls:sys_enter_fdatasync]: 741
+@sync_count[2696183, committer, tracepoint:syscalls:sys_enter_fdatasync]: 768
+
+@sync_ns[2696184, promoter, tracepoint:syscalls:sys_enter_fsync]: 14029794
+@sync_ns[2696183, promoter, tracepoint:syscalls:sys_enter_fsync]: 22743809
+@sync_ns[2696182, promoter, tracepoint:syscalls:sys_enter_fsync]: 54307109
+@sync_ns[2696182, database, tracepoint:syscalls:sys_enter_fsync]: 177464070
+@sync_ns[2696183, database, tracepoint:syscalls:sys_enter_fsync]: 189369877
+@sync_ns[2696184, database, tracepoint:syscalls:sys_enter_fsync]: 202731625
+@sync_ns[2696183, committer, tracepoint:syscalls:sys_enter_fsync]: 723810414
+@sync_ns[2696183, engine, tracepoint:syscalls:sys_enter_fsync]: 747750007
+@sync_ns[2696182, engine, tracepoint:syscalls:sys_enter_fsync]: 750064840
+@sync_ns[2696182, database, tracepoint:syscalls:sys_enter_fdatasync]: 780693865
+@sync_ns[2696184, engine, tracepoint:syscalls:sys_enter_fsync]: 785381834
+@sync_ns[2696184, database, tracepoint:syscalls:sys_enter_fdatasync]: 1057300595
+@sync_ns[2696183, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 1062198000
+@sync_ns[2696184, committer, tracepoint:syscalls:sys_enter_fsync]: 1143258118
+@sync_ns[2696182, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 1192229804
+@sync_ns[2696182, committer, tracepoint:syscalls:sys_enter_fsync]: 1384412610
+@sync_ns[2696183, database, tracepoint:syscalls:sys_enter_fdatasync]: 3380315654
+@sync_ns[2696182, engine, tracepoint:syscalls:sys_enter_fdatasync]: 3394318734
+@sync_ns[2696183, engine, tracepoint:syscalls:sys_enter_fdatasync]: 3482695042
+@sync_ns[2696184, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 3498927347
+@sync_ns[2696184, committer, tracepoint:syscalls:sys_enter_fdatasync]: 3659098699
+@sync_ns[2696184, engine, tracepoint:syscalls:sys_enter_fdatasync]: 3668544314
+@sync_ns[2696183, committer, tracepoint:syscalls:sys_enter_fdatasync]: 4665018949
+@sync_ns[2696182, committer, tracepoint:syscalls:sys_enter_fdatasync]: 6698836043
+@sync_return[2696184, 0]: 1169
+@sync_return[2696182, 0]: 1459
+@sync_return[2696183, 0]: 1500
+
+@sync_us[2696184, promoter, tracepoint:syscalls:sys_enter_fsync]: 
+[0]                    1 |@@@@@@@@@@@@@                                       |
+[1]                    1 |@@@@@@@@@@@@@                                       |
+[2, 4)                 2 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[256, 512)             1 |@@@@@@@@@@@@@                                       |
+[512, 1K)              2 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[1K, 2K)               2 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[2K, 4K)               0 |                                                    |
+[4K, 8K)               1 |@@@@@@@@@@@@@                                       |
+
+@sync_us[2696182, promoter, tracepoint:syscalls:sys_enter_fsync]: 
+[0]                    1 |@@@@@@@@@@@@@                                       |
+[1]                    3 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@             |
+[2, 4)                 0 |                                                    |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             4 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[256, 512)             0 |                                                    |
+[512, 1K)              2 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[1K, 2K)               1 |@@@@@@@@@@@@@                                       |
+[2K, 4K)               2 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4K, 8K)               0 |                                                    |
+[8K, 16K)              0 |                                                    |
+[16K, 32K)             0 |                                                    |
+[32K, 64K)             1 |@@@@@@@@@@@@@                                       |
+
+@sync_us[2696183, promoter, tracepoint:syscalls:sys_enter_fsync]: 
+[0]                    1 |@@@@@@@@@@                                          |
+[1]                    1 |@@@@@@@@@@                                          |
+[2, 4)                 1 |@@@@@@@@@@                                          |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             5 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[256, 512)             2 |@@@@@@@@@@@@@@@@@@@@                                |
+[512, 1K)              2 |@@@@@@@@@@@@@@@@@@@@                                |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               0 |                                                    |
+[4K, 8K)               1 |@@@@@@@@@@                                          |
+[8K, 16K)              1 |@@@@@@@@@@                                          |
+
+@sync_us[2696184, engine, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)            15 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              3 |@@@@@@@@@@                                          |
+[1K, 2K)               2 |@@@@@@                                              |
+[2K, 4K)               2 |@@@@@@                                              |
+[4K, 8K)               1 |@@@                                                 |
+[8K, 16K)              0 |                                                    |
+[16K, 32K)             2 |@@@@@@                                              |
+[32K, 64K)             1 |@@@                                                 |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           1 |@@@                                                 |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |@@@                                                 |
+[1M, 2M)               0 |                                                    |
+[2M, 4M)               1 |@@@                                                 |
+
+@sync_us[2696184, engine, tracepoint:syscalls:sys_enter_fsync]: 
+[128, 256)             3 |@@@@@@@@                                            |
+[256, 512)            18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              3 |@@@@@@@@                                            |
+[1K, 2K)               1 |@@                                                  |
+[2K, 4K)               1 |@@                                                  |
+[4K, 8K)               0 |                                                    |
+[8K, 16K)              1 |@@                                                  |
+[16K, 32K)             1 |@@                                                  |
+[32K, 64K)             0 |                                                    |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |@@                                                  |
+
+@sync_us[2696182, engine, tracepoint:syscalls:sys_enter_fsync]: 
+[128, 256)             5 |@@@@@@@@@@@@@@                                      |
+[256, 512)            18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              2 |@@@@@                                               |
+[1K, 2K)               1 |@@                                                  |
+[2K, 4K)               1 |@@                                                  |
+[4K, 8K)               0 |                                                    |
+[8K, 16K)              1 |@@                                                  |
+[16K, 32K)             0 |                                                    |
+[32K, 64K)             0 |                                                    |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |@@                                                  |
+
+@sync_us[2696182, engine, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)            17 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              4 |@@@@@@@@@@@@                                        |
+[1K, 2K)               2 |@@@@@@                                              |
+[2K, 4K)               2 |@@@@@@                                              |
+[4K, 8K)               0 |                                                    |
+[8K, 16K)              1 |@@@                                                 |
+[16K, 32K)             0 |                                                    |
+[32K, 64K)             1 |@@@                                                 |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |@@@                                                 |
+[1M, 2M)               0 |                                                    |
+[2M, 4M)               1 |@@@                                                 |
+
+@sync_us[2696183, engine, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)            13 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              3 |@@@@@@@@@@@@                                        |
+[1K, 2K)               7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[2K, 4K)               1 |@@@@                                                |
+[4K, 8K)               1 |@@@@                                                |
+[8K, 16K)              0 |                                                    |
+[16K, 32K)             1 |@@@@                                                |
+[32K, 64K)             1 |@@@@                                                |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |@@@@                                                |
+[1M, 2M)               0 |                                                    |
+[2M, 4M)               1 |@@@@                                                |
+
+@sync_us[2696183, engine, tracepoint:syscalls:sys_enter_fsync]: 
+[128, 256)             4 |@@@@@@@@@@                                          |
+[256, 512)            20 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              2 |@@@@@                                               |
+[1K, 2K)               0 |                                                    |
+[2K, 4K)               0 |                                                    |
+[4K, 8K)               2 |@@@@@                                               |
+[8K, 16K)              0 |                                                    |
+[16K, 32K)             0 |                                                    |
+[32K, 64K)             0 |                                                    |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |@@                                                  |
+
+@sync_us[2696184, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)             4 |@@@@@@@@@@@                                         |
+[512, 1K)              2 |@@@@@                                               |
+[1K, 2K)               3 |@@@@@@@@                                            |
+[2K, 4K)               5 |@@@@@@@@@@@@@@                                      |
+[4K, 8K)              18 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8K, 16K)              6 |@@@@@@@@@@@@@@@@@                                   |
+[16K, 32K)             6 |@@@@@@@@@@@@@@@@@                                   |
+[32K, 64K)             3 |@@@@@@@@                                            |
+[64K, 128K)            3 |@@@@@@@@                                            |
+[128K, 256K)           1 |@@                                                  |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             0 |                                                    |
+[1M, 2M)               0 |                                                    |
+[2M, 4M)               1 |@@                                                  |
+
+@sync_us[2696182, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)             3 |@@@@@@@@                                            |
+[512, 1K)              2 |@@@@@                                               |
+[1K, 2K)               1 |@@                                                  |
+[2K, 4K)               4 |@@@@@@@@@@                                          |
+[4K, 8K)              19 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8K, 16K)              7 |@@@@@@@@@@@@@@@@@@@                                 |
+[16K, 32K)             6 |@@@@@@@@@@@@@@@@                                    |
+[32K, 64K)             6 |@@@@@@@@@@@@@@@@                                    |
+[64K, 128K)            4 |@@@@@@@@@@                                          |
+[128K, 256K)           1 |@@                                                  |
+
+@sync_us[2696183, promoter, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)             4 |@@@@@@@@@@@@@@@@                                    |
+[512, 1K)              1 |@@@@                                                |
+[1K, 2K)               2 |@@@@@@@@                                            |
+[2K, 4K)               7 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@                        |
+[4K, 8K)              13 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[8K, 16K)             10 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@            |
+[16K, 32K)             6 |@@@@@@@@@@@@@@@@@@@@@@@@                            |
+[32K, 64K)             5 |@@@@@@@@@@@@@@@@@@@@                                |
+[64K, 128K)            5 |@@@@@@@@@@@@@@@@@@@@                                |
+
+@sync_us[2696184, database, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)            38 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              5 |@@@@@@                                              |
+[1K, 2K)               3 |@@@@                                                |
+[2K, 4K)              23 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                     |
+[4K, 8K)              11 |@@@@@@@@@@@@@@@                                     |
+[8K, 16K)              8 |@@@@@@@@@@                                          |
+[16K, 32K)             4 |@@@@@                                               |
+[32K, 64K)             3 |@@@@                                                |
+[64K, 128K)            2 |@@                                                  |
+[128K, 256K)           2 |@@                                                  |
+
+@sync_us[2696183, database, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)            33 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              4 |@@@@@@                                              |
+[1K, 2K)              10 |@@@@@@@@@@@@@@@                                     |
+[2K, 4K)              25 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@             |
+[4K, 8K)              16 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[8K, 16K)              4 |@@@@@@                                              |
+[16K, 32K)             5 |@@@@@@@                                             |
+[32K, 64K)             2 |@@@                                                 |
+[64K, 128K)            1 |@                                                   |
+[128K, 256K)           1 |@                                                   |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             0 |                                                    |
+[1M, 2M)               0 |                                                    |
+[2M, 4M)               1 |@                                                   |
+
+@sync_us[2696182, database, tracepoint:syscalls:sys_enter_fdatasync]: 
+[256, 512)            36 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              3 |@@@@                                                |
+[1K, 2K)               6 |@@@@@@@@                                            |
+[2K, 4K)              24 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                  |
+[4K, 8K)              15 |@@@@@@@@@@@@@@@@@@@@@                               |
+[8K, 16K)              5 |@@@@@@@                                             |
+[16K, 32K)             5 |@@@@@@@                                             |
+[32K, 64K)             6 |@@@@@@@@                                            |
+[64K, 128K)            2 |@@                                                  |
+
+@sync_us[2696184, database, tracepoint:syscalls:sys_enter_fsync]: 
+[128, 256)            34 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@               |
+[256, 512)            47 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              5 |@@@@@                                               |
+[1K, 2K)               7 |@@@@@@@                                             |
+[2K, 4K)               5 |@@@@@                                               |
+[4K, 8K)               4 |@@@@                                                |
+[8K, 16K)              4 |@@@@                                                |
+[16K, 32K)             2 |@@                                                  |
+[32K, 64K)             1 |@                                                   |
+
+@sync_us[2696183, database, tracepoint:syscalls:sys_enter_fsync]: 
+[128, 256)            34 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@          |
+[256, 512)            42 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)              5 |@@@@@@                                              |
+[1K, 2K)              12 |@@@@@@@@@@@@@@                                      |
+[2K, 4K)               9 |@@@@@@@@@@@                                         |
+[4K, 8K)               6 |@@@@@@@                                             |
+[8K, 16K)              4 |@@@@                                                |
+[16K, 32K)             2 |@@                                                  |
+
+@sync_us[2696182, database, tracepoint:syscalls:sys_enter_fsync]: 
+[128, 256)            25 |@@@@@@@@@@@@@@@@@@@@@@@@@                           |
+[256, 512)            52 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)             10 |@@@@@@@@@@                                          |
+[1K, 2K)               5 |@@@@@                                               |
+[2K, 4K)              11 |@@@@@@@@@@@                                         |
+[4K, 8K)               6 |@@@@@@                                              |
+[8K, 16K)              3 |@@@                                                 |
+[16K, 32K)             2 |@@                                                  |
+
+@sync_us[2696184, committer, tracepoint:syscalls:sys_enter_fsync]: 
+[0]                    2 |                                                    |
+[1]                    3 |@                                                   |
+[2, 4)                 1 |                                                    |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)            43 |@@@@@@@@@@@@@@                                      |
+[256, 512)           156 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)             28 |@@@@@@@@@                                           |
+[1K, 2K)              19 |@@@@@@                                              |
+[2K, 4K)              16 |@@@@@                                               |
+[4K, 8K)               7 |@@                                                  |
+[8K, 16K)              4 |@                                                   |
+[16K, 32K)             3 |@                                                   |
+[32K, 64K)             0 |                                                    |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |                                                    |
+
+@sync_us[2696182, committer, tracepoint:syscalls:sys_enter_fsync]: 
+[0]                    2 |                                                    |
+[1]                    2 |                                                    |
+[2, 4)                 1 |                                                    |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)            61 |@@@@@@@@@@@@@@@                                     |
+[256, 512)           211 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)             36 |@@@@@@@@                                            |
+[1K, 2K)              19 |@@@@                                                |
+[2K, 4K)              22 |@@@@@                                               |
+[4K, 8K)              11 |@@                                                  |
+[8K, 16K)              5 |@                                                   |
+[16K, 32K)             5 |@                                                   |
+[32K, 64K)             0 |                                                    |
+[64K, 128K)            1 |                                                    |
+[128K, 256K)           0 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |                                                    |
+
+@sync_us[2696183, committer, tracepoint:syscalls:sys_enter_fsync]: 
+[0]                    2 |                                                    |
+[1]                    3 |                                                    |
+[2, 4)                 1 |                                                    |
+[4, 8)                 0 |                                                    |
+[8, 16)                0 |                                                    |
+[16, 32)               0 |                                                    |
+[32, 64)               0 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)            64 |@@@@@@@@@@@@@@@                                     |
+[256, 512)           217 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)             37 |@@@@@@@@                                            |
+[1K, 2K)              22 |@@@@@                                               |
+[2K, 4K)              20 |@@@@                                                |
+[4K, 8K)              17 |@@@@                                                |
+[8K, 16K)              3 |                                                    |
+[16K, 32K)             1 |                                                    |
+[32K, 64K)             3 |                                                    |
+[64K, 128K)            0 |                                                    |
+[128K, 256K)           1 |                                                    |
+
+@sync_us[2696184, committer, tracepoint:syscalls:sys_enter_fdatasync]: 
+[64, 128)              1 |                                                    |
+[128, 256)             5 |@                                                   |
+[256, 512)           202 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)             56 |@@@@@@@@@@@@@@                                      |
+[1K, 2K)              81 |@@@@@@@@@@@@@@@@@@@@                                |
+[2K, 4K)             102 |@@@@@@@@@@@@@@@@@@@@@@@@@@                          |
+[4K, 8K)              52 |@@@@@@@@@@@@@                                       |
+[8K, 16K)             21 |@@@@@                                               |
+[16K, 32K)            12 |@@@                                                 |
+[32K, 64K)            12 |@@@                                                 |
+[64K, 128K)            7 |@                                                   |
+[128K, 256K)           2 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |                                                    |
+
+@sync_us[2696182, committer, tracepoint:syscalls:sys_enter_fdatasync]: 
+[64, 128)              3 |                                                    |
+[128, 256)             0 |                                                    |
+[256, 512)           307 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)             71 |@@@@@@@@@@@@                                        |
+[1K, 2K)             123 |@@@@@@@@@@@@@@@@@@@@                                |
+[2K, 4K)             115 |@@@@@@@@@@@@@@@@@@@                                 |
+[4K, 8K)              49 |@@@@@@@@                                            |
+[8K, 16K)             35 |@@@@@                                               |
+[16K, 32K)            15 |@@                                                  |
+[32K, 64K)            11 |@                                                   |
+[64K, 128K)            7 |@                                                   |
+[128K, 256K)           3 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             1 |                                                    |
+[1M, 2M)               0 |                                                    |
+[2M, 4M)               1 |                                                    |
+
+@sync_us[2696183, committer, tracepoint:syscalls:sys_enter_fdatasync]: 
+[64, 128)              2 |                                                    |
+[128, 256)             4 |                                                    |
+[256, 512)           348 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)             65 |@@@@@@@@@                                           |
+[1K, 2K)             119 |@@@@@@@@@@@@@@@@@                                   |
+[2K, 4K)             107 |@@@@@@@@@@@@@@@                                     |
+[4K, 8K)              64 |@@@@@@@@@                                           |
+[8K, 16K)             25 |@@@                                                 |
+[16K, 32K)            12 |@                                                   |
+[32K, 64K)             9 |@                                                   |
+[64K, 128K)           11 |@                                                   |
+[128K, 256K)           1 |                                                    |
+[256K, 512K)           0 |                                                    |
+[512K, 1M)             0 |                                                    |
+[1M, 2M)               1 |                                                    |
+

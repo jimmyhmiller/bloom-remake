@@ -1,0 +1,21 @@
+program parallel version 1;
+input put(k: u64, v: u64);
+input watch(k: u64);
+input fail(k: u64, divisor: u64);
+table t(k: u64, v: u64) key(k);
+fn work(x: u64) -> u64 {
+    range(0u64, 8u64).map(|i| (i + x) * (i + x)).fold(0u64, |a, v| a + v)
+}
+view calculated(k, r) = put(k, v), let r = work(v);
+view standing(k, r) = t(k, v), let r = work(v);
+view missing(k) = watch(k), not t(k, _);
+view total(r = sum!(v default 0u64)) = put(_, v);
+view guarded(k, r) = fail(k, divisor), divisor != 0u64, let r = 100u64 / divisor;
+view unsafe(k, r) = fail(k, divisor), let r = 100u64 / divisor;
+write: on put(k, v) { upsert t(k, v); }
+
+input pair(k: u64, a: u64, b: u64);
+table left(k: u64, a: u64) key(k);
+table right(k: u64, b: u64) key(k);
+view joined(k, r) = left(k, a), right(k, b), let r = 100u64 / (if a == b { 0u64 } else { 1u64 });
+write_pair: on pair(k, a, b) { upsert left(k, a); upsert right(k, b); }

@@ -1,0 +1,10 @@
+program upsert_boolean version 1;
+input put(a: u64, b: u64, v: Vec<u64>);
+input same(a: u64, b: u64, v: Vec<u64>);
+input allow(a: u64, b: u64);
+input watch(a: u64, b: u64);
+table t(a: u64, b: u64, v: Vec<u64>) key(a, b) while allow(a, b);
+view current(a,b,v) = t(a,b,v);
+view missing(a,b) = watch(a,b), not t(a,b,_);
+write: on put(a,b,v) { upsert t(a,b,v); }
+duplicate: on same(a,b,v) { upsert t(a,b,v); }

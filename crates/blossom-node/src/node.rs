@@ -400,8 +400,13 @@ impl<E: Executor> Node<E> {
                 match src {
                     EventSource::Boot => boot_rel = Some(id),
                     EventSource::Recovered => recovered_rel = Some(id),
-                    // A client link's events are offered by the driver as inputs (docs/design/CLIENTS.md §3).
-                    EventSource::Timer(_) | EventSource::Input | EventSource::Stream(_) | EventSource::Link { .. } => {}
+                    // A client link's events, and a peer's liveness, are offered by the driver as inputs
+                    // (docs/design/CLIENTS.md §3, ARCHITECTURE §5.13).
+                    EventSource::Timer(_)
+                    | EventSource::Input
+                    | EventSource::Stream(_)
+                    | EventSource::Link { .. }
+                    | EventSource::Peer { .. } => {}
                     other => {
                         return Err(blossom_base::unimplemented_error!(
                             "DIST-040",

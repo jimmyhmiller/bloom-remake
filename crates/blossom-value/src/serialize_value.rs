@@ -66,7 +66,7 @@ impl<'a> From<&'a Value> for ValueRef<'a> {
             Value::Int(v) => Self::Int(v),
             Value::F64(v) => Self::F64(v.to_bits()),
             Value::Str(v) => Self::Str(v),
-            Value::Bytes(v) => Self::Bytes(v),
+            Value::Bytes(v) => Self::Bytes(v.shared()),
             Value::Duration(v) => Self::Duration(v),
             Value::Instant(v) => Self::Instant(v),
             Value::Mod(v) => Self::Mod(v),

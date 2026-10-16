@@ -195,6 +195,58 @@ fn an_amendment_joins_the_newest_version() {
 }
 
 #[test]
+fn seeks_find_historical_versions_across_block_boundaries() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let dir = Path::new("/db");
+    let options = LsmOptions {
+        block_bytes: 40,
+        history: 100,
+        ..opts()
+    };
+    let lsm = Lsm::open(fs.clone(), dir, options).unwrap();
+    // All versions of b go into one SSTable, spanning several blocks, between neighboring keys. Its oldest
+    // version is absent; the alternating puts/deletes distinguish each as-of seek from a newest-version lookup.
+    for v in 1..=24 {
+        lsm.apply(
+            v,
+            v,
+            [
+                (b"a".to_vec(), Op::Put),
+                (b"b".to_vec(), if v % 2 == 0 { Op::Put } else { Op::Del }),
+                (b"c".to_vec(), Op::Put),
+            ],
+        )
+        .unwrap();
+    }
+    for v in 0..=24 {
+        assert_eq!(lsm.get(b"b", v).unwrap(), v > 0 && v % 2 == 0, "version {v}");
+        assert!(!lsm.get(b"bb", v).unwrap());
+        let expected = if v > 0 && v % 2 == 0 {
+            vec![b"b".to_vec()]
+        } else {
+            vec![]
+        };
+        assert_eq!(lsm.scan_range(b"b", Some(b"c"), v).unwrap(), expected);
+        assert_eq!(paged(&lsm, b"b", Some(b"c"), v, 1), expected);
+    }
+    lsm.flush().unwrap();
+    assert!(lsm.info().unwrap().tables[0].blocks > 3);
+    drop(lsm);
+    let lsm = Lsm::open(fs, dir, options).unwrap();
+    for v in 0..=24 {
+        assert_eq!(lsm.get(b"b", v).unwrap(), v > 0 && v % 2 == 0, "version {v}");
+        assert!(!lsm.get(b"bb", v).unwrap());
+        let expected = if v > 0 && v % 2 == 0 {
+            vec![b"b".to_vec()]
+        } else {
+            vec![]
+        };
+        assert_eq!(lsm.scan_range(b"b", Some(b"c"), v).unwrap(), expected);
+        assert_eq!(paged(&lsm, b"b", Some(b"c"), v, 1), expected);
+    }
+}
+
+#[test]
 fn reads_as_of_every_version_kept_agree_with_the_model() {
     for seed in 0..6 {
         let fs = SimFs::default();
@@ -384,4 +436,88 @@ fn the_lsm_and_the_memory_tree_hold_to_the_tree_model() {
         Ok(Box::new(blossom_store::lsm::Lsm::open(fs.clone(), dir, opts)?))
     };
     tree_suite(&lsm, Some(&reopen)).unwrap();
+}
+
+#[test]
+fn point_reads_choose_newest_eligible_version_across_memory_tables_and_amendments() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let options = LsmOptions { history: 100, ..opts() };
+    let lsm = Lsm::open(fs, Path::new("/version-pruning"), options).unwrap();
+    for v in 1..=12 {
+        lsm.apply(v, v, [(b"key".to_vec(), if v % 2 == 0 { Op::Del } else { Op::Put })])
+            .unwrap();
+        if v % 3 == 0 {
+            lsm.flush().unwrap();
+        }
+        for at in 0..=v {
+            assert_eq!(lsm.get(b"key", at).unwrap(), at % 2 == 1);
+            assert!(!lsm.get(b"absent", at).unwrap());
+        }
+    }
+    // Amendments introduce previously unused keys at the current version after its flush.
+    lsm.amend([(b"derived".to_vec(), Op::Put)]).unwrap();
+    assert!(lsm.get(b"derived", 12).unwrap());
+    assert!(!lsm.get(b"derived", 11).unwrap());
+    assert!(!lsm.get(b"key", 12).unwrap());
+    assert!(lsm.get(b"key", 11).unwrap());
+    lsm.flush().unwrap();
+    while lsm.compact().unwrap() {}
+    for at in 0..=12 {
+        assert_eq!(lsm.get(b"key", at).unwrap(), at % 2 == 1);
+        assert_eq!(lsm.get(b"derived", at).unwrap(), at == 12);
+    }
+}
+
+#[test]
+fn snapshot_pages_skip_history_across_block_boundaries_without_skipping_keys() {
+    let fs: Arc<dyn Vfs> = Arc::new(SimFs::default());
+    let options = LsmOptions {
+        history: 1000,
+        block_bytes: 64,
+        ..opts()
+    };
+    let lsm = Lsm::open(fs, Path::new("/snapshot-pages"), options).unwrap();
+    for v in 1..=120 {
+        let mut edits = vec![(b"a".to_vec(), if v % 2 == 0 { Op::Put } else { Op::Del })];
+        if v % 3 == 0 {
+            edits.push((b"b".to_vec(), if v % 6 == 0 { Op::Put } else { Op::Del }));
+        }
+        if v == 75 {
+            edits.push((b"c".to_vec(), Op::Put));
+        }
+        lsm.apply(v, v, edits).unwrap();
+        if v % 40 == 0 {
+            lsm.flush().unwrap();
+        }
+    }
+    for compacted in [false, true] {
+        if compacted {
+            while lsm.compact().unwrap() {}
+        }
+        for at in 0..=120 {
+            let mut expected = Vec::new();
+            if at > 0 && at % 2 == 0 {
+                expected.push(b"a".to_vec());
+            }
+            if at >= 3 && (at / 3) % 2 == 0 {
+                expected.push(b"b".to_vec());
+            }
+            if at >= 75 {
+                expected.push(b"c".to_vec());
+            }
+            assert_eq!(lsm.scan(b"", at).unwrap(), expected);
+            for size in 1..=3 {
+                let mut rows = Vec::new();
+                let mut start = Vec::new();
+                loop {
+                    let page = lsm.scan_page(&start, None, at, size).unwrap();
+                    rows.extend(page.keys);
+                    let Some(next) = page.next else { break };
+                    assert!(next > start);
+                    start = next;
+                }
+                assert_eq!(rows, expected, "snapshot {at}, page size {size}, compacted {compacted}");
+            }
+        }
+    }
 }

@@ -80,6 +80,12 @@ impl Recording {
 }
 
 impl Executor for Recording {
+    fn measure_plan(&mut self, on: bool) -> bool {
+        self.inner.measure_plan(on)
+    }
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        self.inner.plan_report()
+    }
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         self.boot(&carried)?;
         self.inner.reset(carried)

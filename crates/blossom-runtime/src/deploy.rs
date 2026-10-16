@@ -27,6 +27,9 @@
 //! [storage]
 //! data_dir = "data"               # each node's store is <data_dir>/<node name>, relative to this file
 //! checkpoint_wal_bytes = 67108864
+//! eval_workers = 1                  # bounded read-only evaluation pool; writes and commit remain coordinated
+//! hot_rows = 65536                  # recent-probe rows across the engine's tiered stores
+//! cache_bytes = 33554432      # decoded database block retention; zero disables it
 //! history_ticks = 65536             # how far back a database query may read (docs/design/DATABASE.md §4)
 //! tiered = true                   # durable tables read from the database, so state may outgrow memory (§7); false:
 //!                                 # every table in memory (faster while it fits), the database still the durable store
@@ -35,6 +38,11 @@
 //! [web]                           # optional: pages served with `blossom run --web` (docs/design/CLIENTS.md §3a, §4)
 //! link = "http"                   # a page's link: "http" (plain requests, the default) or "websocket"
 //! style = "app.css"               # optional: the page's stylesheet, relative to this file (`/blossom/style.css`)
+//!
+//! [liveness]                      # optional (ARCHITECTURE §5.13; defaults in liveness::LivenessConfig)
+//! period_ms = 50                  # how often a node tells each peer it is alive
+//! session_ms = 500                # how long a peer counts as alive after the last it heard (`R.up` / `R.down`)
+//! stuck_ms = 10000                # how long one tick may run before the node stops saying it is alive
 //!
 //! [stream_limits]                 # optional, in bytes (FOREIGN-PROTOCOLS §1.2; defaults in streams::StreamLimits)
 //! max_stream_bytes = 1048576      # one connection's `data` in one tick
@@ -80,7 +88,18 @@ struct RawSpec {
     #[serde(default)]
     stream_limits: RawStreamLimits,
     #[serde(default)]
+    liveness: RawLiveness,
+    #[serde(default)]
     web: RawWeb,
+}
+
+/// `[liveness]`: how often nodes tell their peers they are alive, and for how long that holds.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLiveness {
+    period_ms: Option<u64>,
+    session_ms: Option<u64>,
+    stuck_ms: Option<u64>,
 }
 
 /// `[web]`: how the pages a node serves reach it.
@@ -139,6 +158,17 @@ struct RawStorage {
     checkpoint_wal_bytes: Option<u64>,
     history_ticks: Option<u64>,
     tiered: Option<bool>,
+    hot_rows: Option<usize>,
+    eval_workers: Option<usize>,
+    map_cache_rows: Option<usize>,
+    map_cache_joins: Option<bool>,
+    lazy_indexes: Option<bool>,
+    pipeline_batches: Option<bool>,
+    infer_keys: Option<bool>,
+    compiled_joins: Option<bool>,
+    packed_indexes: Option<bool>,
+    fuse_relations: Option<bool>,
+    cache_bytes: Option<usize>,
     tail_certification: Option<String>,
 }
 
@@ -195,8 +225,29 @@ pub struct DeploymentSpec {
     /// Whether the engine reads durable tables from the database (docs/design/DATABASE.md §7), or keeps them all in
     /// memory.
     pub tiered: bool,
+    /// Recent-probe row budget across the engine's tiered stores (`None`: engine default).
+    pub hot_rows: Option<usize>,
+    /// Bounded read-only engine valuation workers; state writes and commit remain coordinated.
+    pub eval_workers: usize,
+    /// Experimental retained pure-map input/output row budget; zero disables.
+    pub map_cache_rows: usize,
+    /// Track retained output bags through other pure join dependency changes.
+    pub map_cache_joins: bool,
+    /// Cost join candidates without speculatively constructing indexes.
+    pub lazy_indexes: bool,
+    /// Share consolidated output bags across single-writer pipeline stages.
+    pub pipeline_batches: bool,
+    /// Infer compact physical keys for deterministic derived relations.
+    pub infer_keys: bool,
+    pub compiled_joins: bool,
+    pub packed_indexes: bool,
+    pub fuse_relations: bool,
+    /// Database decoded-block retention budget (`None`: LSM default; zero disables retention).
+    pub cache_bytes: Option<usize>,
     /// The byte limits of the nodes' streams (`[stream_limits]`).
     pub stream_limits: crate::streams::StreamLimits,
+    /// How nodes keep their views of their peers' liveness (`[liveness]`).
+    pub liveness: crate::liveness::LivenessConfig,
     /// How new stores certify their WAL tail (an existing store keeps the one it was created with, and must match).
     pub tail_certification: blossom_store::Certification,
     /// The link the pages a node serves use (`[web] link`): plain requests unless the deployment says `websocket`.
@@ -230,6 +281,12 @@ impl DeploymentSpec {
                 "format",
                 format!("{} is not a format this build reads (1)", raw.format),
             ));
+        }
+        if raw.storage.eval_workers == Some(0) {
+            return Err(invalid("storage.eval_workers", "must be positive"));
+        }
+        if raw.storage.hot_rows == Some(0) {
+            return Err(invalid("storage.hot_rows", "must be positive"));
         }
         let security = match raw.security.mode.as_str() {
             "insecure-dev" => SecurityMode::InsecureDev,
@@ -320,6 +377,27 @@ impl DeploymentSpec {
             backlog_bytes: positive("backlog_bytes", l.backlog_bytes, d.backlog_bytes)?,
             write_queue_bytes: positive("write_queue_bytes", l.write_queue_bytes, d.write_queue_bytes)?,
         };
+        let dl = crate::liveness::LivenessConfig::default();
+        let period = match raw.liveness.period_ms {
+            Some(0) => return Err(invalid("liveness.period_ms", "must be at least 1".to_owned())),
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => dl.period,
+        };
+        let session = match raw.liveness.session_ms {
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => dl.session,
+        };
+        if session < period * 2 {
+            return Err(invalid(
+                "liveness.session_ms",
+                "must be at least two periods (a peer would be taken down between two of its words)".to_owned(),
+            ));
+        }
+        let stuck = match raw.liveness.stuck_ms {
+            Some(ms) => std::time::Duration::from_millis(ms),
+            None => dl.stuck,
+        };
+        let liveness = crate::liveness::LivenessConfig { period, session, stuck };
         let web_link = match raw.web.link.as_deref() {
             None => crate::web::Transport::default(),
             Some(l) => crate::web::Transport::parse(l)
@@ -349,8 +427,20 @@ impl DeploymentSpec {
             checkpoint_wal_bytes: raw.storage.checkpoint_wal_bytes.unwrap_or(256 * 1024 * 1024),
             history_ticks: raw.storage.history_ticks.unwrap_or(65_536),
             tiered: raw.storage.tiered.unwrap_or(true),
+            hot_rows: raw.storage.hot_rows,
+            eval_workers: raw.storage.eval_workers.unwrap_or(1),
+            map_cache_rows: raw.storage.map_cache_rows.unwrap_or(0),
+            map_cache_joins: raw.storage.map_cache_joins.unwrap_or(false),
+            lazy_indexes: raw.storage.lazy_indexes.unwrap_or(false),
+            pipeline_batches: raw.storage.pipeline_batches.unwrap_or(false),
+            infer_keys: raw.storage.infer_keys.unwrap_or(false),
+            compiled_joins: raw.storage.compiled_joins.unwrap_or(false),
+            packed_indexes: raw.storage.packed_indexes.unwrap_or(false),
+            fuse_relations: raw.storage.fuse_relations.unwrap_or(false),
+            cache_bytes: raw.storage.cache_bytes,
             tail_certification,
             stream_limits,
+            liveness,
             web_link,
             web_style,
         })

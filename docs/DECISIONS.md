@@ -218,3 +218,12 @@ question tool, the user chose:
   Blossom** over TCP, checked by LDFI and a linearizability history checker under `kill -9` and partitions.
 - Speed: "Since I only have an interpreter, I just want you to compare it against etcd" — no fixed target; run the
   same workload against etcd on the same machine and report both. Recorded in docs/design/SLICES.md.
+
+## Kafka performance work (2026-10-13)
+
+- **Value API amendment (§1.6, API_VERSION 2):** `Value::Bytes(BytesValue)` shares immutable BLAKE3-256 hash material
+  for large immutable payloads, reducing repeated relation hashing. Exact equality, lexicographic canonical order,
+  serialized bytes and typed fingerprints remain unchanged. No global cache; lifetime follows live values.
+- **Active user goal:** reach 25% higher throughput than Kafka with the same workload, resources and strict
+  durability, verified by a paired soak with kill/restart and full acknowledged-record verification. The earlier
+  50% target is superseded.

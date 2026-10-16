@@ -132,6 +132,10 @@ pub enum Origin<'r> {
     /// A stream event (FOREIGN-PROTOCOLS §1): faults can reset a connection (a lost message, a crash) or fail a
     /// dial, and new requests to the host (writes, closes, dials) make new events.
     Stream,
+    /// A peer's liveness (`R.up(p, i)` if `up`, else `R.down(p)`; ARCHITECTURE §5.13): a crash of `p` raises its
+    /// `down` at the others in the crash's tick, and a restart raises `up`s (of the restarted node at the others, and
+    /// of every live peer at it), in the restart's tick.
+    Peer { up: bool },
 }
 
 /// A place and an interned row pattern: what an appearance or a removal is asked about.
@@ -1279,7 +1283,12 @@ impl<'a> Encoder<'a> {
         // Under the frozen crash view, a tuple a node held before some tick stays if the node crashes at that tick.
         let frozen = match (&origin, loc) {
             (
-                Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream,
+                Origin::Input
+                | Origin::Rules { .. }
+                | Origin::Restart
+                | Origin::Timer { .. }
+                | Origin::Stream
+                | Origin::Peer { .. },
                 Loc::Node(n),
             ) if self.frozen && space == Space::Protocol => self.frozen_appear(rel, n, tick, pat)?,
             _ => Hazard::False,
@@ -1343,6 +1352,30 @@ impl<'a> Encoder<'a> {
                 Loc::Node(n) => self.stream_appear(n, tick),
                 _ => Err(internal_error!("a stream event outside a node").into()),
             },
+            Origin::Peer { up } => {
+                let Loc::Node(n) = loc else {
+                    return Err(internal_error!("a peer's liveness event outside a node").into());
+                };
+                let peers: Vec<NodeId> = match crashed_node(&self.pats.get(pat)?)? {
+                    Some(p) => vec![p],
+                    None => (0..self.spec.nodes).map(NodeId).collect(),
+                };
+                let mut options = Vec::new();
+                for p in peers {
+                    if up {
+                        // The peer's restart raises its `up` here; this node's own restart raises every live peer's.
+                        if !self.seed_crashes.contains_key(&p) {
+                            options.push(self.atoms.restart_at(p, tick));
+                        }
+                    } else if p != n {
+                        options.push(self.crash_appears(p, Some(tick))?);
+                    }
+                }
+                if up && !self.seed_crashes.contains_key(&n) {
+                    options.push(self.atoms.restart_at(n, tick));
+                }
+                self.or(options)
+            }
             Origin::Timer { guard } => {
                 let Loc::Node(n) = loc else {
                     return Err(internal_error!("a timer firing outside a node").into());
@@ -1859,7 +1892,12 @@ impl<'a> Encoder<'a> {
                 let (node_loc, rest) = self.split(pat)?;
                 self.exists(Space::Protocol, protocol, node_loc, at.unwrap_or(tick), rest)
             }
-            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream => {
+            Origin::Input
+            | Origin::Rules { .. }
+            | Origin::Restart
+            | Origin::Timer { .. }
+            | Origin::Stream
+            | Origin::Peer { .. } => {
                 let nodes: Vec<Option<NodeId>> = match loc {
                     Loc::Node(n) => vec![Some(n)],
                     Loc::Global => vec![None],
@@ -1910,7 +1948,12 @@ impl<'a> Encoder<'a> {
             }
             // A crashed node stays crashed in every superset of the run's faults.
             Origin::Crashed => return Ok(Hazard::False),
-            Origin::Input | Origin::Rules { .. } | Origin::Restart | Origin::Timer { .. } | Origin::Stream => {}
+            Origin::Input
+            | Origin::Rules { .. }
+            | Origin::Restart
+            | Origin::Timer { .. }
+            | Origin::Stream
+            | Origin::Peer { .. } => {}
         }
         if loc == Loc::AnyNode {
             let mut options = Vec::new();

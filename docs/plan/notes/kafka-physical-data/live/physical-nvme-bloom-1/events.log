@@ -1,0 +1,15 @@
+1 1792117085.085656615 up blossom
+13 1792117097.770026723 topics created: 10 x 12
+13 1792117097.775746253 max: 4 producers unthrottled for 60 s
+80 1792117164.997241102 max done
+88 1792117172.534086570 drained (lag 0)
+88 1792117172.536872296 fixed: 2000 records/s for 60 s
+109 1792117193.910746401 killed broker 1 (kill -9)
+119 1792117203.923072997 restarted broker 1
+149 1792117233.369167544 fixed done
+157 1792117241.046912521 drained (lag 0)
+160 1792117244.225903652 catchup: a new group of 4 reads 1413232 records
+173 1792117257.161166407 catchup done: 1413232 records in 12.2 s
+173 1792117257.164624611 verify
+177 1792117261.811061632 verify: # verify OK acked=1413232 lost=0 misplaced=0 duplicates=0 present_unacknowledged=0 records=1413232 foreign=0 read_seconds=4.3
+178 1792117262.125510895 done: /mnt/data/bloom-physical-results/physical-nvme-bloom-1

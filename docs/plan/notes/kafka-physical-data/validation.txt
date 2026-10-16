@@ -1,0 +1,39 @@
+Validation record for kafka-physical-engine
+
+All local Cargo commands used CARGO_TARGET_DIR=../kafka-execution/target.
+
+cargo test --workspace
+  849 passed, 75 ignored; one Bloom-source formatting failure.
+  Failure: examples/kafka/fetch_node.bls was not formatted.
+  Fixed using blossom fmt; targeted repository_sources_are_formatted test passes.
+  The package failure stopped the workspace runner; remaining packages were run separately.
+
+cargo test -p blossom-testkit -p blossom-trace -p blossom-value -p blossom-verify -p blossom-web -p blossom-wire -p xtask
+  133 passed, no failures.
+cargo test -p blossom-sys-boom2 -p blossom-sys-boomfs -p blossom-sys-boommr -p blossom-sys-commit -p blossom-sys-isrlog -p blossom-sys-kvs -p blossom-sys-lakehouse -p blossom-sys-paxos -p blossom-sys-raft -p blossom-sys-tide -p codegen-corpus
+  Completed successfully (these targets contain no tests).
+cargo test --workspace --doc
+  Completed successfully, 3 tests passed.
+
+Latest changes after the initial workspace build:
+cargo test -p blossom-integration-tests --test engine_compiled --test engine_planner
+  18 passed.
+cargo test -p blossom-store --test lsm
+  10 passed.
+cargo test -p blossom-store --lib
+  42 passed, including version-history merging and cross-thread directory-lock leases.
+cargo test -p blossom-integration-tests --test runtime_server --test runtime_streams --test node_blobs
+  22 passed; server/stream 14 tests rerun after writer leases, passed.
+Metadata persistence ordering/failure tests: 2 passed.
+Kafka Fetch and read-after-ack: 2 passed.
+
+cargo clippy -p blossom-engine -p blossom-runtime -p blossom-store -p blossom-sim -p blossom-value --all-targets -- -D warnings
+  Passed; runtime/store rerun after lock changes also passed.
+cargo fmt --all --check
+  Passed.
+git diff --check
+  Passed.
+
+Runtime correctness evidence is recorded separately with each benchmark's complete
+kill/restart, drain, catchup and exact-record verification. The disk-full control is
+explicitly invalid and is not counted as a passed correctness or performance run.

@@ -1,0 +1,12 @@
+program upsert_composite_type version 1;
+struct Group { topic: Bytes, part: i32 }
+input put_t(g: (Bytes, i32), v: Vec<u64>);
+input put_s(g: Group, v: Vec<u64>);
+input watch(g: (Bytes, i32));
+table tuples(g: (Bytes, i32), v: Vec<u64>) key(g);
+table structs(g: Group, v: Vec<u64>) key(g);
+view tuple_rows(g,v) = tuples(g,v);
+view struct_rows(g,v) = structs(g,v);
+view missing(g) = watch(g), not tuples(g,_);
+write_t: on put_t(g,v) { upsert tuples(g,v); }
+write_s: on put_s(g,v) { upsert structs(g,v); }

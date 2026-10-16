@@ -68,6 +68,13 @@ pub(crate) fn bug(msg: String) -> ExprError {
 }
 
 /// What an expression reads besides its variables: the program, the node and the tick.
+type BlobMap = BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>;
+
+pub(crate) enum NewBlobs<'a> {
+    Mutable(&'a std::cell::RefCell<BlobMap>),
+    Frozen(&'a BlobMap),
+}
+
 pub(crate) struct Ctx<'a> {
     pub program: &'a Program,
     pub node: NodeId,
@@ -86,7 +93,7 @@ pub(crate) struct Ctx<'a> {
     /// The bytes of blobs created before this tick.
     pub blobs: &'a dyn blossom_value::BlobSource,
     /// The blobs this tick created, with their bytes.
-    pub new_blobs: &'a std::cell::RefCell<BTreeMap<blossom_value::BlobRef, std::sync::Arc<[u8]>>>,
+    pub new_blobs: NewBlobs<'a>,
     /// The earliest later instant at which a comparison with `now()` evaluated so far would come out the other way
     /// (`Plan::skip`: a rule that reads the time only so is not evaluated again before then, if nothing it reads
     /// changes).
@@ -97,10 +104,22 @@ pub(crate) struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    pub(crate) fn create_blob(&self, r: blossom_value::BlobRef, bytes: std::sync::Arc<[u8]>) -> ExprResult<()> {
+        let NewBlobs::Mutable(blobs) = &self.new_blobs else {
+            return Err(bug("blob creation in read-only evaluation".into()));
+        };
+        blobs.borrow_mut().entry(r).or_insert(bytes);
+        Ok(())
+    }
+
     /// The bytes of `b`: created this tick, or before it.
     pub(crate) fn blob(&self, b: &blossom_value::BlobRef) -> Option<std::sync::Arc<[u8]>> {
-        if let Some(x) = self.new_blobs.borrow().get(b) {
-            return Some(x.clone());
+        let created = match &self.new_blobs {
+            NewBlobs::Mutable(blobs) => blobs.borrow().get(b).cloned(),
+            NewBlobs::Frozen(blobs) => blobs.get(b).cloned(),
+        };
+        if created.is_some() {
+            return created;
         }
         self.blobs.get(b)
     }

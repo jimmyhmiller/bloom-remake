@@ -44,6 +44,14 @@ impl<E: Evaluator + ?Sized> Evaluator for &E {
 
 /// A stateful evaluator: what a node runs.
 pub trait Executor: Send {
+    /// Enable optional offline physical-plan measurement.
+    fn measure_plan(&mut self, _on: bool) -> bool {
+        false
+    }
+    /// Actual executor plan, when inspection is supported.
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        None
+    }
     /// Starts from `carried` (at boot: the recovered durable state). The next step continues from it.
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError>;
     /// Starts from the durable tables of `cold` (the node's database, at its newest version) and the volatile rows
@@ -200,6 +208,12 @@ impl<E: Evaluator> Executor for OracleExecutor<E> {
 }
 
 impl<X: Executor + ?Sized> Executor for Box<X> {
+    fn measure_plan(&mut self, on: bool) -> bool {
+        (**self).measure_plan(on)
+    }
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        (**self).plan_report()
+    }
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         (**self).reset(carried)
     }
@@ -254,6 +268,13 @@ impl<X: Executor + ?Sized> Executor for Box<X> {
 }
 
 impl Executor for blossom_engine::Engine {
+    fn measure_plan(&mut self, on: bool) -> bool {
+        blossom_engine::Engine::measure_plan(self, on);
+        true
+    }
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        Some(blossom_engine::Engine::plan_report(self))
+    }
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         blossom_engine::Engine::reset(self, carried)
     }
@@ -449,9 +470,63 @@ impl Executors {
         self.backend
     }
 
-    /// The engines keep `rows` rows of each tiered table's recent probes (`EngineConfig::hot_rows`).
+    /// The engines keep `rows` rows of recent probes across their tiered stores (`EngineConfig::hot_rows`).
     pub fn with_hot_rows(mut self, rows: usize) -> Executors {
         self.engine.hot_rows = Some(rows);
+        self
+    }
+
+    /// Set the bounded read-only evaluation pool (one worker keeps serial evaluation).
+    pub fn with_workers(mut self, workers: usize) -> Executors {
+        self.engine.workers = workers;
+        self
+    }
+
+    /// Set the global retained-input/output row budget for pure differential maps.
+    pub fn with_map_cache_rows(mut self, rows: usize) -> Executors {
+        self.engine.map_cache_rows = rows;
+        self
+    }
+
+    /// Extend retained maps to track pure join outputs.
+    pub fn with_map_cache_joins(mut self, enabled: bool) -> Executors {
+        self.engine.map_cache_joins = enabled;
+        self
+    }
+
+    /// Keep cardinality estimation separate from physical index construction.
+    pub fn with_lazy_indexes(mut self, enabled: bool) -> Executors {
+        self.engine.lazy_indexes = enabled;
+        self
+    }
+
+    /// Let single-writer pipeline stages own consolidated result bags directly.
+    pub fn with_pipeline_batches(mut self, enabled: bool) -> Executors {
+        self.engine.pipeline_batches = enabled;
+        self
+    }
+
+    /// Fuse proven lossless transient relations into pure consumers.
+    pub fn with_fused_relations(mut self, enabled: bool) -> Executors {
+        self.engine.fuse_relations = enabled;
+        self
+    }
+
+    /// Use schema-compiled equality arrangements.
+    pub fn with_packed_indexes(mut self, enabled: bool) -> Executors {
+        self.engine.packed_indexes = enabled;
+        self
+    }
+
+    /// Compile pure relational terms to source-column kernels.
+    pub fn with_compiled_joins(mut self, enabled: bool) -> Executors {
+        self.engine.compiled_joins = enabled;
+        self
+    }
+
+    /// Infer compact physical keys for deterministic derived relations.
+    pub fn with_inferred_keys(mut self, enabled: bool) -> Executors {
+        self.engine.infer_keys = enabled;
         self
     }
 
@@ -568,6 +643,13 @@ impl CheckedExecutor {
 }
 
 impl Executor for CheckedExecutor {
+    fn measure_plan(&mut self, on: bool) -> bool {
+        self.engine.measure_plan(on);
+        true
+    }
+    fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        Some(self.engine.plan_report())
+    }
     fn reset(&mut self, carried: Instance) -> Result<(), EvalError> {
         self.oracle.reset(carried.clone())?;
         self.engine.reset(carried)

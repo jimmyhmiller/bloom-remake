@@ -142,8 +142,11 @@ Moving durable relations onto the database, so a node's durable state may outgro
 5. **Lattice tables** keep their merged cells in the database and their live contributions in `hot` (a cell's carried
    row is one contribution).
 6. **Blob counts** (FOREIGN-PROTOCOLS §5) move to a keyspace of their own, kept with every apply.
-7. **A block cache**: decoded SSTable blocks in a bounded LRU (`storage.cache_bytes`), so a node's working set stays
-   in memory and the rest is read on demand.
+7. **A block cache**: decoded SSTable blocks in a bounded LRU (`storage.cache_bytes`, default 32 MiB; zero
+   disables retention), so a node's working set stays in memory and the rest is read on demand. The budget
+   charges entry-vector capacity, key-vector capacities and the Vec header. It excludes allocator, Arc and
+   cache-index overhead and blocks pinned by active readers; it is not an RSS limit. The same deployment
+   setting applies to ordinary nodes and each keyed member's database.
 8. **Recovery and checkpoints.** A node boots on its database (the WAL after the database's flushed tick applied
    to it); it loads no image. Checkpoints retire: the WAL truncates behind the database alone, and blob collection
    anchors to its flushes.
@@ -183,8 +186,12 @@ Moving durable relations onto the database, so a node's durable state may outgro
 - *The hot tier.* A row's key is the whole row, so a table updated in place leaves a delete and a new key per
   update under the same prefix, and the history the tree keeps (`storage.history_ticks`) leaves them there: a probe
   of the tree walks them. Each tiered table keeps the answers to its recent probes (the rows with given values in
-  given columns, sorted; whether a row is there) in a hot tier bounded in rows (`EngineConfig::hot_rows`, 16384 by
-  default), kept equal to the database's newest version: an overlay entry the database catches up with is applied
+  given columns, sorted; whether a row is there) in a hot tier whose row budget is shared across the engine's
+  tiered stores
+  (`storage.hot_rows`, passed through `EngineConfig::hot_rows`, 65536 by default). The deployment value
+  must be positive; omitting it keeps the engine default. The same budget also bounds cached answer entries and large-prefix markers, so empty answers
+  participate in eviction. This is a row/entry budget, not a byte limit. The answers are
+  kept equal to the database's newest version: an overlay entry the database catches up with is applied
   to them, not dropped, so a probe asked again never reads the tree. A range probe on the column after a leading
   run is cut from its prefix's kept rows by binary search; a prefix too large to keep is known as such, and its
   ranges read the tree. The overlay is indexed by the columns probes ask for, so a probe's correction costs the

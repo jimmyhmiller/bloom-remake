@@ -74,6 +74,8 @@ pub(crate) struct Stores {
     /// The slots written since `clear_deltas`, and a flag per slot.
     touched: Vec<usize>,
     flags: Vec<bool>,
+    /// Read-only identity relations with no physical support/index maintenance of their own.
+    aliases: Vec<Option<StoreKey>>,
 }
 
 impl Stores {
@@ -94,12 +96,44 @@ impl Stores {
         }
     }
 
+    pub(crate) fn physical(&self, mut key: StoreKey) -> StoreKey {
+        while let Some(Some(source)) = self.aliases.get(key.slot()) {
+            key = *source;
+        }
+        key
+    }
+
+    /// Install a proven acyclic, single-writer identity relation. Only its reads and index setup alias;
+    /// the defining rule and tick-local clearing are omitted by the planner.
+    pub fn alias(&mut self, key: StoreKey, source: StoreKey) -> Result<(), EvalError> {
+        let source = self.physical(source);
+        if source == key {
+            return Err(internal_error!("cyclic store alias {key:?}").into());
+        }
+        if self.aliases.len() <= key.slot() {
+            self.aliases.resize(key.slot() + 1, None);
+        }
+        let slot = self
+            .aliases
+            .get_mut(key.slot())
+            .ok_or_else(|| internal_error!("missing alias slot {key:?}"))?;
+        *slot = Some(source);
+        Ok(())
+    }
+
+    pub fn is_alias(&self, key: StoreKey) -> bool {
+        self.aliases.get(key.slot()).is_some_and(Option::is_some)
+    }
+
     pub fn get(&self, key: &StoreKey) -> Option<&Store> {
-        self.slots.get(key.slot()).and_then(Option::as_ref).map(|(_, s)| s)
+        self.slots
+            .get(self.physical(*key).slot())
+            .and_then(Option::as_ref)
+            .map(|(_, s)| s)
     }
 
     pub fn get_mut(&mut self, key: &StoreKey) -> Option<&mut Store> {
-        let i = key.slot();
+        let i = self.physical(*key).slot();
         self.touch(i);
         self.slots.get_mut(i).and_then(Option::as_mut).map(|(_, s)| s)
     }
@@ -119,7 +153,7 @@ impl Stores {
     /// Whether the store at `key` changed this tick (`Store::changed`); a store not written since the tick began
     /// did not, and is not read.
     pub fn changed(&self, key: &StoreKey) -> bool {
-        let i = key.slot();
+        let i = self.physical(*key).slot();
         self.flags.get(i).copied().unwrap_or(false) && self.get(key).is_some_and(Store::changed)
     }
 
@@ -137,11 +171,22 @@ impl Stores {
 
     /// Every store with its key.
     pub fn iter(&self) -> impl Iterator<Item = (StoreKey, &Store)> {
-        self.slots.iter().flatten().map(|(k, s)| (*k, s))
+        self.slots
+            .iter()
+            .flatten()
+            .filter_map(|(k, _)| self.get(k).map(|s| (*k, s)))
+    }
+
+    pub fn physical_iter(&self) -> impl Iterator<Item = (StoreKey, &Store)> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|(k, _)| !self.is_alias(*k))
+            .map(|(k, s)| (*k, s))
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Store> {
-        self.slots.iter().flatten().map(|(_, s)| s)
+        self.physical_iter().map(|(_, s)| s)
     }
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Store> {
@@ -212,6 +257,7 @@ pub(crate) enum Regime {
 /// A rule's plan.
 #[derive(Clone, Debug)]
 pub(crate) struct Plan {
+    pub compiled: bool,
     pub rule: RuleId,
     pub nvars: usize,
     /// The positive atoms, by literal index.
@@ -231,6 +277,7 @@ pub(crate) struct Plan {
     pub regime: Regime,
     /// When the rule only copies one atom's rows into its head: how, column by column.
     pub copy: Option<CopyPlan>,
+    pub upsert_delete: Option<crate::upsert::UpsertDelete>,
     /// A re-evaluated rule: when it may be left alone.
     pub skip: Skip,
     /// When the rule is a table's frame (`Persistence::Frame`): the stores its native operator reads.
@@ -300,6 +347,7 @@ pub(crate) struct CopyPlan {
     cols: Vec<ColCheck>,
     /// Where each head column comes from.
     head: Vec<HeadSrc>,
+    identity: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -348,11 +396,16 @@ impl CopyPlan {
                 _ => return None,
             });
         }
-        Some(CopyPlan { cols, head })
+        let identity = head.len() == cols.len()
+            && head
+                .iter()
+                .enumerate()
+                .all(|(i, src)| matches!(src, HeadSrc::Col(j) if i == *j));
+        Some(CopyPlan { cols, head, identity })
     }
 
     /// The head row `row` maps to, if it matches the atom.
-    pub(crate) fn row(&self, cx: &Ctx<'_>, row: &[Value]) -> ExprResult<Option<Row>> {
+    pub(crate) fn row(&self, cx: &Ctx<'_>, row: &Row) -> ExprResult<Option<Row>> {
         if row.len() != self.cols.len() {
             return Err(bug(format!("{} terms against {} values", self.cols.len(), row.len())));
         }
@@ -372,6 +425,9 @@ impl CopyPlan {
             if !ok {
                 return Ok(None);
             }
+        }
+        if self.identity {
+            return Ok(Some(row.clone()));
         }
         let mut out = Vec::with_capacity(self.head.len());
         for src in &self.head {
@@ -437,6 +493,7 @@ pub(crate) enum Step {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Order {
     pub steps: Vec<Step>,
+    pub compiled: Option<crate::compiled::Kernel>,
 }
 
 /// The store an atom reads.
@@ -655,6 +712,7 @@ impl Plan {
             Skip::WhenUnchanged
         };
         Ok(Plan {
+            compiled: false,
             rule: rule.id,
             nvars: rule.body.vars.len(),
             atoms,
@@ -681,6 +739,7 @@ impl Plan {
             head,
             aggregate,
             copy,
+            upsert_delete: None,
             skip,
             frame: None,
         })
@@ -701,7 +760,11 @@ impl Plan {
                 driver_vars(rule, lit),
             ),
         };
-        self.order(rule, skip, &bound, cost)
+        let mut order = self.order(rule, skip, &bound, cost);
+        if self.compiled {
+            order.compiled = crate::compiled::Kernel::compile(rule, self, &order, driver);
+        }
+        order
     }
 
     /// The steps of a term whose driver binds `bound` (and is atom `skip`, if an atom): repeatedly the atom with the
@@ -779,7 +842,7 @@ impl Plan {
             steps.push(Step::Check(next));
             next += 1;
         }
-        Order { steps }
+        Order { steps, compiled: None }
     }
 
     /// Appends the checks from `next` on that are ready, in order, binding what they bind.
@@ -1064,6 +1127,7 @@ impl Driver {
 /// One valuation found by a term.
 pub(crate) struct Found<'e> {
     pub env: &'e [Option<Value>],
+    pub rows: &'e [Option<Row>],
     pub sign: i64,
 }
 
@@ -1075,6 +1139,12 @@ pub(crate) type Token = Vec<Value>;
 pub(crate) struct TermBuffers {
     env: Vec<Option<Value>>,
     rows: Vec<Option<Row>>,
+}
+impl TermBuffers {
+    pub(crate) fn clear(&mut self) {
+        self.env.clear();
+        self.rows.clear();
+    }
 }
 
 /// Evaluates one term of `rule`'s delta query. `old(lit)` says whether dependency `lit` is read at its old version.
@@ -1297,7 +1367,7 @@ impl Search<'_, '_> {
                 (self.error)(token, e.duplicate(), sign);
                 return Ok(());
             }
-            return match (self.emit)(Found { env, sign }) {
+            return match (self.emit)(Found { env, rows, sign }) {
                 Ok(()) => Ok(()),
                 Err(ExprError::Eval(e)) => Err(e),
                 Err(e) => {

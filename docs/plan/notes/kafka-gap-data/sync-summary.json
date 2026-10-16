@@ -1,0 +1,1794 @@
+[
+  {
+    "file": "docs/plan/notes/kafka-gap-data/bloom-latencies.txt",
+    "window_seconds": 30,
+    "threads": [
+      {
+        "pid": 2696182,
+        "thread": "committer",
+        "sync_calls": 1118,
+        "sync_seconds": 8.083248653,
+        "mean_sync_ms": 7.230097185152057,
+        "off_seconds_by_state": {
+          "256": 9.2784e-05,
+          "0": 0.001758428,
+          "2": 8.60314889,
+          "1": 19.478164773
+        },
+        "runqueue_ms": 9.09274
+      },
+      {
+        "pid": 2696182,
+        "thread": "database",
+        "sync_calls": 216,
+        "sync_seconds": 0.958157935,
+        "mean_sync_ms": 4.4359163657407406,
+        "off_seconds_by_state": {
+          "256": 1.5749e-05,
+          "0": 0.000661294,
+          "2": 1.116757337,
+          "1": 26.829824058
+        },
+        "runqueue_ms": 2.237706
+      },
+      {
+        "pid": 2696182,
+        "thread": "engine",
+        "sync_calls": 58,
+        "sync_seconds": 4.144383574,
+        "mean_sync_ms": 71.45488920689655,
+        "off_seconds_by_state": {
+          "0": 0.002363618,
+          "1": 1.205038163,
+          "2": 4.31845756
+        },
+        "runqueue_ms": 3.241982
+      },
+      {
+        "pid": 2696182,
+        "thread": "liveness",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 8.0782e-05,
+          "1": 60.468314197
+        },
+        "runqueue_ms": 7.518761
+      },
+      {
+        "pid": 2696182,
+        "thread": "liveness-check",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 3.4183e-05,
+          "1": 30.233259772
+        },
+        "runqueue_ms": 2.43432
+      },
+      {
+        "pid": 2696182,
+        "thread": "peer-listener",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 4.458e-06,
+          "1": 30.225245977
+        },
+        "runqueue_ms": 7.024564
+      },
+      {
+        "pid": 2696182,
+        "thread": "peer-reader",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 2.5008e-05,
+          "256": 3.4024e-05,
+          "1": 120.688788892
+        },
+        "runqueue_ms": 9.024089
+      },
+      {
+        "pid": 2696182,
+        "thread": "peer-writer",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000325133,
+          "1": 60.150302895
+        },
+        "runqueue_ms": 7.757366
+      },
+      {
+        "pid": 2696182,
+        "thread": "promoter",
+        "sync_calls": 67,
+        "sync_seconds": 1.246536913,
+        "mean_sync_ms": 18.605028552238803,
+        "off_seconds_by_state": {
+          "2": 1.188593579,
+          "1": 28.129938441
+        },
+        "runqueue_ms": 1.626973
+      },
+      {
+        "pid": 2696182,
+        "thread": "stats",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "2": 2.308197094,
+          "1": 27.00146567
+        },
+        "runqueue_ms": 0.124213
+      },
+      {
+        "pid": 2696182,
+        "thread": "stream-listener",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.231274856
+        },
+        "runqueue_ms": 11.24999
+      },
+      {
+        "pid": 2696182,
+        "thread": "stream-reader",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 1.0199e-05,
+          "1": 450.885295734
+        },
+        "runqueue_ms": 46.323188
+      },
+      {
+        "pid": 2696182,
+        "thread": "stream-writer",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 0.000107713,
+          "0": 0.005347227,
+          "1": 239.518393311
+        },
+        "runqueue_ms": 53.08026
+      },
+      {
+        "pid": 2696183,
+        "thread": "committer",
+        "sync_calls": 1159,
+        "sync_seconds": 5.388829363,
+        "mean_sync_ms": 4.649550787748058,
+        "off_seconds_by_state": {
+          "256": 0.00014453,
+          "0": 0.001686581,
+          "2": 5.966957253,
+          "1": 22.130362858
+        },
+        "runqueue_ms": 10.443602
+      },
+      {
+        "pid": 2696183,
+        "thread": "database",
+        "sync_calls": 216,
+        "sync_seconds": 3.569685531,
+        "mean_sync_ms": 16.526321902777777,
+        "off_seconds_by_state": {
+          "0": 0.001032202,
+          "2": 3.535667232,
+          "1": 24.3939011
+        },
+        "runqueue_ms": 2.449716
+      },
+      {
+        "pid": 2696183,
+        "thread": "engine",
+        "sync_calls": 58,
+        "sync_seconds": 4.230445049,
+        "mean_sync_ms": 72.9387077413793,
+        "off_seconds_by_state": {
+          "256": 6.93e-05,
+          "0": 0.005827407,
+          "1": 1.607836558,
+          "2": 4.406338486
+        },
+        "runqueue_ms": 7.081319
+      },
+      {
+        "pid": 2696183,
+        "thread": "liveness",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 2.9816e-05,
+          "1": 60.470954071
+        },
+        "runqueue_ms": 9.988875
+      },
+      {
+        "pid": 2696183,
+        "thread": "liveness-check",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.235236162
+        },
+        "runqueue_ms": 2.690686
+      },
+      {
+        "pid": 2696183,
+        "thread": "peer-listener",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.209664069
+        },
+        "runqueue_ms": 7.62587
+      },
+      {
+        "pid": 2696183,
+        "thread": "peer-reader",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 8.5512e-05,
+          "1": 120.545806119
+        },
+        "runqueue_ms": 22.382703
+      },
+      {
+        "pid": 2696183,
+        "thread": "peer-writer",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000573707,
+          "1": 60.330989462
+        },
+        "runqueue_ms": 11.465571
+      },
+      {
+        "pid": 2696183,
+        "thread": "promoter",
+        "sync_calls": 67,
+        "sync_seconds": 1.084941809,
+        "mean_sync_ms": 16.193161328358208,
+        "off_seconds_by_state": {
+          "2": 1.017885616,
+          "1": 28.222919009
+        },
+        "runqueue_ms": 1.449509
+      },
+      {
+        "pid": 2696183,
+        "thread": "stats",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "2": 2.307872593,
+          "1": 27.001563582
+        },
+        "runqueue_ms": 0.131105
+      },
+      {
+        "pid": 2696183,
+        "thread": "stream-listener",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 3.5848e-05,
+          "0": 6.358e-05,
+          "1": 30.209261582
+        },
+        "runqueue_ms": 8.335608
+      },
+      {
+        "pid": 2696183,
+        "thread": "stream-reader",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 2.0919e-05,
+          "0": 0.000200016,
+          "1": 391.227041399
+        },
+        "runqueue_ms": 36.540926
+      },
+      {
+        "pid": 2696183,
+        "thread": "stream-writer",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.007553403,
+          "1": 240.028291967
+        },
+        "runqueue_ms": 67.857542
+      },
+      {
+        "pid": 2696184,
+        "thread": "committer",
+        "sync_calls": 837,
+        "sync_seconds": 4.802356817,
+        "mean_sync_ms": 5.737582816009557,
+        "off_seconds_by_state": {
+          "256": 6.4452e-05,
+          "0": 0.001843356,
+          "2": 5.330190224,
+          "1": 22.729637928
+        },
+        "runqueue_ms": 9.260801
+      },
+      {
+        "pid": 2696184,
+        "thread": "database",
+        "sync_calls": 208,
+        "sync_seconds": 1.26003222,
+        "mean_sync_ms": 6.057847211538462,
+        "off_seconds_by_state": {
+          "0": 0.001769777,
+          "2": 1.263187813,
+          "1": 27.22725877
+        },
+        "runqueue_ms": 3.307501
+      },
+      {
+        "pid": 2696184,
+        "thread": "engine",
+        "sync_calls": 58,
+        "sync_seconds": 4.453926148,
+        "mean_sync_ms": 76.79183013793103,
+        "off_seconds_by_state": {
+          "0": 0.002954672,
+          "1": 0.289924371,
+          "2": 4.626802002
+        },
+        "runqueue_ms": 3.321557
+      },
+      {
+        "pid": 2696184,
+        "thread": "liveness",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 60.473350667
+        },
+        "runqueue_ms": 8.887953
+      },
+      {
+        "pid": 2696184,
+        "thread": "liveness-check",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.187945548
+        },
+        "runqueue_ms": 6.06527
+      },
+      {
+        "pid": 2696184,
+        "thread": "peer-listener",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 9.709e-06,
+          "1": 30.21231229
+        },
+        "runqueue_ms": 9.783967
+      },
+      {
+        "pid": 2696184,
+        "thread": "peer-reader",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 8.0693e-05,
+          "1": 120.561930171
+        },
+        "runqueue_ms": 12.360991
+      },
+      {
+        "pid": 2696184,
+        "thread": "peer-writer",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 1.2754e-05,
+          "0": 0.00027113,
+          "1": 60.306804008
+        },
+        "runqueue_ms": 8.377819
+      },
+      {
+        "pid": 2696184,
+        "thread": "promoter",
+        "sync_calls": 66,
+        "sync_seconds": 3.512957141,
+        "mean_sync_ms": 53.22662334848485,
+        "off_seconds_by_state": {
+          "2": 3.474296379,
+          "1": 26.508937141
+        },
+        "runqueue_ms": 1.502848
+      },
+      {
+        "pid": 2696184,
+        "thread": "stats",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "2": 2.307916306,
+          "1": 27.00149298
+        },
+        "runqueue_ms": 0.195916
+      },
+      {
+        "pid": 2696184,
+        "thread": "stream-listener",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.213433579
+        },
+        "runqueue_ms": 12.561706
+      },
+      {
+        "pid": 2696184,
+        "thread": "stream-reader",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 6.8809e-05,
+          "1": 480.116814094
+        },
+        "runqueue_ms": 46.022879
+      },
+      {
+        "pid": 2696184,
+        "thread": "stream-writer",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 0.000121028,
+          "0": 0.008477696,
+          "1": 354.402044182
+        },
+        "runqueue_ms": 77.061858
+      }
+    ],
+    "total_sync_calls": 4128,
+    "total_sync_seconds": 42.735501153
+  },
+  {
+    "file": "docs/plan/notes/kafka-gap-data/kafka-latencies.txt",
+    "window_seconds": 30,
+    "threads": [
+      {
+        "pid": 2707815,
+        "thread": "C1 CompilerThre",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000705877,
+          "1": 30.058454828
+        },
+        "runqueue_ms": 12.199921
+      },
+      {
+        "pid": 2707815,
+        "thread": "C2 CompilerThre",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 9.398e-06,
+          "0": 0.004769846,
+          "1": 28.705343332
+        },
+        "runqueue_ms": 12.158977
+      },
+      {
+        "pid": 2707815,
+        "thread": "ExpirationReape",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 5.43e-06,
+          "1": 240.345806495
+        },
+        "runqueue_ms": 3.848803
+      },
+      {
+        "pid": 2707815,
+        "thread": "G1 Conc#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000187503,
+          "1": 26.660655829
+        },
+        "runqueue_ms": 0.284825
+      },
+      {
+        "pid": 2707815,
+        "thread": "G1 Main Marker",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 9.577e-05,
+          "1": 26.660121343
+        },
+        "runqueue_ms": 0.124452
+      },
+      {
+        "pid": 2707815,
+        "thread": "G1 Refine#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000671873,
+          "1": 29.871308538
+        },
+        "runqueue_ms": 2.783388
+      },
+      {
+        "pid": 2707815,
+        "thread": "G1 Service",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.003448759
+        },
+        "runqueue_ms": 0.179326
+      },
+      {
+        "pid": 2707815,
+        "thread": "GC Thread#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000324771,
+          "1": 26.631320052
+        },
+        "runqueue_ms": 5.771958
+      },
+      {
+        "pid": 2707815,
+        "thread": "GC Thread#1",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.003526271,
+          "1": 26.626810672
+        },
+        "runqueue_ms": 4.178097
+      },
+      {
+        "pid": 2707815,
+        "thread": "GC Thread#2",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000198283,
+          "1": 26.626270887
+        },
+        "runqueue_ms": 0.533661
+      },
+      {
+        "pid": 2707815,
+        "thread": "GC Thread#3",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.004136539,
+          "1": 26.626512296
+        },
+        "runqueue_ms": 4.748632
+      },
+      {
+        "pid": 2707815,
+        "thread": "Monitor Deflati",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 3.2411e-05,
+          "1": 30.006197916
+        },
+        "runqueue_ms": 0.43119
+      },
+      {
+        "pid": 2707815,
+        "thread": "Reference Handl",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.00032971,
+          "1": 26.660688882
+        },
+        "runqueue_ms": 0.409741
+      },
+      {
+        "pid": 2707815,
+        "thread": "ReplicaFetcherT",
+        "sync_calls": 13705,
+        "sync_seconds": 22.092384633,
+        "mean_sync_ms": 1.6119945007661438,
+        "off_seconds_by_state": {
+          "256": 0.000109418,
+          "0": 0.006061883,
+          "1": 15.799619411,
+          "2": 42.893205491
+        },
+        "runqueue_ms": 293.314098
+      },
+      {
+        "pid": 2707815,
+        "thread": "Service Thread",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 6.0293e-05,
+          "1": 29.466162337
+        },
+        "runqueue_ms": 0.266093
+      },
+      {
+        "pid": 2707815,
+        "thread": "VM Periodic Tas",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 25.000278904
+        },
+        "runqueue_ms": 0.020258
+      },
+      {
+        "pid": 2707815,
+        "thread": "VM Thread",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.007462212,
+          "1": 26.655863833
+        },
+        "runqueue_ms": 9.210495
+      },
+      {
+        "pid": 2707815,
+        "thread": "broker-1-Thrott",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 119.008086531
+        },
+        "runqueue_ms": 2.296659
+      },
+      {
+        "pid": 2707815,
+        "thread": "broker-1-lifecy",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 28.008991873
+        },
+        "runqueue_ms": 0.078415
+      },
+      {
+        "pid": 2707815,
+        "thread": "broker-1-to-con",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 28.007374532
+        },
+        "runqueue_ms": 0.19209
+      },
+      {
+        "pid": 2707815,
+        "thread": "client-metrics-",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.010604693
+        },
+        "runqueue_ms": 0.960355
+      },
+      {
+        "pid": 2707815,
+        "thread": "controller-1-Th",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 120.006229041
+        },
+        "runqueue_ms": 0.441287
+      },
+      {
+        "pid": 2707815,
+        "thread": "controller-1-to",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 25.121463453
+        },
+        "runqueue_ms": 0.044284
+      },
+      {
+        "pid": 2707815,
+        "thread": "data-plane-kafk",
+        "sync_calls": 19797,
+        "sync_seconds": 34.165614335,
+        "mean_sync_ms": 1.725797562004344,
+        "off_seconds_by_state": {
+          "256": 0.0002145,
+          "0": 0.023314584,
+          "2": 67.656693281,
+          "1": 650.571261292
+        },
+        "runqueue_ms": 639.701636
+      },
+      {
+        "pid": 2707815,
+        "thread": "executor-Fetch",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 5.344512071
+        },
+        "runqueue_ms": 0.060102
+      },
+      {
+        "pid": 2707815,
+        "thread": "executor-group-",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 25.011556773
+        },
+        "runqueue_ms": 0.039283
+      },
+      {
+        "pid": 2707815,
+        "thread": "group-coordinat",
+        "sync_calls": 13,
+        "sync_seconds": 0.035251132,
+        "mean_sync_ms": 2.711625538461538,
+        "off_seconds_by_state": {
+          "0": 6.0814e-05,
+          "2": 0.055742626,
+          "1": 149.899667352
+        },
+        "runqueue_ms": 9.495341
+      },
+      {
+        "pid": 2707815,
+        "thread": "kafka-1-metadat",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000598255,
+          "1": 29.490344839
+        },
+        "runqueue_ms": 3.300708
+      },
+      {
+        "pid": 2707815,
+        "thread": "kafka-1-raft-io",
+        "sync_calls": 60,
+        "sync_seconds": 0.171173174,
+        "mean_sync_ms": 2.8528862333333334,
+        "off_seconds_by_state": {
+          "0": 0.000215064,
+          "2": 0.325990154,
+          "1": 29.630929672
+        },
+        "runqueue_ms": 4.953821
+      },
+      {
+        "pid": 2707815,
+        "thread": "kafka-1-raft-ou",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000221026,
+          "1": 29.497081768
+        },
+        "runqueue_ms": 2.224924
+      },
+      {
+        "pid": 2707815,
+        "thread": "kafka-log-clean",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 15.000058745
+        },
+        "runqueue_ms": 0.006291
+      },
+      {
+        "pid": 2707815,
+        "thread": "kafka-scheduler",
+        "sync_calls": 16,
+        "sync_seconds": 0.04811999,
+        "mean_sync_ms": 3.007499375,
+        "off_seconds_by_state": {
+          "0": 0.000169848,
+          "2": 0.047798758,
+          "1": 170.281594918
+        },
+        "runqueue_ms": 4.207071
+      },
+      {
+        "pid": 2707815,
+        "thread": "metrics-meter-t",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 5.821e-06,
+          "0": 9.288e-06,
+          "1": 59.093035025
+        },
+        "runqueue_ms": 3.13635
+      },
+      {
+        "pid": 2707815,
+        "thread": "quorum-controll",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 4.0717e-05,
+          "1": 29.498560489
+        },
+        "runqueue_ms": 0.27928
+      },
+      {
+        "pid": 2707815,
+        "thread": "raft-expiration",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.008132068
+        },
+        "runqueue_ms": 0.757696
+      },
+      {
+        "pid": 2707815,
+        "thread": "share-group-loc",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 5.471e-06,
+          "1": 30.007776953
+        },
+        "runqueue_ms": 0.484302
+      },
+      {
+        "pid": 2707815,
+        "thread": "transaction-log",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 19.999868856
+        },
+        "runqueue_ms": 0.009938
+      },
+      {
+        "pid": 2707816,
+        "thread": "C1 CompilerThre",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000585152,
+          "1": 30.094266059
+        },
+        "runqueue_ms": 8.040836
+      },
+      {
+        "pid": 2707816,
+        "thread": "C2 CompilerThre",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "256": 1.9568e-05,
+          "0": 0.001960705,
+          "1": 28.93528014
+        },
+        "runqueue_ms": 8.388503
+      },
+      {
+        "pid": 2707816,
+        "thread": "ExpirationReape",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000109024,
+          "1": 240.542389702
+        },
+        "runqueue_ms": 15.463828
+      },
+      {
+        "pid": 2707816,
+        "thread": "G1 Conc#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 1.3646e-05,
+          "1": 29.805384635
+        },
+        "runqueue_ms": 0.066514
+      },
+      {
+        "pid": 2707816,
+        "thread": "G1 Main Marker",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "2": 2.0448e-05,
+          "1": 29.804763095
+        },
+        "runqueue_ms": 0.528671
+      },
+      {
+        "pid": 2707816,
+        "thread": "G1 Refine#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.001052198,
+          "1": 29.900362368
+        },
+        "runqueue_ms": 1.697788
+      },
+      {
+        "pid": 2707816,
+        "thread": "G1 Service",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.079876016
+        },
+        "runqueue_ms": 0.143887
+      },
+      {
+        "pid": 2707816,
+        "thread": "GC Thread#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 6.1786e-05,
+          "1": 29.77565571
+        },
+        "runqueue_ms": 0.405774
+      },
+      {
+        "pid": 2707816,
+        "thread": "GC Thread#1",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 6.9681e-05,
+          "1": 29.778845464
+        },
+        "runqueue_ms": 3.485182
+      },
+      {
+        "pid": 2707816,
+        "thread": "GC Thread#2",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000385264,
+          "1": 29.781550543
+        },
+        "runqueue_ms": 6.694984
+      },
+      {
+        "pid": 2707816,
+        "thread": "GC Thread#3",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.004511433,
+          "1": 29.7759658
+        },
+        "runqueue_ms": 5.039753
+      },
+      {
+        "pid": 2707816,
+        "thread": "Monitor Deflati",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.006733564
+        },
+        "runqueue_ms": 1.071375
+      },
+      {
+        "pid": 2707816,
+        "thread": "Reference Handl",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 29.80537651
+        },
+        "runqueue_ms": 0.032872
+      },
+      {
+        "pid": 2707816,
+        "thread": "ReplicaFetcherT",
+        "sync_calls": 13648,
+        "sync_seconds": 22.250205261,
+        "mean_sync_ms": 1.6302905378810082,
+        "off_seconds_by_state": {
+          "256": 8.4246e-05,
+          "0": 0.004670255,
+          "1": 15.340638063,
+          "2": 43.461391835
+        },
+        "runqueue_ms": 278.997241
+      },
+      {
+        "pid": 2707816,
+        "thread": "Service Thread",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 29.001510959
+        },
+        "runqueue_ms": 0.086463
+      },
+      {
+        "pid": 2707816,
+        "thread": "VM Periodic Tas",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 25.000266688
+        },
+        "runqueue_ms": 0.020307
+      },
+      {
+        "pid": 2707816,
+        "thread": "VM Thread",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "2": 0.000494048,
+          "0": 0.003932334,
+          "1": 29.803432583
+        },
+        "runqueue_ms": 4.086207
+      },
+      {
+        "pid": 2707816,
+        "thread": "broker-2-Thrott",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 116.005899494
+        },
+        "runqueue_ms": 0.261428
+      },
+      {
+        "pid": 2707816,
+        "thread": "broker-2-lifecy",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 28.009928798
+        },
+        "runqueue_ms": 0.078079
+      },
+      {
+        "pid": 2707816,
+        "thread": "broker-2-to-con",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 6.493e-06,
+          "1": 28.00796868
+        },
+        "runqueue_ms": 0.091414
+      },
+      {
+        "pid": 2707816,
+        "thread": "client-metrics-",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.007649192
+        },
+        "runqueue_ms": 0.446412
+      },
+      {
+        "pid": 2707816,
+        "thread": "controller-2-Th",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 120.006286836
+        },
+        "runqueue_ms": 0.387504
+      },
+      {
+        "pid": 2707816,
+        "thread": "controller-2-to",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 25.124423659
+        },
+        "runqueue_ms": 0.018794
+      },
+      {
+        "pid": 2707816,
+        "thread": "data-plane-kafk",
+        "sync_calls": 19941,
+        "sync_seconds": 35.252299098,
+        "mean_sync_ms": 1.7678300535579963,
+        "off_seconds_by_state": {
+          "256": 0.000261622,
+          "0": 0.021529354,
+          "2": 68.671421785,
+          "1": 648.132287822
+        },
+        "runqueue_ms": 568.234641
+      },
+      {
+        "pid": 2707816,
+        "thread": "executor-Fetch",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 17.818829538
+        },
+        "runqueue_ms": 0.051168
+      },
+      {
+        "pid": 2707816,
+        "thread": "group-coordinat",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000606087,
+          "1": 149.809096723
+        },
+        "runqueue_ms": 5.703775
+      },
+      {
+        "pid": 2707816,
+        "thread": "kafka-2-metadat",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000112772,
+          "1": 29.49235017
+        },
+        "runqueue_ms": 2.665165
+      },
+      {
+        "pid": 2707816,
+        "thread": "kafka-2-raft-io",
+        "sync_calls": 60,
+        "sync_seconds": 0.168359089,
+        "mean_sync_ms": 2.8059848166666668,
+        "off_seconds_by_state": {
+          "0": 0.000463379,
+          "2": 0.335301864,
+          "1": 29.596936503
+        },
+        "runqueue_ms": 5.459006
+      },
+      {
+        "pid": 2707816,
+        "thread": "kafka-2-raft-ou",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 1.032e-05,
+          "1": 29.996411252
+        },
+        "runqueue_ms": 0.133017
+      },
+      {
+        "pid": 2707816,
+        "thread": "kafka-log-clean",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 15.000073842
+        },
+        "runqueue_ms": 0.009076
+      },
+      {
+        "pid": 2707816,
+        "thread": "kafka-scheduler",
+        "sync_calls": 16,
+        "sync_seconds": 0.028816404,
+        "mean_sync_ms": 1.80102525,
+        "off_seconds_by_state": {
+          "0": 0.000280999,
+          "2": 0.029845106,
+          "1": 165.300398785
+        },
+        "runqueue_ms": 2.918166
+      },
+      {
+        "pid": 2707816,
+        "thread": "metrics-meter-t",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 1.4999e-05,
+          "1": 59.104232492
+        },
+        "runqueue_ms": 2.273796
+      },
+      {
+        "pid": 2707816,
+        "thread": "quorum-controll",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000154731,
+          "1": 29.508155926
+        },
+        "runqueue_ms": 0.732853
+      },
+      {
+        "pid": 2707816,
+        "thread": "raft-expiration",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 6.9791e-05,
+          "1": 30.192593181
+        },
+        "runqueue_ms": 2.191804
+      },
+      {
+        "pid": 2707816,
+        "thread": "share-group-loc",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 4.528e-06,
+          "1": 30.007933036
+        },
+        "runqueue_ms": 0.526806
+      },
+      {
+        "pid": 2707816,
+        "thread": "transaction-log",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 19.999792172
+        },
+        "runqueue_ms": 0.01056
+      },
+      {
+        "pid": 2707818,
+        "thread": "C1 CompilerThre",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000526744,
+          "1": 29.569949493
+        },
+        "runqueue_ms": 10.120987
+      },
+      {
+        "pid": 2707818,
+        "thread": "C2 CompilerThre",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.00397781,
+          "1": 28.124173664
+        },
+        "runqueue_ms": 11.828312
+      },
+      {
+        "pid": 2707818,
+        "thread": "ExpirationReape",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000231016,
+          "1": 240.399487346
+        },
+        "runqueue_ms": 10.168316
+      },
+      {
+        "pid": 2707818,
+        "thread": "G1 Conc#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 3.6469e-05,
+          "1": 27.214111818
+        },
+        "runqueue_ms": 0.092744
+      },
+      {
+        "pid": 2707818,
+        "thread": "G1 Main Marker",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 2.4376e-05,
+          "1": 27.213612145
+        },
+        "runqueue_ms": 0.059673
+      },
+      {
+        "pid": 2707818,
+        "thread": "G1 Refine#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000761892,
+          "1": 30.070153058
+        },
+        "runqueue_ms": 2.096567
+      },
+      {
+        "pid": 2707818,
+        "thread": "G1 Service",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.005328029
+        },
+        "runqueue_ms": 0.277242
+      },
+      {
+        "pid": 2707818,
+        "thread": "GC Thread#0",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000108715,
+          "1": 27.1821767
+        },
+        "runqueue_ms": 0.580991
+      },
+      {
+        "pid": 2707818,
+        "thread": "GC Thread#1",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 7.7175e-05,
+          "1": 27.188957604
+        },
+        "runqueue_ms": 7.485234
+      },
+      {
+        "pid": 2707818,
+        "thread": "GC Thread#2",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.005467071,
+          "1": 27.182200867
+        },
+        "runqueue_ms": 6.092298
+      },
+      {
+        "pid": 2707818,
+        "thread": "GC Thread#3",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 8.1744e-05,
+          "1": 27.182376868
+        },
+        "runqueue_ms": 0.707041
+      },
+      {
+        "pid": 2707818,
+        "thread": "Monitor Deflati",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.006076182
+        },
+        "runqueue_ms": 0.36567
+      },
+      {
+        "pid": 2707818,
+        "thread": "Reference Handl",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 27.21415142
+        },
+        "runqueue_ms": 0.754541
+      },
+      {
+        "pid": 2707818,
+        "thread": "ReplicaFetcherT",
+        "sync_calls": 13779,
+        "sync_seconds": 22.517468409,
+        "mean_sync_ms": 1.6341874162856522,
+        "off_seconds_by_state": {
+          "256": 0.000203392,
+          "0": 0.002265501,
+          "1": 15.439525222,
+          "2": 43.305825381
+        },
+        "runqueue_ms": 285.893884
+      },
+      {
+        "pid": 2707818,
+        "thread": "Service Thread",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 29.001543748
+        },
+        "runqueue_ms": 0.115516
+      },
+      {
+        "pid": 2707818,
+        "thread": "VM Periodic Tas",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 5.52e-06,
+          "1": 25.000264756
+        },
+        "runqueue_ms": 0.030335
+      },
+      {
+        "pid": 2707818,
+        "thread": "VM Thread",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.003405674,
+          "1": 27.214545434
+        },
+        "runqueue_ms": 3.555966
+      },
+      {
+        "pid": 2707818,
+        "thread": "broker-3-Thrott",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 4.348e-06,
+          "1": 119.006225155
+        },
+        "runqueue_ms": 0.389333
+      },
+      {
+        "pid": 2707818,
+        "thread": "broker-3-lifecy",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 1.5079e-05,
+          "1": 28.008915829
+        },
+        "runqueue_ms": 0.108252
+      },
+      {
+        "pid": 2707818,
+        "thread": "broker-3-to-con",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 2.2462e-05,
+          "1": 28.007344506
+        },
+        "runqueue_ms": 0.102984
+      },
+      {
+        "pid": 2707818,
+        "thread": "client-metrics-",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 1.9097e-05,
+          "1": 30.007833638
+        },
+        "runqueue_ms": 0.446318
+      },
+      {
+        "pid": 2707818,
+        "thread": "controller-3-Th",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 120.006408227
+        },
+        "runqueue_ms": 0.399669
+      },
+      {
+        "pid": 2707818,
+        "thread": "controller-3-to",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 25.111444603
+        },
+        "runqueue_ms": 0.018783
+      },
+      {
+        "pid": 2707818,
+        "thread": "data-plane-kafk",
+        "sync_calls": 19762,
+        "sync_seconds": 34.779658094,
+        "mean_sync_ms": 1.759926024390244,
+        "off_seconds_by_state": {
+          "256": 0.000237523,
+          "0": 0.014920236,
+          "2": 68.287429695,
+          "1": 649.739226361
+        },
+        "runqueue_ms": 542.803226
+      },
+      {
+        "pid": 2707818,
+        "thread": "executor-Fetch",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 4.634977255
+        },
+        "runqueue_ms": 0.0314
+      },
+      {
+        "pid": 2707818,
+        "thread": "group-coordinat",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000211027,
+          "1": 149.825461774
+        },
+        "runqueue_ms": 5.919386
+      },
+      {
+        "pid": 2707818,
+        "thread": "kafka-3-metadat",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000721578,
+          "1": 29.490876143
+        },
+        "runqueue_ms": 4.129211
+      },
+      {
+        "pid": 2707818,
+        "thread": "kafka-3-raft-io",
+        "sync_calls": 60,
+        "sync_seconds": 0.174676598,
+        "mean_sync_ms": 2.9112766333333338,
+        "off_seconds_by_state": {
+          "0": 0.000740794,
+          "2": 0.328643852,
+          "1": 29.626020526
+        },
+        "runqueue_ms": 5.013771
+      },
+      {
+        "pid": 2707818,
+        "thread": "kafka-3-raft-ou",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 0.000584901,
+          "1": 29.497734343
+        },
+        "runqueue_ms": 1.95755
+      },
+      {
+        "pid": 2707818,
+        "thread": "kafka-log-clean",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 15.000145529
+        },
+        "runqueue_ms": 0.017403
+      },
+      {
+        "pid": 2707818,
+        "thread": "kafka-scheduler",
+        "sync_calls": 16,
+        "sync_seconds": 0.051771592,
+        "mean_sync_ms": 3.2357245,
+        "off_seconds_by_state": {
+          "2": 0.051369722,
+          "1": 165.302285975
+        },
+        "runqueue_ms": 0.645153
+      },
+      {
+        "pid": 2707818,
+        "thread": "metrics-meter-t",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 2.4717e-05,
+          "1": 58.957992641
+        },
+        "runqueue_ms": 3.90894
+      },
+      {
+        "pid": 2707818,
+        "thread": "quorum-controll",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 6.1947e-05,
+          "1": 29.49886532
+        },
+        "runqueue_ms": 0.39403
+      },
+      {
+        "pid": 2707818,
+        "thread": "raft-expiration",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 30.007667416
+        },
+        "runqueue_ms": 0.429497
+      },
+      {
+        "pid": 2707818,
+        "thread": "share-group-loc",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "0": 1.059e-05,
+          "1": 30.007906909
+        },
+        "runqueue_ms": 0.484065
+      },
+      {
+        "pid": 2707818,
+        "thread": "transaction-log",
+        "sync_calls": 0,
+        "sync_seconds": 0.0,
+        "mean_sync_ms": null,
+        "off_seconds_by_state": {
+          "1": 19.999847185
+        },
+        "runqueue_ms": 0.011592
+      }
+    ],
+    "total_sync_calls": 100873,
+    "total_sync_seconds": 171.735797809
+  }
+]

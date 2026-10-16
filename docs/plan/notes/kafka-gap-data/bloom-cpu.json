@@ -1,0 +1,467 @@
+{
+  "samples": 13493,
+  "total_period": 282876080659,
+  "denominator": "all sampled broker user cycles; period weighted",
+  "thread_percent": {
+    "engine": 90.88642889743751,
+    "committer": 4.714732693881332,
+    "database": 4.233557360205521,
+    "peer-reader": 0.13068981517940792,
+    "promoter": 0.02083947743572657,
+    "stream-reader": 0.005289407278672275,
+    "stats": 0.0028601721931212653,
+    "peer-writer": 0.001885635924951187,
+    "liveness": 0.0011711029056548125,
+    "peer-listener": 0.0009376452027406906,
+    "stream-writer": 0.0008684862977020451,
+    "stream-listener": 0.0005749963009282278,
+    "liveness-check": 0.00016430975673772016
+  },
+  "exclusive_leaf_percent": {
+    "other engine": 17.05883858104307,
+    "value equality/order/hash": 16.926424277886934,
+    "other/unknown": 14.718763232297107,
+    "storage": 9.699432593622175,
+    "byte comparison": 8.479755803360401,
+    "allocation/free": 8.05864087514701,
+    "value cloning/destruction": 7.61982720836111,
+    "collection internals": 6.1100162473034105,
+    "checksums": 3.1546764333027673,
+    "memory copying": 2.7629740053637626,
+    "hash/digest": 2.3209332562530736,
+    "expression evaluator": 1.700333692687908,
+    "serialization": 1.3893837933712743
+  },
+  "inclusive_stack_percent_OVERLAPPING": {
+    "engine store": 53.888549636248655,
+    "delta drivers": 37.757377359789096,
+    "value/byte ordering": 29.149917261969286,
+    "join evaluation": 26.76365087766613,
+    "LSM storage": 19.62952721617233,
+    "B-trees": 14.641388198151379,
+    "allocation/free": 8.16165966673982,
+    "row support": 8.076522543997257,
+    "expression evaluator": 7.538561043875071,
+    "compiled kernels": 6.853452827766755,
+    "copies": 2.847103991344049,
+    "serialization": 2.5891535371027055,
+    "BLAKE3": 2.20231614227924,
+    "retained maps": 1.0605677369436322,
+    "hash tables": 0.6303055149966327
+  },
+  "exclusive_stack_partition_percent_priority_order": {
+    "other engine store operations": 31.347277826892057,
+    "other engine evaluation/maintenance": 23.118464614841,
+    "LSM access/maintenance": 19.62952721617233,
+    "other/unknown": 8.620985249508445,
+    "row support": 8.076522543997257,
+    "expression evaluation": 7.538561043875071,
+    "serialization": 1.6686615047138382
+  },
+  "top_leaf_symbols": [
+    {
+      "symbol": "__memcmp_evex_movbe",
+      "percent": 8.479755803360401
+    },
+    {
+      "symbol": "blossom_value::order::<impl core::cmp::Ord for blossom_value::value::Value>::cmp",
+      "percent": 7.722716744062382
+    },
+    {
+      "symbol": "<blossom_value::value::Value as core::clone::Clone>::clone",
+      "percent": 4.544517179413555
+    },
+    {
+      "symbol": "blossom_store::lsm::Lsm::get",
+      "percent": 4.418460739374762
+    },
+    {
+      "symbol": "_mi_page_malloc_zero",
+      "percent": 3.0057432071287726
+    },
+    {
+      "symbol": "core::ptr::drop_in_place<blossom_value::value::Value>",
+      "percent": 2.9779551807191598
+    },
+    {
+      "symbol": "blossom_value::order::<impl core::hash::Hash for blossom_value::value::Value>::hash",
+      "percent": 2.8869019685140276
+    },
+    {
+      "symbol": "__memmove_avx512_unaligned_erms",
+      "percent": 2.7629740053637626
+    },
+    {
+      "symbol": "blossom_value::order::<impl core::cmp::PartialEq for blossom_value::value::Value>::eq",
+      "percent": 2.7384049305101765
+    },
+    {
+      "symbol": "_blake3_hash_many_avx512",
+      "percent": 1.9216269418525873
+    },
+    {
+      "symbol": "<blossom_value::bytes::BytesValue as core::cmp::Ord>::cmp",
+      "percent": 1.905933360798799
+    },
+    {
+      "symbol": "blossom_engine::store::Store::new_rows",
+      "percent": 1.7282674030305842
+    },
+    {
+      "symbol": "crc32c::hw_x86_64::crc_u64_append",
+      "percent": 1.6709288293264595
+    },
+    {
+      "symbol": "blossom_store::lsm::Sst::scan_keys",
+      "percent": 1.6345754159305899
+    },
+    {
+      "symbol": "crc32c::hw_x86_64::crc_u64_parallel3",
+      "percent": 1.474925505995502
+    },
+    {
+      "symbol": "blossom_store::lsm::Lsm::compact",
+      "percent": 1.261940786822205
+    },
+    {
+      "symbol": "<alloc::vec::Vec<T> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<T,I>>::from_iter",
+      "percent": 1.2429914352633444
+    },
+    {
+      "symbol": "<blossom_value::value::IntValue as core::cmp::Ord>::cmp",
+      "percent": 1.1787640765638243
+    },
+    {
+      "symbol": "blossom_base::det::DetMap<K,V>::get_mut",
+      "percent": 1.0855432738767696
+    },
+    {
+      "symbol": "blossom_store::lsm::Lsm::flush",
+      "percent": 1.054228283654325
+    },
+    {
+      "symbol": "blossom_engine::engine::Engine::maintain_inner",
+      "percent": 1.0463861204186353
+    },
+    {
+      "symbol": "alloc::collections::btree::map::BTreeMap<K,V,A>::insert",
+      "percent": 1.022758681914717
+    },
+    {
+      "symbol": "alloc::sync::Arc<T,A>::drop_slow",
+      "percent": 0.9379213247083664
+    },
+    {
+      "symbol": "mi_free",
+      "percent": 0.9191354270544535
+    },
+    {
+      "symbol": "blossom_engine::engine::Engine::evaluate",
+      "percent": 0.7637900440244447
+    },
+    {
+      "symbol": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::try_fold",
+      "percent": 0.7025497901307869
+    },
+    {
+      "symbol": "blossom_engine::expr::eval_in",
+      "percent": 0.693885869893026
+    },
+    {
+      "symbol": "<blossom_base::det::DetHasher as core::hash::Hasher>::write",
+      "percent": 0.6729905994755696
+    },
+    {
+      "symbol": "alloc::collections::btree::map::BTreeMap<K,V,A>::remove",
+      "percent": 0.6668439507523924
+    },
+    {
+      "symbol": "alloc::collections::btree::search::<impl alloc::collections::btree::node::NodeRef<BorrowType,K,V,alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree",
+      "percent": 0.6429392424283561
+    },
+    {
+      "symbol": "blossom_engine::rule::run_term",
+      "percent": 0.6396782491416455
+    },
+    {
+      "symbol": "blossom_base::det::DetMap<K,V>::get_key_value",
+      "percent": 0.6042902397465799
+    },
+    {
+      "symbol": "blossom_engine::rule::Search::run",
+      "percent": 0.599592103739803
+    },
+    {
+      "symbol": "blossom_engine::row_support::RowSupport::change",
+      "percent": 0.5753150807974551
+    },
+    {
+      "symbol": "alloc::collections::btree::map::entry::VacantEntry<K,V,A>::insert_entry",
+      "percent": 0.5687598828617366
+    },
+    {
+      "symbol": "mi_theap_malloc_aligned",
+      "percent": 0.5658267819149648
+    },
+    {
+      "symbol": "blossom_engine::engine::Engine::run_drivers",
+      "percent": 0.5623707343137592
+    },
+    {
+      "symbol": "blossom_engine::store::Store::clear_delta",
+      "percent": 0.5532893581365462
+    },
+    {
+      "symbol": "__rustc::__rust_no_alloc_shim_is_unstable_v2",
+      "percent": 0.5290205097984089
+    },
+    {
+      "symbol": "blossom_engine::store::Store::any",
+      "percent": 0.5206208943397082
+    },
+    {
+      "symbol": "blossom_engine::store::Store::ensure_index",
+      "percent": 0.5044714101225998
+    },
+    {
+      "symbol": "blossom_engine::engine::run_terms::{{closure}}",
+      "percent": 0.4947626762006579
+    },
+    {
+      "symbol": "blossom_engine::row_support::Field::pack",
+      "percent": 0.48569541503801494
+    },
+    {
+      "symbol": "blossom_value::blob::blobs_in",
+      "percent": 0.4809084472009133
+    },
+    {
+      "symbol": "_mi_theap_realloc_zero",
+      "percent": 0.4500083591495064
+    },
+    {
+      "symbol": "blossom_engine::store::Store::range_rows",
+      "percent": 0.44777219164277915
+    },
+    {
+      "symbol": "__rustc::__rust_alloc",
+      "percent": 0.43530591633316396
+    },
+    {
+      "symbol": "blossom_engine::store::Tiered::cold_support",
+      "percent": 0.4267920250405904
+    },
+    {
+      "symbol": "blossom_base::det::DetMap<K,V>::remove",
+      "percent": 0.4138696029981041
+    },
+    {
+      "symbol": "blossom_engine::store::Store::add",
+      "percent": 0.4036160043437291
+    },
+    {
+      "symbol": "alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::Edge>::insert_recursing",
+      "percent": 0.39794437316069514
+    },
+    {
+      "symbol": "_mi_theap_malloc_zero",
+      "percent": 0.3957256199930967
+    },
+    {
+      "symbol": "blossom_base::det::DetMap<K,V>::entry_by",
+      "percent": 0.3949730339154614
+    },
+    {
+      "symbol": "<blossom_value::bytes::BytesValue as core::cmp::PartialEq>::eq",
+      "percent": 0.3906240423106074
+    },
+    {
+      "symbol": "blossom_engine::rule::Search::check",
+      "percent": 0.3754289304086522
+    },
+    {
+      "symbol": "<smallvec::SmallVec<A> as core::ops::drop::Drop>::drop",
+      "percent": 0.3685753290172462
+    },
+    {
+      "symbol": "blossom_node::node::count_blobs",
+      "percent": 0.36801099604279286
+    },
+    {
+      "symbol": "alloc::collections::btree::map::entry::Entry<K,V,A>::or_insert",
+      "percent": 0.3677679369625064
+    },
+    {
+      "symbol": "blossom_engine::rule::unify_tracked",
+      "percent": 0.3628157105433038
+    },
+    {
+      "symbol": "alloc::collections::btree::map::IntoIter<K,V,A>::dying_next",
+      "percent": 0.3423830076914584
+    },
+    {
+      "symbol": "blossom_wire::codec::Codec::wire_type",
+      "percent": 0.3327836948274154
+    },
+    {
+      "symbol": "<smallvec::SmallVec<A> as core::iter::traits::collect::Extend<<A as smallvec::Array>::Item>>::extend",
+      "percent": 0.32938593988906617
+    },
+    {
+      "symbol": "mi_theap_collect_ex",
+      "percent": 0.3258552309734404
+    },
+    {
+      "symbol": "mi_free_try_collect_mt",
+      "percent": 0.32342740321790847
+    },
+    {
+      "symbol": "alloc::vec::Vec<T,A>::resize",
+      "percent": 0.31756035643143715
+    },
+    {
+      "symbol": "blossom_store::lsm::Sst::block",
+      "percent": 0.3072257148696993
+    },
+    {
+      "symbol": "blossom_base::det::DetMap<K,V>::entry",
+      "percent": 0.3069595378927538
+    },
+    {
+      "symbol": "blossom_engine::store::Store::begin_tick",
+      "percent": 0.3062145357013029
+    },
+    {
+      "symbol": "blossom_wire::codec::Codec::encode_value",
+      "percent": 0.3017265281007932
+    },
+    {
+      "symbol": "blossom_engine::store::Tiered::index_overlay",
+      "percent": 0.2911376614386776
+    },
+    {
+      "symbol": "__memset_avx512_unaligned_erms",
+      "percent": 0.2893918273658585
+    },
+    {
+      "symbol": "<core::iter::adapters::map::Map<I,F> as core::iter::traits::iterator::Iterator>::fold",
+      "percent": 0.28151267478849096
+    },
+    {
+      "symbol": "alloc::collections::btree::map::BTreeMap<K,V,A>::entry",
+      "percent": 0.2805695148034598
+    },
+    {
+      "symbol": "_mi_page_free_collect",
+      "percent": 0.2757741782842325
+    },
+    {
+      "symbol": "__rustc::__rust_dealloc",
+      "percent": 0.27545601776747786
+    },
+    {
+      "symbol": "blossom_base::det::DetMap<K,V>::get_by",
+      "percent": 0.27413601043730657
+    },
+    {
+      "symbol": "blossom_engine::map_cache::MapCache::insert",
+      "percent": 0.2691539317238402
+    },
+    {
+      "symbol": "blossom_engine::engine::Engine::step_inner",
+      "percent": 0.26319861377657705
+    },
+    {
+      "symbol": "blossom_engine::expr::term",
+      "percent": 0.2533900478011996
+    },
+    {
+      "symbol": "<blossom_store::lsm::Lsm as blossom_store::tree::KeyTree>::applied",
+      "percent": 0.25210968822057955
+    },
+    {
+      "symbol": "<alloc::vec::Vec<T> as alloc::vec::spec_from_iter::SpecFromIter<T,I>>::from_iter",
+      "percent": 0.2481652801341813
+    },
+    {
+      "symbol": "alloc::collections::btree::navigate::<impl alloc::collections::btree::node::NodeRef<BorrowType,K,V,alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range",
+      "percent": 0.24340244335822878
+    },
+    {
+      "symbol": "blossom_engine::engine::Terms::merge",
+      "percent": 0.24138962700884514
+    },
+    {
+      "symbol": "alloc::collections::btree::remove::<impl alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut,K,V,alloc::collections::btree::node::marker::Leaf>,alloc::collections::btree::node::marker::KV>>::remove_leaf_kv",
+      "percent": 0.23053205646825767
+    },
+    {
+      "symbol": "blossom_node::keycode::encode",
+      "percent": 0.22685681288605725
+    },
+    {
+      "symbol": "[unknown]",
+      "percent": 0.22541508830103787
+    },
+    {
+      "symbol": "blossom_engine::func::library",
+      "percent": 0.22109211833782585
+    },
+    {
+      "symbol": "blossom_node::durable::DurableCodec::tagged_key",
+      "percent": 0.22104936958377133
+    },
+    {
+      "symbol": "mi_theap_umalloc",
+      "percent": 0.22018612515733865
+    },
+    {
+      "symbol": "blossom_base::det::DetMap<K,V>::remove_by",
+      "percent": 0.21223938609490858
+    },
+    {
+      "symbol": "_mi_malloc_generic",
+      "percent": 0.2086638621494278
+    },
+    {
+      "symbol": "blossom_engine::store::Tiered::set_overlay",
+      "percent": 0.20275624282683652
+    },
+    {
+      "symbol": "blossom_engine::engine::Engine::apply",
+      "percent": 0.19980918594575317
+    },
+    {
+      "symbol": "<alloc::collections::btree::map::BTreeMap<K,V,A> as core::ops::drop::Drop>::drop",
+      "percent": 0.19897510976847319
+    },
+    {
+      "symbol": "blossom_store::lsm::BlockCache::lock",
+      "percent": 0.19848247532700555
+    },
+    {
+      "symbol": "blossom_engine::compiled::Kernel::walk",
+      "percent": 0.1981460400236802
+    },
+    {
+      "symbol": "smallvec::SmallVec<A>::push",
+      "percent": 0.19772621343486668
+    },
+    {
+      "symbol": "blossom_engine::expr::binary",
+      "percent": 0.19739628769571413
+    },
+    {
+      "symbol": "_blake3_compress_in_place_avx512",
+      "percent": 0.1963704763251522
+    },
+    {
+      "symbol": "blossom_engine::row_bucket::RowBucket::remove",
+      "percent": 0.19521280651002645
+    }
+  ],
+  "stack_root_percent": {
+    "clone3": 99.9609287983125,
+    "[unknown]": 0.03907120168750952
+  }
+}

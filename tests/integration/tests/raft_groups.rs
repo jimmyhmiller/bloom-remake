@@ -274,7 +274,7 @@ fn a_reelected_leader_forgets_its_old_follower_state() {
         let mut d = Directed {
             c,
             g: Value::Tuple(std::sync::Arc::from(vec![
-                Value::Bytes(std::sync::Arc::from(&b"left"[..])),
+                Value::bytes(b"left"),
                 Value::Int(IntValue::I32(0)),
             ])),
             rterm: r("rterm"),
@@ -372,7 +372,7 @@ fn groups() -> Vec<Value> {
     .iter()
     .map(|(n, p)| {
         Value::Tuple(std::sync::Arc::from(vec![
-            Value::Bytes(std::sync::Arc::from(n.as_bytes())),
+            Value::bytes(n.as_bytes()),
             Value::Int(IntValue::I32(*p)),
         ]))
     })
@@ -430,6 +430,303 @@ fn a_leader_whose_ticks_are_slow_keeps_its_group() {
             );
         }
         assert!(d.last(l).1 > start.1, "seed {seed}: the slow leader appended nothing");
+    }
+}
+
+/// A leader sends each follower each entry once, however late the follower's acknowledgements (examples/kafka/raft.bls,
+/// docs/plan/notes/SCALE.md): messages take 40-60 ms each way, so an acknowledgement comes back after the next
+/// heartbeat (50 ms), while the leader appends an entry every 30 ms. The leader pipelines new entries after what it sent; it once also sent everything
+/// after what a follower had acknowledged at every heartbeat and at every acknowledgement short of its log, so a
+/// follower slower than a heartbeat was sent its in-flight entries again and again (under load, the copies filled the
+/// followers' queues and kept them full after the load was gone).
+#[test]
+fn followers_slower_than_a_heartbeat_are_sent_each_entry_once() {
+    use blossom_value::time::NodeId;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let entries = artifact.rel_named("entries").unwrap();
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                latency: (40_000_000, 60_000_000),
+                record: blossom_integration_tests::sim_record(&format!("slow-followers-seed{seed}")),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        // How many times each follower was sent each index of `all`, by its leader.
+        let sent: Rc<RefCell<BTreeMap<(u32, u64), u64>>> = Rc::default();
+        {
+            let (sent, g) = (sent.clone(), d.g.clone());
+            d.c.tap_peers(Box::new(move |from, to, rel, row| {
+                if rel != entries || !row.contains(&g) {
+                    return;
+                }
+                let Some(Value::Vec(es)) = row.last() else {
+                    panic!("an entries message without its entries: {row:?}")
+                };
+                for e in es.iter() {
+                    let Value::Tuple(fields) = e else {
+                        panic!("an entry that is not a tuple: {e:?}")
+                    };
+                    let Some(Value::Int(i)) = fields.first() else {
+                        panic!("an entry without its index: {e:?}")
+                    };
+                    let i = u64::try_from(i.to_i128().unwrap()).unwrap();
+                    *sent.borrow_mut().entry((from.0 * 16 + to.0, i)).or_default() += 1;
+                }
+            }));
+        }
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        d.wait(500_000_000);
+        let start = d.last(l).1;
+        d.wait(6_000_000_000);
+        for &n in &all {
+            d.c.input(n, d.hold, std::sync::Arc::from(vec![d.g.clone()])).unwrap();
+        }
+        d.wait(3_000_000_000);
+        assert_eq!(d.leads(l), Some(t), "seed {seed}: the leader lost its group");
+        let end = d.last(l).1;
+        assert!(
+            end > start + 100,
+            "seed {seed}: the leader appended only {} entries",
+            end - start
+        );
+        let sent = sent.borrow();
+        for &f in &all {
+            if f == l {
+                continue;
+            }
+            for i in start + 1..=end {
+                let n = sent.get(&(l.0 * 16 + f.0, i)).copied().unwrap_or(0);
+                assert_eq!(n, 1, "seed {seed}: b{} was sent entry {i} {n} times", f.0 + 1);
+            }
+        }
+    }
+}
+
+/// A loaded cluster keeps its leaders (docs/plan/notes/SCALE.md): every broker takes 150 ms a tick, so a group's
+/// heartbeats and acknowledgements often come late by more than the election timeout and the CheckQuorum period
+/// (300 ms), as on brokers saturated by load. Leadership follows the brokers' liveness (`RAFT_SESSION`), which they
+/// keep showing: no leader is deposed and no election starts, and the groups go on appending and committing. (Groups
+/// once deposed their leaders here, moving leadership from one busy broker to another.)
+#[test]
+fn a_loaded_cluster_keeps_its_leaders() {
+    use blossom_value::time::NodeId;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let commit = artifact.rel_named("commit").unwrap();
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                record: blossom_integration_tests::sim_record(&format!("loaded-seed{seed}")),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        d.wait(500_000_000);
+        let committed = |d: &Directed<'_>| {
+            d.c.state(l)
+                .unwrap()
+                .and_then(|s| s.rows(commit).filter(|r| r[0] == d.g).map(|r| u64_at(r, 1)).max())
+                .unwrap_or(0)
+        };
+        let before = committed(&d);
+        for &n in &all {
+            d.c.set_tick_cost(n, 150_000_000).unwrap();
+        }
+        for k in 0..30 {
+            d.wait(200_000_000);
+            assert_eq!(
+                d.leads(l),
+                Some(t),
+                "seed {seed}: the leader lost its group after {} ms of load",
+                (k + 1) * 200
+            );
+            for &n in &all {
+                let term =
+                    d.c.state(n)
+                        .unwrap()
+                        .and_then(|s| s.rows(d.rterm).filter(|r| r[0] == d.g).map(|r| u64_at(r, 1)).max());
+                assert_eq!(term, Some(t), "seed {seed}: b{} moved to another term", n.0 + 1);
+            }
+        }
+        assert!(
+            committed(&d) > before + 20,
+            "seed {seed}: the loaded group committed only {} entries",
+            committed(&d) - before
+        );
+    }
+}
+
+/// A loaded cluster's crashed leader is replaced: every broker takes 100 ms a tick and the groups keep appending; the
+/// leader of `all` crashes; its followers' brokers hear it go down (500 ms) and elect another, which then commits.
+/// Each election round takes about a second here, and the three live members of `all` must all agree: candidates
+/// that collide (split votes) back off (`misses`) until one wins, and no round is cut short before its answers come
+/// (`round_open`). Elections that restarted at every 300-600 ms timeout once never converged here.
+#[test]
+fn a_loaded_clusters_crashed_leader_is_replaced() {
+    use blossom_value::time::NodeId;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                record: blossom_integration_tests::sim_record(&format!("loaded-crash-seed{seed}")),
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        for &n in &all {
+            d.c.set_tick_cost(n, 100_000_000).unwrap();
+        }
+        d.wait(2_000_000_000);
+        d.c.crash(l, blossom_sim::cluster::CrashWrites::Random).unwrap();
+        let rest: Vec<NodeId> = all.iter().copied().filter(|n| *n != l).collect();
+        let (nl, _) = d.await_leader(&rest, t, 10_000_000_000);
+        let before = d.last(nl).1;
+        d.await_until(3_000_000_000, "the new leader appends", |d| d.last(nl).1 > before + 5);
+    }
+}
+
+/// A broker whose ticks outlast the liveness session but are not stuck stays up (ARCHITECTURE §5.13): its ALIVE
+/// frames go out between and during ticks, so a leader taking 1.5 s a tick (longer than the 500 ms session, as on a
+/// saturated broker) is held up by every peer throughout and keeps its group. It once stopped saying it was alive
+/// whenever a tick ran past the session, so the brokers of a loaded cluster took each other down and back up, and
+/// leadership flapped. A broker whose tick runs past `liveness_stuck` is stuck: its peers take it down and elect
+/// another leader. `liveness_stuck` is 4 s here rather than the default 10 s: the harness's leaders append without
+/// end, and the run's cost grows with its length.
+#[test]
+fn a_broker_whose_ticks_outlast_the_session_stays_up_until_stuck() {
+    use blossom_value::time::NodeId;
+    let artifact = compile();
+    let schema = DurableSchema::of(artifact.program.get());
+    let peer_up = artifact.rel_named("peer_up").unwrap();
+    for seed in 7..=8 {
+        let c = Cluster::new(
+            &artifact,
+            &schema,
+            blossom_value::Seed::from_u64(seed),
+            Vec::new(),
+            Box::new(NoKvClients),
+            ClusterConfig {
+                seed,
+                clients: 0,
+                record: blossom_integration_tests::sim_record(&format!("long-ticks-seed{seed}")),
+                liveness_stuck: 4_000_000_000,
+                ..ClusterConfig::default()
+            },
+        )
+        .unwrap();
+        let stuck = 4_000_000_000;
+        let r = |n: &str| artifact.rel_named(n).unwrap();
+        let mut d = Directed {
+            c,
+            g: groups()[0].clone(),
+            rterm: r("rterm"),
+            won: r("won"),
+            rlog: r("rlog"),
+            hold: r("hold"),
+            release: r("release"),
+        };
+        d.c.observe(Box::new(GroupSafety::of(&artifact).unwrap()));
+        let all: Vec<NodeId> = (0..4u32).map(NodeId).collect();
+        let (l, t) = d.await_leader(&all, 0, 3_000_000_000);
+        let rest: Vec<NodeId> = all.iter().copied().filter(|n| *n != l).collect();
+        let holds_up = |d: &Directed<'_>, at: NodeId| {
+            d.c.state(at)
+                .unwrap()
+                .is_some_and(|s| s.rows(peer_up).any(|r| r[0] == Value::Node(l)))
+        };
+        d.c.set_tick_cost(l, 1_500_000_000).unwrap();
+        for k in 0..25 {
+            d.wait(200_000_000);
+            for &n in &rest {
+                assert!(
+                    holds_up(&d, n),
+                    "seed {seed}: b{} took the slow leader down after {} ms",
+                    n.0 + 1,
+                    (k + 1) * 200
+                );
+            }
+        }
+        assert_eq!(d.leads(l), Some(t), "seed {seed}: the slow leader lost its group");
+        // Stuck: one tick far longer than `liveness_stuck`. Its peers take it down once that long has passed, and
+        // not before (allowing for the 1.5 s tick it may be inside now).
+        d.c.set_tick_cost(l, 10 * stuck).unwrap();
+        d.wait(stuck - 2_000_000_000);
+        for &n in &rest {
+            assert!(
+                holds_up(&d, n),
+                "seed {seed}: b{} took the leader down before it was stuck",
+                n.0 + 1
+            );
+        }
+        d.await_until(5_000_000_000, "the stuck leader taken down", |d| {
+            rest.iter().all(|&n| !holds_up(d, n))
+        });
+        d.await_leader(&rest, t, 10_000_000_000);
     }
 }
 

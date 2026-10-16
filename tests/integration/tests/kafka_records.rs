@@ -141,7 +141,7 @@ fn u(x: u64) -> Value {
 
 #[cfg(test)]
 fn bytes(b: &[u8]) -> Value {
-    Value::Bytes(Arc::from(b))
+    Value::Bytes((b).into())
 }
 
 #[cfg(test)]

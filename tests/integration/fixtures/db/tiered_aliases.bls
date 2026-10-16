@@ -1,0 +1,31 @@
+//! Identity views declared before their durable/mixed sources must not share write-drain ownership.
+program tiered_aliases version 1;
+input put(k: u64, v: u64);
+input drop(k: u64);
+input pend(k: u64);
+input check(k: u64);
+input bump(k: u64, n: u64);
+durable table item(k: u64, v: u64) key(k);
+table pending(k: u64) key(k);
+durable table peak(k: u64, n: LMax<u64>);
+write: on put(k, v) { upsert item(k, v); }
+remove: on drop(k), item(k, v) { delete item(k, v); }
+queue: on pend(k) { upsert pending(k); }
+raise: on bump(k, n) { emit peak(k, LMax::of(n)); }
+view base_copy(k) = base(k);
+view base_chain(k) = base_copy(k);
+view base(k) = item(k, v), v >= 1000u64;
+view mixed_copy(k) = mixed(k);
+view mixed_chain(k) = mixed_copy(k);
+view mixed(k) { item(k, _); pending(k); }
+view peak_copy(k, n) = peak_at(k, n);
+view peak_chain(k, n) = peak_copy(k, n);
+view peak_at(k, n) = peak(k, m), let n = reveal!(m);
+durable table base_seen(k: u64, there: bool) key(k);
+durable table mixed_seen(k: u64, there: bool) key(k);
+durable table peak_seen(k: u64, n: u64) key(k);
+see_base: on check(k), base_chain(k) { upsert base_seen(k, true); }
+miss_base: on check(k), not base_chain(k) { upsert base_seen(k, false); }
+see_mixed: on check(k), mixed_chain(k) { upsert mixed_seen(k, true); }
+miss_mixed: on check(k), not mixed_chain(k) { upsert mixed_seen(k, false); }
+see_peak: on check(k), peak_chain(k, n) { upsert peak_seen(k, n); }

@@ -373,6 +373,8 @@ pub(crate) struct Resolver<'t, 'd> {
     pub members: BTreeMap<HRoleId, HRelId>,
     /// Each role's link events (`Q.connected`, `Q.disconnected`), by role and direction.
     pub links: BTreeMap<(HRoleId, bool), HRelId>,
+    /// `R.up` / `R.down`, created on first use.
+    pub peers: BTreeMap<(HRoleId, bool), HRelId>,
     /// Structs and enums already interned, by home (defining file and module body, `types::Home::body_id`) and name.
     pub nominal: BTreeMap<(FileKey, usize, Symbol), TypeId>,
     /// The user lattices being resolved, by home and name: one met again contains itself.
@@ -451,6 +453,7 @@ impl<'t, 'd> Resolver<'t, 'd> {
             builtins: BTreeMap::new(),
             members: BTreeMap::new(),
             links: BTreeMap::new(),
+            peers: BTreeMap::new(),
             nominal: BTreeMap::new(),
             lattices_resolving: BTreeSet::new(),
             impls_done: BTreeSet::new(),
@@ -2674,6 +2677,8 @@ impl<'t, 'd> Resolver<'t, 'd> {
                 match name.as_str() {
                     "connected" => Some(self.link_rel(role, true, name.span)),
                     "disconnected" => Some(self.link_rel(role, false, name.span)),
+                    "up" => Some(self.peer_rel(role, true, name.span)),
+                    "down" => Some(self.peer_rel(role, false, name.span)),
                     _ => None,
                 }
             }
@@ -2712,6 +2717,40 @@ impl<'t, 'd> Resolver<'t, 'd> {
             span,
         });
         self.links.insert((peer, up), id);
+        id
+    }
+
+    /// `R.up(n: Node<R>, incarnation: u64)` or `R.down(n: Node<R>)`, created on first use.
+    pub fn peer_rel(&mut self, peer: HRoleId, up: bool, span: Span) -> HRelId {
+        if let Some(id) = self.peers.get(&(peer, up)) {
+            return *id;
+        }
+        let node = self.node_type(Some(peer));
+        let mut cols = vec![HCol {
+            name: Symbol::intern("n"),
+            ty: Some(node),
+        }];
+        if up {
+            cols.push(HCol {
+                name: Symbol::intern("incarnation"),
+                ty: Some(self.intern_type(TypeDef::Int(blossom_value::types::IntTy::U64), span)),
+            });
+        }
+        let mut segs = self.role_of(peer).name.segments().to_vec();
+        segs.push(Symbol::intern(if up { "up" } else { "down" }));
+        let id = self.add_rel(HRel {
+            name: QualName::new(segs),
+            kind: HRelKind::Peer { peer, up },
+            cols,
+            key: None,
+            durable: false,
+            cell: false,
+            resolve: None,
+            prefer: None,
+            role: None,
+            span,
+        });
+        self.peers.insert((peer, up), id);
         id
     }
 

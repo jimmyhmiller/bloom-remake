@@ -22,7 +22,11 @@ pub(crate) fn rule_is_pure(p: &Program, rule: &Rule, memo: &mut BTreeMap<FnId, b
         },
     });
     // Head arguments are terms (an aggregate's tuple too).
-    lits && rule.head.args.iter().all(|a| matches!(a, HeadArg::Term(_) | HeadArg::Agg(_)))
+    lits && rule
+        .head
+        .args
+        .iter()
+        .all(|a| matches!(a, HeadArg::Term(_) | HeadArg::Agg(_)))
 }
 
 fn fn_is_pure(p: &Program, f: FnId, memo: &mut BTreeMap<FnId, bool>) -> bool {
@@ -63,9 +67,9 @@ fn expr_is_pure(p: &Program, e: &Expr, memo: &mut BTreeMap<FnId, bool>) -> bool 
         }
         Expr::Match { scrut, arms } => {
             expr_is_pure(p, scrut, memo)
-                && arms
-                    .iter()
-                    .all(|(_, guard, body)| guard.as_ref().is_none_or(|g| expr_is_pure(p, g, memo)) && expr_is_pure(p, body, memo))
+                && arms.iter().all(|(_, guard, body)| {
+                    guard.as_ref().is_none_or(|g| expr_is_pure(p, g, memo)) && expr_is_pure(p, body, memo)
+                })
         }
         Expr::Collection { elems, .. } => all(elems, memo),
         Expr::Lattice { args, .. } => all(args, memo),
@@ -85,4 +89,48 @@ fn builtin_is_pure(b: &BuiltinFn) -> bool {
             | BuiltinFn::RandPrio { .. }
             | BuiltinFn::Lib(LibFn::BlobOf)
     )
+}
+
+/// Retaining a plain keyed join duplicates cheap relational state. Prefer maps that actually execute
+/// functions, collection transformations or generators; copy/projection maintenance stays native already.
+pub(crate) fn benefits_from_retention(rule: &Rule) -> bool {
+    fn computation(e: &Expr) -> bool {
+        match e {
+            Expr::Call { f, args } => {
+                matches!(
+                    f,
+                    FnRef::Fn(_)
+                        | FnRef::Builtin(
+                            BuiltinFn::Lib(_)
+                                | BuiltinFn::Concat
+                                | BuiltinFn::Hash64
+                                | BuiltinFn::Fingerprint
+                                | BuiltinFn::ToString { .. }
+                        )
+                ) || args.iter().any(computation)
+            }
+            Expr::Unary { arg, .. }
+            | Expr::Field { base: arg, .. }
+            | Expr::Typed { expr: arg, .. }
+            | Expr::Closure { body: arg, .. } => computation(arg),
+            Expr::Binary { lhs, rhs, .. } => computation(lhs) || computation(rhs),
+            Expr::Construct { fields, .. } => fields.iter().any(computation),
+            Expr::If { cond, then, els } => computation(cond) || computation(then) || computation(els),
+            Expr::Match { scrut, arms } => {
+                computation(scrut)
+                    || arms
+                        .iter()
+                        .any(|(_, guard, body)| guard.as_ref().is_some_and(computation) || computation(body))
+            }
+            Expr::Collection { elems, .. } => elems.iter().any(computation),
+            Expr::Lattice { args, .. } => args.iter().any(computation),
+            Expr::Let { value, body, .. } => computation(value) || computation(body),
+            Expr::Term(_) | Expr::Param(_) | Expr::Scalar(_) => false,
+        }
+    }
+    rule.body.lits.iter().any(|lit| match lit {
+        Literal::Gen { .. } => true,
+        Literal::Bind { expr, .. } | Literal::Guard(expr) => computation(expr),
+        Literal::Pos(_) | Literal::Neg(_) | Literal::Lookup { .. } => false,
+    })
 }

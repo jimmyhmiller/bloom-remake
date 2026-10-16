@@ -201,7 +201,8 @@ impl BlossomSession {
 impl KvSession for BlossomSession {
     fn put(&mut self, key: &[u8], val: &[u8]) -> Result<(), KvError> {
         let r = self.rels;
-        self.call(r.put, r.put_ok, vec![key_value(key)?, Value::Bytes(val.into())]).map(|_| ())
+        self.call(r.put, r.put_ok, vec![key_value(key)?, Value::Bytes(val.into())])
+            .map(|_| ())
     }
 
     fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError> {

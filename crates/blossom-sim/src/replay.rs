@@ -20,9 +20,37 @@ use blossom_ir::tick::{
 use blossom_node::{Backend, Executor, Executors};
 use blossom_oracle::Oracle;
 use blossom_trace::node::{NodeRecord, NodeTraceHeader, TraceError, TraceReader, outcome_digest};
-use blossom_value::blob::BlobMap;
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::{BlobRef, ExternRegistry, Seed};
+
+/// Explicit physical execution choices for checked comparisons.
+#[derive(Clone, Copy, Debug)]
+pub struct ReplayOptions {
+    pub workers: usize,
+    pub map_cache_rows: usize,
+    pub map_cache_joins: bool,
+    pub lazy_indexes: bool,
+    pub pipeline_batches: bool,
+    pub infer_keys: bool,
+    pub compiled_joins: bool,
+    pub packed_indexes: bool,
+    pub fuse_relations: bool,
+}
+impl Default for ReplayOptions {
+    fn default() -> Self {
+        Self {
+            workers: 1,
+            map_cache_rows: 0,
+            map_cache_joins: false,
+            lazy_indexes: false,
+            pipeline_batches: false,
+            infer_keys: false,
+            compiled_joins: false,
+            packed_indexes: false,
+            fuse_relations: false,
+        }
+    }
+}
 
 /// Why a replay stopped.
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +81,10 @@ pub struct Inputs {
 /// One replayed tick.
 #[derive(Debug)]
 pub struct Replayed {
+    /// Opt-in offline preparation time, including trace decoding.
+    pub prepare_elapsed_ns: Option<u128>,
+    /// Opt-in time inside Executor::step; excludes replay verification and cleanup.
+    pub engine_elapsed_ns: Option<u128>,
     pub inputs: Inputs,
     /// What it changed in the carried state (`None`: it failed, as recorded).
     pub changes: Option<Changes>,
@@ -88,11 +120,43 @@ pub struct Replay<R: Read> {
     /// The relations whose rows each replayed tick reports.
     observe: Vec<RelId>,
     profile: bool,
+    measure_steps: bool,
 }
 
 impl<R: Read> Replay<R> {
     /// Opens a replay of the trace `inp` of a node running `artifact` (compiled for the trace's deployment).
     pub fn open(artifact: &BlsArtifact, inp: R, externs: Arc<ExternRegistry>) -> Result<Replay<R>, ReplayError> {
+        Self::open_with_workers(artifact, inp, externs, 1)
+    }
+
+    /// Replay with a selected bounded evaluation pool, preserving outcome verification.
+    pub fn open_with_workers(
+        artifact: &BlsArtifact,
+        inp: R,
+        externs: Arc<ExternRegistry>,
+        workers: usize,
+    ) -> Result<Replay<R>, ReplayError> {
+        Self::open_with_options(
+            artifact,
+            inp,
+            externs,
+            ReplayOptions {
+                workers,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Checked replay with explicit experimental map retention and worker budgets.
+    pub fn open_with_options(
+        artifact: &BlsArtifact,
+        inp: R,
+        externs: Arc<ExternRegistry>,
+        options: ReplayOptions,
+    ) -> Result<Replay<R>, ReplayError> {
+        if options.workers == 0 {
+            return Err(ReplayError::Order("workers must be positive".into()));
+        }
         let reader = TraceReader::open(inp)?;
         let h: NodeTraceHeader = reader.header().clone();
         let program = artifact.program.get();
@@ -123,6 +187,16 @@ impl<R: Read> Replay<R> {
             externs,
             std::sync::Arc::new(members),
         )?;
+        let executors = executors
+            .with_workers(options.workers)
+            .with_map_cache_rows(options.map_cache_rows)
+            .with_map_cache_joins(options.map_cache_joins)
+            .with_lazy_indexes(options.lazy_indexes)
+            .with_pipeline_batches(options.pipeline_batches)
+            .with_inferred_keys(options.infer_keys)
+            .with_compiled_joins(options.compiled_joins)
+            .with_packed_indexes(options.packed_indexes)
+            .with_fused_relations(options.fuse_relations);
         Ok(Replay {
             engine: executors.make(h.node)?,
             oracle: executors.oracle().clone(),
@@ -134,7 +208,22 @@ impl<R: Read> Replay<R> {
             booted: false,
             observe: Vec::new(),
             profile: false,
+            measure_steps: false,
         })
+    }
+
+    /// Snapshot of the actual replay executor, including cumulative work.
+    pub fn measure_plan(&mut self, on: bool) -> bool {
+        self.engine.measure_plan(on)
+    }
+
+    /// Enable offline phase timing without feeding a clock into evaluation.
+    pub fn measure_steps(&mut self, on: bool) {
+        self.measure_steps = on;
+    }
+
+    pub fn plan_report(&self) -> Option<blossom_engine::PlanReport> {
+        self.engine.plan_report()
     }
 
     pub fn header(&self) -> &NodeTraceHeader {
@@ -216,7 +305,9 @@ impl<R: Read> Replay<R> {
     /// Replays the next tick (`None` at the end of the trace). With `examine`, the oracle also runs it, from the same
     /// state, capturing its firings. A tick whose outcome the trace does not hold (the node was killed while it ran)
     /// is replayed unchecked.
+    #[allow(clippy::disallowed_methods)] // Explicit offline measurement; never semantic time.
     pub fn next(&mut self, examine: bool) -> Result<Option<Replayed>, ReplayError> {
+        let started = self.measure_steps.then(std::time::Instant::now);
         self.boot()?;
         let inputs = match self.read()? {
             None => return Ok(None),
@@ -259,7 +350,6 @@ impl<R: Read> Replay<R> {
                 None => break,
             }
         }
-        let blobs = BlobMap(self.blobs.clone());
         let examined = if examine {
             let carried = self.engine.carried()?;
             Some(self.oracle.tick(&TickInput {
@@ -272,7 +362,7 @@ impl<R: Read> Replay<R> {
                 delivered: &inputs.delivered,
                 ingress: &inputs.ingress,
                 capture: true,
-                blobs: &blobs,
+                blobs: &self.blobs,
             })?)
         } else {
             None
@@ -284,6 +374,8 @@ impl<R: Read> Replay<R> {
         } else {
             None
         };
+        let engine_started = self.measure_steps.then(std::time::Instant::now);
+        let prepare_elapsed_ns = started.zip(engine_started).map(|(a, b)| b.duration_since(a).as_nanos());
         let result = self.engine.step(
             &StepInput {
                 node: self.node,
@@ -293,10 +385,11 @@ impl<R: Read> Replay<R> {
                 events: &inputs.events,
                 delivered: &inputs.delivered,
                 ingress: &inputs.ingress,
-                blobs: &blobs,
+                blobs: &self.blobs,
             },
             &self.observe,
         );
+        let engine_elapsed_ns = engine_started.map(|s| s.elapsed().as_nanos());
         let tick = inputs.tick.0;
         let mut work = BTreeMap::new();
         if let (Some(before), Some(after)) = (work_before, self.engine.work_by_rule()) {
@@ -329,6 +422,8 @@ impl<R: Read> Replay<R> {
                 }
                 self.blobs.extend(out.blobs);
                 Ok(Some(Replayed {
+                    prepare_elapsed_ns,
+                    engine_elapsed_ns,
                     inputs,
                     changes: Some(out.changes),
                     failed: None,
@@ -343,6 +438,8 @@ impl<R: Read> Replay<R> {
             (Ok(out), None) => {
                 self.blobs.extend(out.blobs);
                 Ok(Some(Replayed {
+                    prepare_elapsed_ns,
+                    engine_elapsed_ns,
                     inputs,
                     changes: Some(out.changes),
                     failed: None,
@@ -359,6 +456,8 @@ impl<R: Read> Replay<R> {
                 what: format!("it succeeded, but the recorded tick failed: {error}"),
             }),
             (Err(e), Some(Err(error))) if e.to_string() == error => Ok(Some(Replayed {
+                prepare_elapsed_ns,
+                engine_elapsed_ns,
                 inputs,
                 changes: None,
                 failed: Some(error),
@@ -390,7 +489,6 @@ impl<R: Read> Replay<R> {
                 replayed.inputs.tick.0
             )));
         };
-        let blobs = BlobMap(self.blobs.clone());
         let carried = Instance::default();
         let input = TickInput {
             node: self.node,
@@ -402,7 +500,7 @@ impl<R: Read> Replay<R> {
             delivered: &replayed.inputs.delivered,
             ingress: &replayed.inputs.ingress,
             capture: false,
-            blobs: &blobs,
+            blobs: &self.blobs,
         };
         Ok(self.oracle.why_not(&input, &out.instance, rel, pattern, samples)?)
     }

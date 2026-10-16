@@ -200,7 +200,7 @@ file (§1.6). There are 35 crates plus `xtask`.
 | `blossom-oracle` | 1 | The naive per-tick Dedalus^L evaluator over `Value`, with its own naive stratifier, and the choice-validity checker TEST-013. **Deliberately independent of the kernel, the engine, the planner and the analyses.** | base, value, lattice, ir | — |
 | `blossom-driver` | 1 | The compilation pipeline (`CompileSession`), artifact caching by digest, diagnostic rendering, certificate output | base, value, std-src, syntax, front, ir, schema, artifact, analysis, rewrite, plan | codespan-reporting, serde_json |
 | `blossom-kernel` | 2 | Row stores, indexes, cursors and join kernels, the interner (implements `ValueStore`), tick arena, lattice heap, group tables, Z-set kernels, argmin and order-statistic indexes, incremental digests, the Tier C record types and `FiringLog` (`kernel::prov`). **No dependency on the IR.** | base, value, lattice | hashbrown, smallvec, imbl (feature `fork-heavy`), rayon (feature `parallel`, P1) |
-| `blossom-engine` | 2 | The single-node evaluator: `Engine`, the `PlanExecutor` trait, the execution ABI (`engine::abi`), the interpreter (feature `interp`, default), tick evaluation (SEM-002 steps 1–3), regimes, native sites, provenance capture, snapshots and forks | base, value, lattice, ir, kernel | tracing |
+| `blossom-engine` | 2 | The single-node evaluator: `Engine`, the `PlanExecutor` trait, the execution ABI (`engine::abi`), the interpreter (feature `interp`, default), tick evaluation (SEM-002 steps 1–3), regimes, native sites, provenance capture, snapshots and forks | base, value, lattice, ir, kernel | tracing, blake3, smallvec, parking_lot, rayon |
 | `blossom-prov` | 2 | Provenance graphs from Tier C logs and Tier B annotations; `why`/`whynot` (TEST-050/051/145); Nemo graph algebra (TEST-052); semiring and semimodule annotations (ENG-114, ENG-147); DOT and JSON rendering | base, value, ir, kernel | serde |
 | `blossom-codegen` | 2 | Validated physical plan + schema catalog → Rust tokens: executors, typed host bindings, specialized wire codecs | base, value, ir, schema | quote, proc-macro2, syn, prettyplease |
 | `blossom-std-host` | 2 | The Rust implementations behind the standard library's `extern fn`s and `extern table fn`s, as an `ExternRegistry` | base, value | sha2 |
@@ -1610,15 +1610,26 @@ performance (BENCH-200) is the second target and is reached through the same str
 
 ### 4.1 Values (ENG-020, ENG-032; ARCH-05, ARCH-22)
 
+**Canonical bytes in the value-level engine (API amendment, 2026-10-13).** `Value::Bytes` holds
+`blossom_value::BytesValue`, not a bare `Arc<[u8]>` (`blossom-value::API_VERSION = 2`). `BytesValue` provides
+immutable slice access and conversion to/from a shared byte allocation. Large payloads share a BLAKE3-256
+digest across clones; collection hashers mix that digest with the length and their own key instead of repeatedly
+reading the entire payload; `BytesValue::blob_ref` also reuses it for `Blob::of`. Small values retain one allocation.
+Equality checks bytes on a digest collision,
+canonical ordering is still lexicographic, and wire/serde encodings and canonical typed fingerprints are unchanged.
+The digest is computed at construction and cannot mutate while the value serves as a collection key. The cache
+belongs to the live value and cannot accumulate dead payloads in a global table. This is an optimization
+of the current value-level engine, independent of the word-level representations below.
+
 **Lanes.** A relation's rows are arrays of words of one lane width. The planner picks `Lane::U32` when every column's
-encoding fits in 32 bits (u8–u32, i8–i32, bool, C-like enums, `Node`, `Mod<N≤32>`, interned and bulk ids, inline
+encoding fits in 32 bits (u8–u32, i8–i32, bool, closed C-like enums, `Node`, `Mod<N≤32>`, interned and bulk ids, inline
 lattices over those) and `Lane::U64` otherwise. Lanes are a `RowShape` parameter of every kernel (§4.10).
 
 **Scalar encodings** (word order = canonical order):
 
 | Type | Encoding |
 |---|---|
-| `bool`, `()`, C-like enum tags | 0/1, 0, variant number |
+| `bool`, `()`, closed C-like enum tags | 0/1, 0, variant number |
 | `u8`…`u64`, `Mod<N≤64>` | zero-extended |
 | `i8`…`i64`, `Duration`, `Instant` | sign-extended, then XOR the lane's top bit |
 | `f64` | IEEE totalOrder key: `if sign { !bits } else { bits ^ 1<<63 }` (LANGUAGE §5.1) |
@@ -2479,6 +2490,7 @@ HELLO   0x01 := magic:"BLSM" proto:u16 deployment:[16] program_id:[16] program_v
 HELLO_OK 0x02 := accepted_version:u32 n:varint (sid:varint){n}                        (channels both sides share)
 REJECT  0x03 := reason:u8 detail:str                                                  (clients only; DIST-065)
 GOAWAY  0x04 := reason:u8                                                             (graceful shutdown)
+ALIVE   0x06 :=                                                                        (liveness, §5.13)
 BATCH   0x10 := sid:varint send_tick:varint kind:u8 count:varint tuple{count}
          kind: 0 Plain | 1 LDelta | 2 GDelta | 3 GAck | 4 GCum | 5 GCumDiff | 6 OTAgg | 7 ZBatch | 8 Seal   (DIST-006)
 tuple        := nfields:varint field{nfields}            (fields in ascending field-number order)
@@ -2878,6 +2890,31 @@ is a verdict (§6.6), never a crash fault and never counted against a crash budg
 the same error at the same tick (error equality is part of ENG-067).
 
 ---
+
+### 5.13 Peer liveness (docs/plan/notes/SCALE.md)
+
+A cluster node's view of which nodes of a cluster role are alive is the runtime's, not each program's: a program reads
+it as the built-in events `R.up(n: Node<R>, incarnation: u64)` and `R.down(n: Node<R>)` (LANGUAGE §7.15), raised only
+when the view changes, and keeps its own table of it. A node is its own peer: it learns its incarnation (its restart
+count) from `R.up(self, i)` in its first tick.
+
+- **Heard outside the ticks.** Each node keeps a liveness connection to each peer, beside its data connection, that
+  carries only `ALIVE` frames (§5.4): one every `[liveness] period_ms` (50), sent by the connection's own thread, so
+  they wait for no tick, no WAL sync and no queued data. A node sends none while its engine has been inside one tick
+  for longer than `[liveness] stuck_ms` (10 s): a live process with a stuck engine is not serving, while a tick that
+  only runs long under load (seconds, at saturation) is not stuck.
+- **Judged on arrival.** The receiving side stamps each frame as it arrives. A peer is up from its first frame in an
+  incarnation (its `HELLO`'s `restarts`; a frame of an older incarnation is ignored) and down once no frame came for
+  `[liveness] session_ms` (500). Changes reach the engine through its control channel, not behind queued data, and are
+  inputs of its next tick: recorded in its trace, so replay sees the same view.
+- **Why.** A failure detector that rides the data path measures load: under saturation a tick takes hundreds of
+  milliseconds, so heartbeats made and answered in ticks (behind their ticks' WAL syncs and queued data) arrive late,
+  and every leadership timed on them moves from one busy node to another. With liveness heard outside the ticks, a
+  loaded node is slower, not dead, and a session can still be short. Kafka fences a broker only when its session to
+  the controller ends; CockroachDB rests its ranges' leases on store liveness the same way.
+- **Simulation.** `blossom-sim` raises the same events from what it knows: a node is heard by a peer while it runs,
+  its link to that peer is not cut, and no single tick of its runs past the session (`ClusterConfig::liveness_session`,
+  a tick's cost `set_tick_cost`); `R.up` one latency after it is heard, `R.down` a session after it is not.
 
 ## 6. Deterministic simulator (`blossom-sim`)
 

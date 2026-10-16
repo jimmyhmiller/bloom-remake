@@ -1,0 +1,31 @@
+program retained_map version 1;
+input put(k: u64, values: Vec<u64>, divisor: u64);
+table source(k: u64, values: Vec<u64>, divisor: u64) key(k);
+fn work(x: u64) -> u64 {
+    range(0u64, 32u64).fold(x, |a, i| a + i)
+}
+view expanded(k, result) = source(k, values, _), value in values, let result = work(value);
+fn divide(divisor: u64) -> u64 { 100u64 / divisor }
+view divided(k, result) = source(k, _, divisor), let result = divide(divisor);
+view counts(k, n = count!(result)) = expanded(k, result);
+view timed(k, at) = source(k, _, _), let at = now();
+write: on put(k, values, divisor) { upsert source(k, values, divisor); }
+input set_right(k: u64, v: u64);
+table right(k: u64, v: u64) key(k);
+view joined(k, result) = source(k, values, _), right(k, v), value in values, let result = work(value + v);
+view missing(k, r) = source(k, _, _), not right(k, _), let r = work(0u64);
+input remove_right(k: u64);
+remove: on remove_right(k), right(k, v) { delete right(k, v); }
+write_right: on set_right(k, v) { upsert right(k, v); }
+input pair(k: u64, a: u64, b: u64);
+table left(k: u64, a: u64) key(k);
+table other(k: u64, b: u64) key(k);
+fn divide_pair(a: u64, b: u64) -> u64 { 100u64 / (if a == b { 0u64 } else { 1u64 }) }
+view ghost(k, result) = left(k, a), other(k, b), let result = divide_pair(a, b);
+write_pair: on pair(k, a, b) { upsert left(k, a); upsert other(k, b); }
+
+view tripled(k, result) = source(k, values, _), right(k, v), other(k, b), value in values, let result = work(value + v + b);
+cell tone: LMax<u64>;
+input bump(v: u64);
+raise: on bump(v) { next tone(LMax::of(v)); }
+view looked(k, result) = source(k, _, _), let value = tone, let Some(n) = reveal!(value), let result = work(n);

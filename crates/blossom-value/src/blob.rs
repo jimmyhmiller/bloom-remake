@@ -44,7 +44,14 @@ pub struct BlobMap(pub BTreeMap<BlobRef, Arc<[u8]>>);
 
 impl BlobSource for BlobMap {
     fn get(&self, b: &BlobRef) -> Option<Arc<[u8]>> {
-        self.0.get(b).cloned()
+        BlobSource::get(&self.0, b)
+    }
+}
+
+/// A borrowed map is a blob source too: replay can read its history without cloning it.
+impl BlobSource for BTreeMap<BlobRef, Arc<[u8]>> {
+    fn get(&self, b: &BlobRef) -> Option<Arc<[u8]>> {
+        self.get(b).cloned()
     }
 }
 
@@ -94,6 +101,9 @@ mod tests {
         assert_ne!(a, BlobRef::of(b"hellp"));
         assert_eq!(a.len, 5);
         // BLAKE3("hello"), the reference implementation's answer.
-        assert_eq!(a.hex(), "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f");
+        assert_eq!(
+            a.hex(),
+            "ea8f163db38682925e4491c5e58d4bb3506ef8c14eb78a86e908c5624a67200f"
+        );
     }
 }

@@ -56,7 +56,7 @@ impl From<ValueRepr> for Value {
             ValueRepr::Int(v) => Self::Int(v),
             ValueRepr::F64(v) => Self::F64(v),
             ValueRepr::Str(v) => Self::Str(v),
-            ValueRepr::Bytes(v) => Self::Bytes(v),
+            ValueRepr::Bytes(v) => Self::Bytes(v.into()),
             ValueRepr::Duration(v) => Self::Duration(v),
             ValueRepr::Instant(v) => Self::Instant(v),
             ValueRepr::Mod(v) => Self::Mod(v),

@@ -330,6 +330,25 @@ mod tests {
         StoreLock::acquire(&*fs, &root).unwrap();
     }
     #[test]
+    fn a_writer_lease_keeps_the_directory_locked_after_its_owner_returns() {
+        let (fs, root) = sim();
+        let owner = StoreLock::acquire(&*fs, &root).unwrap();
+        let writer = owner.clone();
+        let (release, wait) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _lease = writer;
+            wait.recv().unwrap();
+        });
+        drop(owner);
+        assert!(matches!(
+            StoreLock::acquire(&*fs, &root),
+            Err(StoreError::Locked { .. })
+        ));
+        release.send(()).unwrap();
+        thread.join().unwrap();
+        StoreLock::acquire(&*fs, &root).unwrap();
+    }
+    #[test]
     fn crashcheck_store_workload() {
         let checked = crash::enumerate_crash_points(
             |fs| {

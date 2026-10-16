@@ -1,0 +1,6466 @@
+[
+  {
+    "trial": "gap-control-kafka-1",
+    "max_phase_s": 73.33193302154541,
+    "sampled_s": 74.0066831111908,
+    "boundary_error_s": [
+      -0.32293272018432617,
+      0.35181736946105957
+    ],
+    "records": 1629358,
+    "throughput": 22219,
+    "sampler_max_ms": 34.11981702083722,
+    "brokers": [
+      {
+        "broker": 1,
+        "cpu_s": 16.15,
+        "system_cpu_s": 3.73,
+        "cpu_cores": 0.21822353497096403,
+        "io": {
+          "rchar": 3394722587,
+          "wchar": 3388346239,
+          "syscr": 282749,
+          "syscw": 166647,
+          "read_bytes": 634880,
+          "write_bytes": 2292006912,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 157042,
+        "major_faults": 242,
+        "threads": [
+          {
+            "tid": 2646968,
+            "name": "C2 CompilerThre",
+            "cpu_s": 5.312549864,
+            "cpu_cores": 0.07178473133322566,
+            "voluntary": 2037,
+            "involuntary": 211
+          },
+          {
+            "tid": 2648031,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.510406248,
+            "cpu_cores": 0.020409052054538118,
+            "voluntary": 102307,
+            "involuntary": 128
+          },
+          {
+            "tid": 2648030,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.470406305,
+            "cpu_cores": 0.019868561097256567,
+            "voluntary": 101363,
+            "involuntary": 120
+          },
+          {
+            "tid": 2646973,
+            "name": "C1 CompilerThre",
+            "cpu_s": 0.540341629,
+            "cpu_cores": 0.007301254512219765,
+            "voluntary": 2212,
+            "involuntary": 128
+          },
+          {
+            "tid": 2647172,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.536936883,
+            "cpu_cores": 0.007255248586040305,
+            "voluntary": 38084,
+            "involuntary": 89
+          },
+          {
+            "tid": 2647174,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.530938752,
+            "cpu_cores": 0.007174200081393932,
+            "voluntary": 35180,
+            "involuntary": 106
+          },
+          {
+            "tid": 2647176,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.528538722,
+            "cpu_cores": 0.0071417701723762005,
+            "voluntary": 36630,
+            "involuntary": 126
+          },
+          {
+            "tid": 2647178,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.521559128,
+            "cpu_cores": 0.007047459851921581,
+            "voluntary": 35876,
+            "involuntary": 104
+          },
+          {
+            "tid": 2647173,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.51047405,
+            "cpu_cores": 0.006897675027984189,
+            "voluntary": 35553,
+            "involuntary": 96
+          },
+          {
+            "tid": 2647179,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.509674539,
+            "cpu_cores": 0.006886871800945913,
+            "voluntary": 35001,
+            "involuntary": 101
+          },
+          {
+            "tid": 2647175,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.507591901,
+            "cpu_cores": 0.006858730585687407,
+            "voluntary": 31489,
+            "involuntary": 106
+          },
+          {
+            "tid": 2647177,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.489149335,
+            "cpu_cores": 0.006609529226773766,
+            "voluntary": 30915,
+            "involuntary": 113
+          },
+          {
+            "tid": 2647250,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.470234516,
+            "cpu_cores": 0.006353946646865657,
+            "voluntary": 8032,
+            "involuntary": 129
+          },
+          {
+            "tid": 2647249,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.414376002,
+            "cpu_cores": 0.005599170028704352,
+            "voluntary": 7482,
+            "involuntary": 123
+          },
+          {
+            "tid": 2647251,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.312310384,
+            "cpu_cores": 0.00422002947397023,
+            "voluntary": 6504,
+            "involuntary": 83
+          },
+          {
+            "tid": 2647035,
+            "name": "kafka-1-metadat",
+            "cpu_s": 0.131865195,
+            "cpu_cores": 0.0017818011760083897,
+            "voluntary": 560,
+            "involuntary": 47
+          },
+          {
+            "tid": 2647032,
+            "name": "kafka-1-raft-io",
+            "cpu_s": 0.126491694,
+            "cpu_cores": 0.0017091928550554479,
+            "voluntary": 1289,
+            "involuntary": 21
+          },
+          {
+            "tid": 2647007,
+            "name": "GC Thread#1",
+            "cpu_s": 0.072368359,
+            "cpu_cores": 0.000977862484274166,
+            "voluntary": 110,
+            "involuntary": 8
+          },
+          {
+            "tid": 2646908,
+            "name": "GC Thread#0",
+            "cpu_s": 0.072022788,
+            "cpu_cores": 0.0009731930276052217,
+            "voluntary": 122,
+            "involuntary": 8
+          },
+          {
+            "tid": 2647008,
+            "name": "GC Thread#2",
+            "cpu_s": 0.067966184,
+            "cpu_cores": 0.0009183790050134352,
+            "voluntary": 127,
+            "involuntary": 7
+          },
+          {
+            "tid": 2647009,
+            "name": "GC Thread#3",
+            "cpu_s": 0.060097089,
+            "cpu_cores": 0.000812049486256634,
+            "voluntary": 120,
+            "involuntary": 13
+          },
+          {
+            "tid": 2647155,
+            "name": "group-coordinat",
+            "cpu_s": 0.045645844,
+            "cpu_cores": 0.0006167800268986483,
+            "voluntary": 689,
+            "involuntary": 19
+          },
+          {
+            "tid": 2647154,
+            "name": "group-coordinat",
+            "cpu_s": 0.036005386,
+            "cpu_cores": 0.000486515331945143,
+            "voluntary": 652,
+            "involuntary": 23
+          },
+          {
+            "tid": 2647030,
+            "name": "kafka-1-raft-ou",
+            "cpu_s": 0.03462303,
+            "cpu_cores": 0.0004678365323842562,
+            "voluntary": 312,
+            "involuntary": 37
+          },
+          {
+            "tid": 2646920,
+            "name": "G1 Refine#0",
+            "cpu_s": 0.033328832,
+            "cpu_cores": 0.000450348949566154,
+            "voluntary": 452,
+            "involuntary": 5
+          },
+          {
+            "tid": 2647153,
+            "name": "group-coordinat",
+            "cpu_s": 0.032127711,
+            "cpu_cores": 0.0004341190504610234,
+            "voluntary": 662,
+            "involuntary": 9
+          },
+          {
+            "tid": 2647018,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.026559321,
+            "cpu_cores": 0.00035887733220114925,
+            "voluntary": 1322,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647156,
+            "name": "group-coordinat",
+            "cpu_s": 0.026305412,
+            "cpu_cores": 0.0003554464393503169,
+            "voluntary": 665,
+            "involuntary": 11
+          },
+          {
+            "tid": 2647021,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.025614865,
+            "cpu_cores": 0.00034611556582687453,
+            "voluntary": 1299,
+            "involuntary": 9
+          },
+          {
+            "tid": 2647041,
+            "name": "quorum-controll",
+            "cpu_s": 0.023020173,
+            "cpu_cores": 0.00031105532679276426,
+            "voluntary": 155,
+            "involuntary": 13
+          },
+          {
+            "tid": 2647133,
+            "name": "ExpirationReape",
+            "cpu_s": 0.021243944,
+            "cpu_cores": 0.00028705439977741193,
+            "voluntary": 519,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647076,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.017508964,
+            "cpu_cores": 0.00023658625496961923,
+            "voluntary": 371,
+            "involuntary": 1
+          },
+          {
+            "tid": 2648060,
+            "name": "executor-Fetch",
+            "cpu_s": 0.017292451,
+            "cpu_cores": 0.00023366066783481006,
+            "voluntary": 51,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647165,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.010853581,
+            "cpu_cores": 0.00014665676860146692,
+            "voluntary": 75,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647229,
+            "name": "kafka-log-clean",
+            "cpu_s": 0.010690376,
+            "cpu_cores": 0.00014445149479187336,
+            "voluntary": 5,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647210,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.009778631,
+            "cpu_cores": 0.00013213172904004045,
+            "voluntary": 63,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647252,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00932966,
+            "cpu_cores": 0.00012606510125555447,
+            "voluntary": 161,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647149,
+            "name": "group-coordinat",
+            "cpu_s": 0.009111431,
+            "cpu_cores": 0.00012311632702563627,
+            "voluntary": 440,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647211,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.008445737,
+            "cpu_cores": 0.00011412127452477184,
+            "voluntary": 72,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647138,
+            "name": "ExpirationReape",
+            "cpu_s": 0.007683072,
+            "cpu_cores": 0.00010381592144126531,
+            "voluntary": 370,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647053,
+            "name": "ExpirationReape",
+            "cpu_s": 0.007543735,
+            "cpu_cores": 0.00010193315904546041,
+            "voluntary": 371,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647135,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006933835,
+            "cpu_cores": 9.369201143067459e-05,
+            "voluntary": 370,
+            "involuntary": 2
+          },
+          {
+            "tid": 2646943,
+            "name": "VM Thread",
+            "cpu_s": 0.006862855,
+            "cpu_cores": 9.273290886025731e-05,
+            "voluntary": 145,
+            "involuntary": 6
+          },
+          {
+            "tid": 2647134,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006822968,
+            "cpu_cores": 9.219394402190518e-05,
+            "voluntary": 370,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647062,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006523599,
+            "cpu_cores": 8.814878232278923e-05,
+            "voluntary": 250,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647027,
+            "name": "raft-expiration",
+            "cpu_s": 0.006446557,
+            "cpu_cores": 8.710776823107202e-05,
+            "voluntary": 372,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647116,
+            "name": "broker-1-lifecy",
+            "cpu_s": 0.006354485,
+            "cpu_cores": 8.586366437275335e-05,
+            "voluntary": 75,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647058,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006243496,
+            "cpu_cores": 8.436394846421513e-05,
+            "voluntary": 251,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647168,
+            "name": "share-group-loc",
+            "cpu_s": 0.006147718,
+            "cpu_cores": 8.306976804734522e-05,
+            "voluntary": 369,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647060,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006137518,
+            "cpu_cores": 8.293194265683724e-05,
+            "voluntary": 247,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647122,
+            "name": "client-metrics-",
+            "cpu_s": 0.006122387,
+            "cpu_cores": 8.272748814862388e-05,
+            "voluntary": 372,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647171,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006016248,
+            "cpu_cores": 8.129330686204289e-05,
+            "voluntary": 370,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647078,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005756791,
+            "cpu_cores": 7.778744780860874e-05,
+            "voluntary": 248,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647132,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005703077,
+            "cpu_cores": 7.706164849235918e-05,
+            "voluntary": 371,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647061,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005564988,
+            "cpu_cores": 7.519574943845173e-05,
+            "voluntary": 250,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647214,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.005312656,
+            "cpu_cores": 7.178616547397536e-05,
+            "voluntary": 76,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647075,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005060209,
+            "cpu_cores": 6.837502759578249e-05,
+            "voluntary": 246,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647137,
+            "name": "ExpirationReape",
+            "cpu_s": 0.00492318,
+            "cpu_cores": 6.652345157265331e-05,
+            "voluntary": 370,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647079,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00485727,
+            "cpu_cores": 6.563285632869441e-05,
+            "voluntary": 147,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647213,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00478488,
+            "cpu_cores": 6.465470142488338e-05,
+            "voluntary": 66,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647055,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00466315,
+            "cpu_cores": 6.300984997522297e-05,
+            "voluntary": 249,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647056,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004618385,
+            "cpu_cores": 6.240497217070439e-05,
+            "voluntary": 250,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647239,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004544155,
+            "cpu_cores": 6.140195464742917e-05,
+            "voluntary": 59,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646962,
+            "name": "Service Thread",
+            "cpu_s": 0.004446744,
+            "cpu_cores": 6.00857086557848e-05,
+            "voluntary": 78,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647054,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004328073,
+            "cpu_cores": 5.848219131098361e-05,
+            "voluntary": 251,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647059,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004226754,
+            "cpu_cores": 5.711313927756423e-05,
+            "voluntary": 252,
+            "involuntary": 1
+          },
+          {
+            "tid": 2646966,
+            "name": "Monitor Deflati",
+            "cpu_s": 0.003454118,
+            "cpu_cores": 4.667305511868956e-05,
+            "voluntary": 298,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647231,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003223501,
+            "cpu_cores": 4.3556890600770135e-05,
+            "voluntary": 58,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647212,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002212536,
+            "cpu_cores": 2.989643511891746e-05,
+            "voluntary": 45,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647085,
+            "name": "controller-1-to",
+            "cpu_s": 0.001957574,
+            "cpu_cores": 2.6451313823359136e-05,
+            "voluntary": 15,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647232,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001920561,
+            "cpu_cores": 2.5951183315626607e-05,
+            "voluntary": 57,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647235,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001876312,
+            "cpu_cores": 2.535327785439254e-05,
+            "voluntary": 50,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647244,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001843584,
+            "cpu_cores": 2.4911047522966552e-05,
+            "voluntary": 43,
+            "involuntary": 1
+          },
+          {
+            "tid": 2646940,
+            "name": "VM Periodic Tas",
+            "cpu_s": 0.001479438,
+            "cpu_cores": 1.999060000807264e-05,
+            "voluntary": 15,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646923,
+            "name": "G1 Service",
+            "cpu_s": 0.001469782,
+            "cpu_cores": 1.986012530505842e-05,
+            "voluntary": 100,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646909,
+            "name": "G1 Main Marker",
+            "cpu_s": 0.001453085,
+            "cpu_cores": 1.9634510545714136e-05,
+            "voluntary": 21,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647045,
+            "name": "controller-1-Th",
+            "cpu_s": 0.001423351,
+            "cpu_cores": 1.9232736020090197e-05,
+            "voluntary": 76,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647047,
+            "name": "controller-1-Th",
+            "cpu_s": 0.001130765,
+            "cpu_cores": 1.5279228205662054e-05,
+            "voluntary": 76,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647087,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.001049686,
+            "cpu_cores": 1.4183664986348692e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647090,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.001013619,
+            "cpu_cores": 1.369631710797112e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647117,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.000974219,
+            "cpu_cores": 1.3163932756401093e-05,
+            "voluntary": 4,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647048,
+            "name": "controller-1-Th",
+            "cpu_s": 0.000931889,
+            "cpu_cores": 1.2591957385792985e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647091,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.000856721,
+            "cpu_cores": 1.1576265331508315e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647046,
+            "name": "controller-1-Th",
+            "cpu_s": 0.000842792,
+            "cpu_cores": 1.1388052599705804e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647088,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.000818489,
+            "cpu_cores": 1.105966333838077e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647241,
+            "name": "transaction-log",
+            "cpu_s": 0.000558759,
+            "cpu_cores": 7.550115428906559e-06,
+            "voluntary": 7,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646946,
+            "name": "Reference Handl",
+            "cpu_s": 0.000477925,
+            "cpu_cores": 6.457862721424024e-06,
+            "voluntary": 22,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646912,
+            "name": "G1 Conc#0",
+            "cpu_s": 0.000376787,
+            "cpu_cores": 5.091256413071495e-06,
+            "voluntary": 12,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647242,
+            "name": "TxnMarkerSender",
+            "cpu_s": 0.000284965,
+            "cpu_cores": 3.850530628049583e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647015,
+            "name": "SensorExpiryThr",
+            "cpu_s": 0.000276449,
+            "cpu_cores": 3.7354599392686095e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647131,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.000265088,
+            "cpu_cores": 3.58194677637046e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647126,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.000241072,
+            "cpu_cores": 3.2574355431901083e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647237,
+            "name": "AddPartitionsTo",
+            "cpu_s": 0.000133521,
+            "cpu_cores": 1.804174898628984e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646980,
+            "name": "Common-Cleaner",
+            "cpu_s": 3.9344e-05,
+            "cpu_cores": 5.316276631515548e-07,
+            "voluntary": 1,
+            "involuntary": 0
+          },
+          {
+            "tid": 2645479,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646903,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646951,
+            "name": "Finalizer",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646956,
+            "name": "Signal Dispatch",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646979,
+            "name": "Notification Th",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646998,
+            "name": "RMI TCP Accept-",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647024,
+            "name": "kafka-1-raft-sc",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647037,
+            "name": "kafka-1-snapsho",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647066,
+            "name": "controller-1-re",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647130,
+            "name": "broker-1-direct",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647236,
+            "name": "LogDirFailureHa",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ]
+      },
+      {
+        "broker": 2,
+        "cpu_s": 16.55,
+        "system_cpu_s": 3.72,
+        "cpu_cores": 0.2236284522457867,
+        "io": {
+          "rchar": 3389878246,
+          "wchar": 3383481515,
+          "syscr": 284327,
+          "syscw": 166907,
+          "read_bytes": 557056,
+          "write_bytes": 2289123328,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 166032,
+        "major_faults": 242,
+        "threads": [
+          {
+            "tid": 2646969,
+            "name": "C2 CompilerThre",
+            "cpu_s": 5.194966432,
+            "cpu_cores": 0.07019590952610133,
+            "voluntary": 2011,
+            "involuntary": 186
+          },
+          {
+            "tid": 2648033,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.507590345,
+            "cpu_cores": 0.02037100274761581,
+            "voluntary": 100791,
+            "involuntary": 123
+          },
+          {
+            "tid": 2648032,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.475416158,
+            "cpu_cores": 0.01993625569981662,
+            "voluntary": 101139,
+            "involuntary": 138
+          },
+          {
+            "tid": 2647186,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.526691672,
+            "cpu_cores": 0.007116812291245048,
+            "voluntary": 36401,
+            "involuntary": 109
+          },
+          {
+            "tid": 2647185,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.52435385,
+            "cpu_cores": 0.007085222954961897,
+            "voluntary": 33086,
+            "involuntary": 101
+          },
+          {
+            "tid": 2647187,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.520351969,
+            "cpu_cores": 0.007031148365590187,
+            "voluntary": 36062,
+            "involuntary": 99
+          },
+          {
+            "tid": 2647183,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.519237918,
+            "cpu_cores": 0.007016094981852852,
+            "voluntary": 33462,
+            "involuntary": 92
+          },
+          {
+            "tid": 2647189,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.515664872,
+            "cpu_cores": 0.006967814936730013,
+            "voluntary": 35378,
+            "involuntary": 124
+          },
+          {
+            "tid": 2647184,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.514707039,
+            "cpu_cores": 0.0069548724164097755,
+            "voluntary": 35069,
+            "involuntary": 100
+          },
+          {
+            "tid": 2647188,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.50341682,
+            "cpu_cores": 0.006802315667135698,
+            "voluntary": 36524,
+            "involuntary": 99
+          },
+          {
+            "tid": 2647190,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.502007055,
+            "cpu_cores": 0.0067832665091308465,
+            "voluntary": 32399,
+            "involuntary": 96
+          },
+          {
+            "tid": 2646972,
+            "name": "C1 CompilerThre",
+            "cpu_s": 0.485890399,
+            "cpu_cores": 0.0065654935280639115,
+            "voluntary": 2072,
+            "involuntary": 107
+          },
+          {
+            "tid": 2647255,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.46552737,
+            "cpu_cores": 0.006290342310039376,
+            "voluntary": 7906,
+            "involuntary": 150
+          },
+          {
+            "tid": 2647254,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.464335718,
+            "cpu_cores": 0.006274240358838434,
+            "voluntary": 9277,
+            "involuntary": 136
+          },
+          {
+            "tid": 2647253,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.262110282,
+            "cpu_cores": 0.003541710977726084,
+            "voluntary": 4655,
+            "involuntary": 57
+          },
+          {
+            "tid": 2647042,
+            "name": "kafka-2-metadat",
+            "cpu_s": 0.128945739,
+            "cpu_cores": 0.0017423526305896783,
+            "voluntary": 566,
+            "involuntary": 25
+          },
+          {
+            "tid": 2647039,
+            "name": "kafka-2-raft-io",
+            "cpu_s": 0.122059764,
+            "cpu_cores": 0.0016493073175109362,
+            "voluntary": 1245,
+            "involuntary": 17
+          },
+          {
+            "tid": 2647011,
+            "name": "GC Thread#2",
+            "cpu_s": 0.061143574,
+            "cpu_cores": 0.0008261898983924909,
+            "voluntary": 97,
+            "involuntary": 6
+          },
+          {
+            "tid": 2647012,
+            "name": "GC Thread#3",
+            "cpu_s": 0.059043721,
+            "cpu_cores": 0.0007978160690067706,
+            "voluntary": 95,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647010,
+            "name": "GC Thread#1",
+            "cpu_s": 0.058723822,
+            "cpu_cores": 0.0007934934999285244,
+            "voluntary": 97,
+            "involuntary": 7
+          },
+          {
+            "tid": 2646906,
+            "name": "GC Thread#0",
+            "cpu_s": 0.057321835,
+            "cpu_cores": 0.0007745494405400825,
+            "voluntary": 99,
+            "involuntary": 8
+          },
+          {
+            "tid": 2647038,
+            "name": "kafka-2-raft-ou",
+            "cpu_s": 0.034295939,
+            "cpu_cores": 0.00046341678289340865,
+            "voluntary": 310,
+            "involuntary": 16
+          },
+          {
+            "tid": 2647044,
+            "name": "quorum-controll",
+            "cpu_s": 0.02509237,
+            "cpu_cores": 0.00033905546019810336,
+            "voluntary": 159,
+            "involuntary": 9
+          },
+          {
+            "tid": 2647020,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.024268381,
+            "cpu_cores": 0.00032792147924719375,
+            "voluntary": 1148,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647023,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.023479776,
+            "cpu_cores": 0.000317265617278415,
+            "voluntary": 1142,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647144,
+            "name": "ExpirationReape",
+            "cpu_s": 0.022839556,
+            "cpu_cores": 0.00030861477693419766,
+            "voluntary": 544,
+            "involuntary": 1
+          },
+          {
+            "tid": 2648059,
+            "name": "executor-Fetch",
+            "cpu_s": 0.020006293,
+            "cpu_cores": 0.00027033089660215813,
+            "voluntary": 73,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647161,
+            "name": "group-coordinat",
+            "cpu_s": 0.017901699,
+            "cpu_cores": 0.00024189300543443792,
+            "voluntary": 594,
+            "involuntary": 9
+          },
+          {
+            "tid": 2647107,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.017008035,
+            "cpu_cores": 0.00022981755545572018,
+            "voluntary": 370,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647162,
+            "name": "group-coordinat",
+            "cpu_s": 0.015941263,
+            "cpu_cores": 0.00021540301942797743,
+            "voluntary": 581,
+            "involuntary": 18
+          },
+          {
+            "tid": 2647163,
+            "name": "group-coordinat",
+            "cpu_s": 0.015730179,
+            "cpu_cores": 0.0002125507905328808,
+            "voluntary": 612,
+            "involuntary": 11
+          },
+          {
+            "tid": 2646917,
+            "name": "G1 Refine#0",
+            "cpu_s": 0.015409224,
+            "cpu_cores": 0.000208213952473029,
+            "voluntary": 343,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647164,
+            "name": "group-coordinat",
+            "cpu_s": 0.013631596,
+            "cpu_cores": 0.00018419412175950796,
+            "voluntary": 625,
+            "involuntary": 10
+          },
+          {
+            "tid": 2647225,
+            "name": "kafka-log-clean",
+            "cpu_s": 0.011545129,
+            "cpu_cores": 0.00015600116793038955,
+            "voluntary": 8,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647167,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.011161106,
+            "cpu_cores": 0.00015081213656381652,
+            "voluntary": 74,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647208,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.010700465,
+            "cpu_cores": 0.00014458782031783756,
+            "voluntary": 62,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647256,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.009653517,
+            "cpu_cores": 0.00013044115199023506,
+            "voluntary": 161,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647029,
+            "name": "raft-expiration",
+            "cpu_s": 0.008395076,
+            "cpu_cores": 0.00011343672823962235,
+            "voluntary": 372,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647120,
+            "name": "client-metrics-",
+            "cpu_s": 0.007930956,
+            "cpu_cores": 0.00010716540272564565,
+            "voluntary": 370,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647152,
+            "name": "group-coordinat",
+            "cpu_s": 0.007755057,
+            "cpu_cores": 0.00010478860386633558,
+            "voluntary": 377,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647146,
+            "name": "ExpirationReape",
+            "cpu_s": 0.007037626,
+            "cpu_cores": 9.509446585285238e-05,
+            "voluntary": 370,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647181,
+            "name": "ExpirationReape",
+            "cpu_s": 0.007006896,
+            "cpu_cores": 9.467923308321414e-05,
+            "voluntary": 371,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647143,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006926778,
+            "cpu_cores": 9.359665517765352e-05,
+            "voluntary": 371,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647089,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006604645,
+            "cpu_cores": 8.924389963642743e-05,
+            "voluntary": 371,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647170,
+            "name": "share-group-loc",
+            "cpu_s": 0.006539778,
+            "cpu_cores": 8.836739771426264e-05,
+            "voluntary": 371,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647118,
+            "name": "broker-2-lifecy",
+            "cpu_s": 0.006520415,
+            "cpu_cores": 8.810575918128165e-05,
+            "voluntary": 75,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647207,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.006288807,
+            "cpu_cores": 8.497620398081386e-05,
+            "voluntary": 51,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647147,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006271017,
+            "cpu_cores": 8.473582028501611e-05,
+            "voluntary": 370,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647243,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00618851,
+            "cpu_cores": 8.362096151103163e-05,
+            "voluntary": 57,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647101,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006082868,
+            "cpu_cores": 8.21934958341646e-05,
+            "voluntary": 249,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646945,
+            "name": "VM Thread",
+            "cpu_s": 0.006053986,
+            "cpu_cores": 8.180323378233602e-05,
+            "voluntary": 122,
+            "involuntary": 11
+          },
+          {
+            "tid": 2647148,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005709839,
+            "cpu_cores": 7.715301861889006e-05,
+            "voluntary": 370,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647098,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005672009,
+            "cpu_cores": 7.664184856762372e-05,
+            "voluntary": 255,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647095,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005579562,
+            "cpu_cores": 7.539267759935988e-05,
+            "voluntary": 260,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647099,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005566023,
+            "cpu_cores": 7.520973466190033e-05,
+            "voluntary": 247,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647106,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005414762,
+            "cpu_cores": 7.316585168213296e-05,
+            "voluntary": 246,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647097,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005209851,
+            "cpu_cores": 7.039703417288e-05,
+            "voluntary": 266,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647150,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005183552,
+            "cpu_cores": 7.00416743743536e-05,
+            "voluntary": 370,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647100,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005019773,
+            "cpu_cores": 6.782864450847066e-05,
+            "voluntary": 248,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647105,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004909141,
+            "cpu_cores": 6.633375248860022e-05,
+            "voluntary": 246,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647108,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004905036,
+            "cpu_cores": 6.627828452506734e-05,
+            "voluntary": 147,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647096,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004850774,
+            "cpu_cores": 6.554508047215129e-05,
+            "voluntary": 260,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647227,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004751244,
+            "cpu_cores": 6.420020193124354e-05,
+            "voluntary": 70,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647093,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004607216,
+            "cpu_cores": 6.225405336809815e-05,
+            "voluntary": 247,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647226,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003874455,
+            "cpu_cores": 5.235277190005738e-05,
+            "voluntary": 47,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646964,
+            "name": "Monitor Deflati",
+            "cpu_s": 0.003693444,
+            "cpu_cores": 4.9906898197975076e-05,
+            "voluntary": 298,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647206,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003652539,
+            "cpu_cores": 4.935417784515852e-05,
+            "voluntary": 59,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647205,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002922631,
+            "cpu_cores": 3.949144694958041e-05,
+            "voluntary": 46,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647119,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.002829777,
+            "cpu_cores": 3.823677647798946e-05,
+            "voluntary": 7,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647228,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002340252,
+            "cpu_cores": 3.162217115559558e-05,
+            "voluntary": 52,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647209,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002075015,
+            "cpu_cores": 2.8038211047540245e-05,
+            "voluntary": 48,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647109,
+            "name": "controller-2-to",
+            "cpu_s": 0.001827488,
+            "cpu_cores": 2.4693553651827687e-05,
+            "voluntary": 15,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646919,
+            "name": "G1 Service",
+            "cpu_s": 0.001735583,
+            "cpu_cores": 2.3451706346471252e-05,
+            "voluntary": 96,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647073,
+            "name": "controller-2-Th",
+            "cpu_s": 0.001647825,
+            "cpu_cores": 2.2265894520961536e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647113,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.001374018,
+            "cpu_cores": 1.8566134060293135e-05,
+            "voluntary": 76,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647111,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.001302514,
+            "cpu_cores": 1.7599951048245838e-05,
+            "voluntary": 76,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646910,
+            "name": "G1 Main Marker",
+            "cpu_s": 0.00128316,
+            "cpu_cores": 1.7338434125903546e-05,
+            "voluntary": 21,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646939,
+            "name": "VM Periodic Tas",
+            "cpu_s": 0.001268198,
+            "cpu_cores": 1.7136263195238803e-05,
+            "voluntary": 15,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647110,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.001198856,
+            "cpu_cores": 1.6199293761061926e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647077,
+            "name": "controller-2-Th",
+            "cpu_s": 0.001152746,
+            "cpu_cores": 1.5576241922206746e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646960,
+            "name": "Service Thread",
+            "cpu_s": 0.001119577,
+            "cpu_cores": 1.5128052669485265e-05,
+            "voluntary": 76,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647074,
+            "name": "controller-2-Th",
+            "cpu_s": 0.001099437,
+            "cpu_cores": 1.4855915084697945e-05,
+            "voluntary": 75,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647080,
+            "name": "controller-2-Th",
+            "cpu_s": 0.001082008,
+            "cpu_cores": 1.4620409326740735e-05,
+            "voluntary": 76,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647112,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.000947326,
+            "cpu_cores": 1.2800546655721579e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647230,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.000947199,
+            "cpu_cores": 1.2798830594486824e-05,
+            "voluntary": 34,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647238,
+            "name": "transaction-log",
+            "cpu_s": 0.000638509,
+            "cpu_cores": 8.627720810574322e-06,
+            "voluntary": 7,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646947,
+            "name": "Reference Handl",
+            "cpu_s": 0.000355084,
+            "cpu_cores": 4.797999114032805e-06,
+            "voluntary": 19,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647017,
+            "name": "SensorExpiryThr",
+            "cpu_s": 0.000320642,
+            "cpu_cores": 4.332608712084202e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647240,
+            "name": "TxnMarkerSender",
+            "cpu_s": 0.000296567,
+            "cpu_cores": 4.007300253605815e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646913,
+            "name": "G1 Conc#0",
+            "cpu_s": 0.000291034,
+            "cpu_cores": 3.93253673540183e-06,
+            "voluntary": 13,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647123,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.000287931,
+            "cpu_cores": 3.890608089642394e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647127,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.000172374,
+            "cpu_cores": 2.329168025825694e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647234,
+            "name": "AddPartitionsTo",
+            "cpu_s": 0.000126017,
+            "cpu_cores": 1.7027786505533112e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646984,
+            "name": "Common-Cleaner",
+            "cpu_s": 4.814e-05,
+            "cpu_cores": 6.504817940249047e-07,
+            "voluntary": 1,
+            "involuntary": 0
+          },
+          {
+            "tid": 2645480,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646905,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646953,
+            "name": "Finalizer",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646957,
+            "name": "Signal Dispatch",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646983,
+            "name": "Notification Th",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647000,
+            "name": "RMI TCP Accept-",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647026,
+            "name": "kafka-2-raft-sc",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647043,
+            "name": "kafka-2-snapsho",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647102,
+            "name": "controller-2-re",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647125,
+            "name": "broker-2-direct",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647233,
+            "name": "LogDirFailureHa",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ]
+      },
+      {
+        "broker": 3,
+        "cpu_s": 16.48,
+        "system_cpu_s": 3.74,
+        "cpu_cores": 0.22268259172269275,
+        "io": {
+          "rchar": 3393569745,
+          "wchar": 3387576679,
+          "syscr": 273948,
+          "syscw": 166616,
+          "read_bytes": 512000,
+          "write_bytes": 2290917376,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 165045,
+        "major_faults": 242,
+        "threads": [
+          {
+            "tid": 2646967,
+            "name": "C2 CompilerThre",
+            "cpu_s": 4.984356583,
+            "cpu_cores": 0.06735008749833162,
+            "voluntary": 1794,
+            "involuntary": 161
+          },
+          {
+            "tid": 2647659,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.514189821,
+            "cpu_cores": 0.02046017680220875,
+            "voluntary": 102003,
+            "involuntary": 133
+          },
+          {
+            "tid": 2647660,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.49162519,
+            "cpu_cores": 0.020155276892479004,
+            "voluntary": 100639,
+            "involuntary": 136
+          },
+          {
+            "tid": 2647192,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.566863102,
+            "cpu_cores": 0.007659620431148369,
+            "voluntary": 38040,
+            "involuntary": 128
+          },
+          {
+            "tid": 2647182,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.543662166,
+            "cpu_cores": 0.0073461225817022325,
+            "voluntary": 38920,
+            "involuntary": 89
+          },
+          {
+            "tid": 2647195,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.52959962,
+            "cpu_cores": 0.007156105337193764,
+            "voluntary": 34938,
+            "involuntary": 100
+          },
+          {
+            "tid": 2646971,
+            "name": "C1 CompilerThre",
+            "cpu_s": 0.524331752,
+            "cpu_cores": 0.00708492436030705,
+            "voluntary": 2154,
+            "involuntary": 130
+          },
+          {
+            "tid": 2647191,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.521579389,
+            "cpu_cores": 0.007047733624493843,
+            "voluntary": 33969,
+            "involuntary": 95
+          },
+          {
+            "tid": 2647193,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.509125258,
+            "cpu_cores": 0.006879449755031832,
+            "voluntary": 34802,
+            "involuntary": 119
+          },
+          {
+            "tid": 2647247,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.507600493,
+            "cpu_cores": 0.00685884668331047,
+            "voluntary": 9490,
+            "involuntary": 142
+          },
+          {
+            "tid": 2647197,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.50083441,
+            "cpu_cores": 0.00676742138608651,
+            "voluntary": 32566,
+            "involuntary": 105
+          },
+          {
+            "tid": 2647194,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.483065271,
+            "cpu_cores": 0.00652731957023695,
+            "voluntary": 33595,
+            "involuntary": 143
+          },
+          {
+            "tid": 2647196,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.466441825,
+            "cpu_cores": 0.006302698694105746,
+            "voluntary": 31099,
+            "involuntary": 99
+          },
+          {
+            "tid": 2647245,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.323599095,
+            "cpu_cores": 0.004372565846706181,
+            "voluntary": 4735,
+            "involuntary": 77
+          },
+          {
+            "tid": 2647246,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.30337838,
+            "cpu_cores": 0.004099337617174268,
+            "voluntary": 6177,
+            "involuntary": 69
+          },
+          {
+            "tid": 2647033,
+            "name": "kafka-3-raft-io",
+            "cpu_s": 0.200331224,
+            "cpu_cores": 0.002706934233209909,
+            "voluntary": 1692,
+            "involuntary": 21
+          },
+          {
+            "tid": 2647034,
+            "name": "kafka-3-metadat",
+            "cpu_s": 0.100383934,
+            "cpu_cores": 0.001356417147478139,
+            "voluntary": 545,
+            "involuntary": 17
+          },
+          {
+            "tid": 2647040,
+            "name": "quorum-controll",
+            "cpu_s": 0.095557665,
+            "cpu_cores": 0.0012912031857505368,
+            "voluntary": 487,
+            "involuntary": 12
+          },
+          {
+            "tid": 2647005,
+            "name": "GC Thread#2",
+            "cpu_s": 0.070742815,
+            "cpu_cores": 0.0009558976571577054,
+            "voluntary": 106,
+            "involuntary": 3
+          },
+          {
+            "tid": 2646907,
+            "name": "GC Thread#0",
+            "cpu_s": 0.067752152,
+            "cpu_cores": 0.000915486941878023,
+            "voluntary": 104,
+            "involuntary": 9
+          },
+          {
+            "tid": 2647004,
+            "name": "GC Thread#1",
+            "cpu_s": 0.063619011,
+            "cpu_cores": 0.0008596387289025788,
+            "voluntary": 104,
+            "involuntary": 11
+          },
+          {
+            "tid": 2647006,
+            "name": "GC Thread#3",
+            "cpu_s": 0.062720821,
+            "cpu_cores": 0.0008475021222848964,
+            "voluntary": 105,
+            "involuntary": 6
+          },
+          {
+            "tid": 2647081,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.03437138,
+            "cpu_cores": 0.0004644361638037334,
+            "voluntary": 496,
+            "involuntary": 9
+          },
+          {
+            "tid": 2647083,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.0330988,
+            "cpu_cores": 0.0004472406897397489,
+            "voluntary": 532,
+            "involuntary": 5
+          },
+          {
+            "tid": 2648056,
+            "name": "executor-Fetch",
+            "cpu_s": 0.025915378,
+            "cpu_cores": 0.00035017618558939645,
+            "voluntary": 99,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647022,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.024148353,
+            "cpu_cores": 0.0003262996257205378,
+            "voluntary": 1208,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647019,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.023592254,
+            "cpu_cores": 0.00031878545299150876,
+            "voluntary": 1189,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647160,
+            "name": "group-coordinat",
+            "cpu_s": 0.021127042,
+            "cpu_cores": 0.0002854747856792586,
+            "voluntary": 639,
+            "involuntary": 14
+          },
+          {
+            "tid": 2647139,
+            "name": "ExpirationReape",
+            "cpu_s": 0.019775468,
+            "cpu_cores": 0.00026721192152725576,
+            "voluntary": 602,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647031,
+            "name": "kafka-3-raft-ou",
+            "cpu_s": 0.019584167,
+            "cpu_cores": 0.00026462700632827864,
+            "voluntary": 176,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647028,
+            "name": "raft-expiration",
+            "cpu_s": 0.017073701,
+            "cpu_cores": 0.00023070485370014143,
+            "voluntary": 726,
+            "involuntary": 2
+          },
+          {
+            "tid": 2646918,
+            "name": "G1 Refine#0",
+            "cpu_s": 0.016207745,
+            "cpu_cores": 0.00021900380234105064,
+            "voluntary": 324,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647158,
+            "name": "group-coordinat",
+            "cpu_s": 0.014321214,
+            "cpu_cores": 0.00019351244236257958,
+            "voluntary": 661,
+            "involuntary": 14
+          },
+          {
+            "tid": 2647159,
+            "name": "group-coordinat",
+            "cpu_s": 0.014142007,
+            "cpu_cores": 0.0001910909448374067,
+            "voluntary": 637,
+            "involuntary": 8
+          },
+          {
+            "tid": 2647157,
+            "name": "group-coordinat",
+            "cpu_s": 0.012463637,
+            "cpu_cores": 0.00016841231732104653,
+            "voluntary": 635,
+            "involuntary": 15
+          },
+          {
+            "tid": 2647216,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.011612261,
+            "cpu_cores": 0.00015690827519662304,
+            "voluntary": 61,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647215,
+            "name": "kafka-log-clean",
+            "cpu_s": 0.011079515,
+            "cpu_cores": 0.00014970965505039138,
+            "voluntary": 6,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647082,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.010423716,
+            "cpu_cores": 0.00014084830669061285,
+            "voluntary": 300,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647166,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.01038522,
+            "cpu_cores": 0.00014032813745208392,
+            "voluntary": 74,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647248,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.0091618,
+            "cpu_cores": 0.00012379692772117513,
+            "voluntary": 160,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647063,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.008286994,
+            "cpu_cores": 0.00011197629256737892,
+            "voluntary": 259,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647069,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.007492799,
+            "cpu_cores": 0.00010124489687968449,
+            "voluntary": 261,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647065,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.007429401,
+            "cpu_cores": 0.00010038824451621148,
+            "voluntary": 257,
+            "involuntary": 4
+          },
+          {
+            "tid": 2647071,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.007262979,
+            "cpu_cores": 9.813950165943515e-05,
+            "voluntary": 259,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647067,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.007139641,
+            "cpu_cores": 9.647292244232997e-05,
+            "voluntary": 259,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647070,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.007135797,
+            "cpu_cores": 9.642098118731891e-05,
+            "voluntary": 258,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647141,
+            "name": "ExpirationReape",
+            "cpu_s": 0.007029299,
+            "cpu_cores": 9.498194898748376e-05,
+            "voluntary": 374,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647121,
+            "name": "client-metrics-",
+            "cpu_s": 0.006985543,
+            "cpu_cores": 9.439070508679091e-05,
+            "voluntary": 370,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647142,
+            "name": "ExpirationReape",
+            "cpu_s": 0.00694942,
+            "cpu_cores": 9.390260051999487e-05,
+            "voluntary": 377,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647057,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006948662,
+            "cpu_cores": 9.389235820175908e-05,
+            "voluntary": 371,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647151,
+            "name": "group-coordinat",
+            "cpu_s": 0.00680299,
+            "cpu_cores": 9.192399542861416e-05,
+            "voluntary": 375,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647068,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006720132,
+            "cpu_cores": 9.080439383972103e-05,
+            "voluntary": 257,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647064,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006706187,
+            "cpu_cores": 9.061596491122752e-05,
+            "voluntary": 256,
+            "involuntary": 2
+          },
+          {
+            "tid": 2646944,
+            "name": "VM Thread",
+            "cpu_s": 0.006091619,
+            "cpu_cores": 8.231174191184453e-05,
+            "voluntary": 130,
+            "involuntary": 9
+          },
+          {
+            "tid": 2647204,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00603949,
+            "cpu_cores": 8.160735958029645e-05,
+            "voluntary": 57,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647114,
+            "name": "broker-3-lifecy",
+            "cpu_s": 0.005694783,
+            "cpu_cores": 7.694957753266573e-05,
+            "voluntary": 75,
+            "involuntary": 3
+          },
+          {
+            "tid": 2647140,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005657957,
+            "cpu_cores": 7.645197382375918e-05,
+            "voluntary": 374,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647224,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.005643978,
+            "cpu_cores": 7.626308547729733e-05,
+            "voluntary": 48,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647180,
+            "name": "ExpirationReape",
+            "cpu_s": 0.00562747,
+            "cpu_cores": 7.60400245413654e-05,
+            "voluntary": 369,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647169,
+            "name": "share-group-loc",
+            "cpu_s": 0.005557613,
+            "cpu_cores": 7.509609627619718e-05,
+            "voluntary": 369,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647136,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005193558,
+            "cpu_cores": 7.017687837998329e-05,
+            "voluntary": 373,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647217,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004675202,
+            "cpu_cores": 6.317270013271339e-05,
+            "voluntary": 55,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647084,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004481905,
+            "cpu_cores": 6.05608143965349e-05,
+            "voluntary": 147,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647145,
+            "name": "ExpirationReape",
+            "cpu_s": 0.004441019,
+            "cpu_cores": 6.000835077728891e-05,
+            "voluntary": 372,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647203,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00416254,
+            "cpu_cores": 5.6245460882850575e-05,
+            "voluntary": 54,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647202,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003955522,
+            "cpu_cores": 5.344817297185249e-05,
+            "voluntary": 39,
+            "involuntary": 5
+          },
+          {
+            "tid": 2646965,
+            "name": "Monitor Deflati",
+            "cpu_s": 0.00353896,
+            "cpu_cores": 4.781946509726582e-05,
+            "voluntary": 298,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646961,
+            "name": "Service Thread",
+            "cpu_s": 0.003112341,
+            "cpu_cores": 4.205486409009692e-05,
+            "voluntary": 78,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647200,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002920096,
+            "cpu_cores": 3.9457193286351224e-05,
+            "voluntary": 37,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647220,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001868645,
+            "cpu_cores": 2.5249679102527378e-05,
+            "voluntary": 40,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647201,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001789206,
+            "cpu_cores": 2.417627604404079e-05,
+            "voluntary": 41,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647086,
+            "name": "controller-3-to",
+            "cpu_s": 0.00164197,
+            "cpu_cores": 2.2186780044351324e-05,
+            "voluntary": 15,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646941,
+            "name": "VM Periodic Tas",
+            "cpu_s": 0.001529783,
+            "cpu_cores": 2.0670876408575005e-05,
+            "voluntary": 15,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647218,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001463403,
+            "cpu_cores": 1.9773930386818188e-05,
+            "voluntary": 37,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646921,
+            "name": "G1 Service",
+            "cpu_s": 0.001459989,
+            "cpu_cores": 1.9727799417877577e-05,
+            "voluntary": 98,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647049,
+            "name": "controller-3-Th",
+            "cpu_s": 0.001423318,
+            "cpu_cores": 1.9232290114415023e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646911,
+            "name": "G1 Main Marker",
+            "cpu_s": 0.00133308,
+            "cpu_cores": 1.801296780180141e-05,
+            "voluntary": 25,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647103,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.001234031,
+            "cpu_cores": 1.667458867391664e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647092,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.001130576,
+            "cpu_cores": 1.52766743822497e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647104,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.001044865,
+            "cpu_cores": 1.4118522220893893e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647050,
+            "name": "controller-3-Th",
+            "cpu_s": 0.001016256,
+            "cpu_cores": 1.3731949025105391e-05,
+            "voluntary": 76,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647094,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.001001056,
+            "cpu_cores": 1.352656216866213e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647115,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.00098039,
+            "cpu_cores": 1.3247317117658419e-05,
+            "voluntary": 5,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647051,
+            "name": "controller-3-Th",
+            "cpu_s": 0.000942687,
+            "cpu_cores": 1.2737863127626824e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647052,
+            "name": "controller-3-Th",
+            "cpu_s": 0.000865002,
+            "cpu_cores": 1.1688160631390332e-05,
+            "voluntary": 74,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647222,
+            "name": "transaction-log",
+            "cpu_s": 0.000651794,
+            "cpu_cores": 8.80723162556437e-06,
+            "voluntary": 7,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646949,
+            "name": "Reference Handl",
+            "cpu_s": 0.000361536,
+            "cpu_cores": 4.885180429675694e-06,
+            "voluntary": 22,
+            "involuntary": 1
+          },
+          {
+            "tid": 2647124,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.000352801,
+            "cpu_cores": 4.767150548686755e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647223,
+            "name": "TxnMarkerSender",
+            "cpu_s": 0.000341341,
+            "cpu_cores": 4.612299668763086e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646914,
+            "name": "G1 Conc#0",
+            "cpu_s": 0.000313169,
+            "cpu_cores": 4.231631345097328e-06,
+            "voluntary": 11,
+            "involuntary": 2
+          },
+          {
+            "tid": 2647016,
+            "name": "SensorExpiryThr",
+            "cpu_s": 0.000280015,
+            "cpu_cores": 3.783644776773653e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647221,
+            "name": "AddPartitionsTo",
+            "cpu_s": 0.000157927,
+            "cpu_cores": 2.1339559261522874e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647129,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.00012259,
+            "cpu_cores": 1.6564720218012684e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646982,
+            "name": "Common-Cleaner",
+            "cpu_s": 3.6138e-05,
+            "cpu_cores": 4.883072511938513e-07,
+            "voluntary": 1,
+            "involuntary": 0
+          },
+          {
+            "tid": 2645482,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646904,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646952,
+            "name": "Finalizer",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646958,
+            "name": "Signal Dispatch",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646981,
+            "name": "Notification Th",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2646999,
+            "name": "RMI TCP Accept-",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647025,
+            "name": "kafka-3-raft-sc",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647036,
+            "name": "kafka-3-snapsho",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647072,
+            "name": "controller-3-re",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647128,
+            "name": "broker-3-direct",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2647219,
+            "name": "LogDirFailureHa",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ]
+      }
+    ],
+    "cluster_cpu_s": 49.18,
+    "cluster_cpu_us_per_record": 30.183667432203357,
+    "cluster_write_bytes_per_record": 4217.641313940828
+  },
+  {
+    "trial": "gap-control-bloom-1",
+    "max_phase_s": 68.34188485145569,
+    "sampled_s": 69.00585126876831,
+    "boundary_error_s": [
+      -0.36702799797058105,
+      0.296938419342041
+    ],
+    "records": 993527,
+    "throughput": 14538,
+    "sampler_max_ms": 425.90299900621176,
+    "brokers": [
+      {
+        "broker": 1,
+        "cpu_s": 63.82,
+        "system_cpu_s": 3.92,
+        "cpu_cores": 0.924849108105773,
+        "io": {
+          "rchar": 13197205667,
+          "wchar": 3462027711,
+          "syscr": 223592,
+          "syscw": 150336,
+          "read_bytes": 12288,
+          "write_bytes": 3478212608,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 514708,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2657617,
+            "name": "engine",
+            "cpu_s": 53.915672134,
+            "cpu_cores": 0.7813202959268752,
+            "voluntary": 1194,
+            "involuntary": 363
+          },
+          {
+            "tid": 2657605,
+            "name": "committer",
+            "cpu_s": 4.721148904,
+            "cpu_cores": 0.0684166460842831,
+            "voluntary": 10182,
+            "involuntary": 72
+          },
+          {
+            "tid": 2657606,
+            "name": "database",
+            "cpu_s": 3.826178536,
+            "cpu_cores": 0.05544716086607729,
+            "voluntary": 10888,
+            "involuntary": 36
+          },
+          {
+            "tid": 2657641,
+            "name": "peer-reader",
+            "cpu_s": 0.242215643,
+            "cpu_cores": 0.0035100739799093753,
+            "voluntary": 3091,
+            "involuntary": 3
+          },
+          {
+            "tid": 2657639,
+            "name": "peer-reader",
+            "cpu_s": 0.227659076,
+            "cpu_cores": 0.003299127129282112,
+            "voluntary": 3415,
+            "involuntary": 4
+          },
+          {
+            "tid": 2657604,
+            "name": "promoter",
+            "cpu_s": 0.182748376,
+            "cpu_cores": 0.0026483026097050837,
+            "voluntary": 12618,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657607,
+            "name": "peer-writer",
+            "cpu_s": 0.098176658,
+            "cpu_cores": 0.0014227294670652697,
+            "voluntary": 1783,
+            "involuntary": 8
+          },
+          {
+            "tid": 2657608,
+            "name": "peer-writer",
+            "cpu_s": 0.083461575,
+            "cpu_cores": 0.0012094854779043103,
+            "voluntary": 1745,
+            "involuntary": 13
+          },
+          {
+            "tid": 2657614,
+            "name": "stream-listener",
+            "cpu_s": 0.069860078,
+            "cpu_cores": 0.0010123790477984918,
+            "voluntary": 3438,
+            "involuntary": 1
+          },
+          {
+            "tid": 2657612,
+            "name": "peer-listener",
+            "cpu_s": 0.069343219,
+            "cpu_cores": 0.0010048889728193873,
+            "voluntary": 3437,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657611,
+            "name": "liveness",
+            "cpu_s": 0.059801758,
+            "cpu_cores": 0.0008666186548019004,
+            "voluntary": 1378,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657610,
+            "name": "liveness",
+            "cpu_s": 0.047054263,
+            "cpu_cores": 0.0006818880157963722,
+            "voluntary": 1378,
+            "involuntary": 1
+          },
+          {
+            "tid": 2657642,
+            "name": "peer-reader",
+            "cpu_s": 0.034134232,
+            "cpu_cores": 0.0004946570670804691,
+            "voluntary": 1378,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657640,
+            "name": "peer-reader",
+            "cpu_s": 0.031323784,
+            "cpu_cores": 0.00045392939039326047,
+            "voluntary": 1378,
+            "involuntary": 1
+          },
+          {
+            "tid": 2657609,
+            "name": "liveness-check",
+            "cpu_s": 0.014100647,
+            "cpu_cores": 0.00020433987467352466,
+            "voluntary": 1378,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657621,
+            "name": "stats",
+            "cpu_s": 0.01409047,
+            "cpu_cores": 0.00020419239442637344,
+            "voluntary": 80,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657205,
+            "name": "blossom-fused-m",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657215,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 3254,
+          "wal_records": 1063,
+          "wal_batches": 1040,
+          "released": 3254,
+          "delivered": 189597,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 88,
+          "tick_nanos": 50836829126,
+          "ticks_over_4ms": 2004,
+          "ticks_over_16ms": 1220,
+          "db_apply_nanos": 1919182493,
+          "db_flush_nanos": 8181904219,
+          "wal_sync_nanos": 14923524306,
+          "wal_syncs_over_4ms": 219,
+          "wal_syncs_over_16ms": 79,
+          "wal_syncs_over_64ms": 24,
+          "blob_promote_nanos": 2580380596,
+          "blobs_promoted": 66357,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 142492,
+          "stream_waits_over_4ms": 6292,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 112367961,
+          "db_apply_max_nanos": 5673375,
+          "db_flush_max_nanos": 1647015198,
+          "wal_sync_max_nanos": 3957954247,
+          "blob_promote_max_nanos": 341124390,
+          "peer_wait_max_nanos": 93309935,
+          "stream_wait_max_nanos": 360296915
+        }
+      },
+      {
+        "broker": 2,
+        "cpu_s": 64.13,
+        "system_cpu_s": 4.04,
+        "cpu_cores": 0.9293414807712821,
+        "io": {
+          "rchar": 13351939935,
+          "wchar": 3474298673,
+          "syscr": 221315,
+          "syscw": 150920,
+          "read_bytes": 12288,
+          "write_bytes": 3484876800,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 404933,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2657602,
+            "name": "engine",
+            "cpu_s": 53.811307411,
+            "cpu_cores": 0.7798078919628475,
+            "voluntary": 1252,
+            "involuntary": 340
+          },
+          {
+            "tid": 2657593,
+            "name": "committer",
+            "cpu_s": 4.732101477,
+            "cpu_cores": 0.06857536556674179,
+            "voluntary": 9395,
+            "involuntary": 93
+          },
+          {
+            "tid": 2657594,
+            "name": "database",
+            "cpu_s": 4.004823578,
+            "cpu_cores": 0.05803599990965639,
+            "voluntary": 9317,
+            "involuntary": 64
+          },
+          {
+            "tid": 2657633,
+            "name": "peer-reader",
+            "cpu_s": 0.280620805,
+            "cpu_cores": 0.004066623334694046,
+            "voluntary": 2184,
+            "involuntary": 3
+          },
+          {
+            "tid": 2657635,
+            "name": "peer-reader",
+            "cpu_s": 0.262250003,
+            "cpu_cores": 0.0038004024032479836,
+            "voluntary": 2562,
+            "involuntary": 5
+          },
+          {
+            "tid": 2657592,
+            "name": "promoter",
+            "cpu_s": 0.197185206,
+            "cpu_cores": 0.0028575142886360567,
+            "voluntary": 9383,
+            "involuntary": 3
+          },
+          {
+            "tid": 2657595,
+            "name": "peer-writer",
+            "cpu_s": 0.119052461,
+            "cpu_cores": 0.0017252516824451164,
+            "voluntary": 1649,
+            "involuntary": 6
+          },
+          {
+            "tid": 2657596,
+            "name": "peer-writer",
+            "cpu_s": 0.10752286,
+            "cpu_cores": 0.0015581701844559997,
+            "voluntary": 1634,
+            "involuntary": 19
+          },
+          {
+            "tid": 2657601,
+            "name": "stream-listener",
+            "cpu_s": 0.083492108,
+            "cpu_cores": 0.0012099279476288135,
+            "voluntary": 3441,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657600,
+            "name": "peer-listener",
+            "cpu_s": 0.082736197,
+            "cpu_cores": 0.0011989736446805632,
+            "voluntary": 3435,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657636,
+            "name": "peer-reader",
+            "cpu_s": 0.049981163,
+            "cpu_cores": 0.0007243032595211417,
+            "voluntary": 1378,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657599,
+            "name": "liveness",
+            "cpu_s": 0.048080735,
+            "cpu_cores": 0.0006967631601664059,
+            "voluntary": 1378,
+            "involuntary": 5
+          },
+          {
+            "tid": 2657598,
+            "name": "liveness",
+            "cpu_s": 0.047220325,
+            "cpu_cores": 0.0006842945073756619,
+            "voluntary": 1378,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657637,
+            "name": "peer-reader",
+            "cpu_s": 0.037179259,
+            "cpu_cores": 0.0005387841511467179,
+            "voluntary": 1378,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657597,
+            "name": "liveness-check",
+            "cpu_s": 0.017002248,
+            "cpu_cores": 0.00024638849731421444,
+            "voluntary": 1378,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657603,
+            "name": "stats",
+            "cpu_s": 0.016167621,
+            "cpu_cores": 0.00023429347950551814,
+            "voluntary": 79,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657206,
+            "name": "blossom-fused-m",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657214,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 3242,
+          "wal_records": 1014,
+          "wal_batches": 997,
+          "released": 3242,
+          "delivered": 192322,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 87,
+          "tick_nanos": 50809568833,
+          "ticks_over_4ms": 1873,
+          "ticks_over_16ms": 1216,
+          "db_apply_nanos": 1865415459,
+          "db_flush_nanos": 13247639465,
+          "wal_sync_nanos": 13373214236,
+          "wal_syncs_over_4ms": 213,
+          "wal_syncs_over_16ms": 67,
+          "wal_syncs_over_64ms": 23,
+          "blob_promote_nanos": 2450793417,
+          "blobs_promoted": 66301,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 149226,
+          "stream_waits_over_4ms": 6119,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 115240578,
+          "db_apply_max_nanos": 6833047,
+          "db_flush_max_nanos": 4983501073,
+          "wal_sync_max_nanos": 3322007757,
+          "blob_promote_max_nanos": 629612700,
+          "peer_wait_max_nanos": 97779157,
+          "stream_wait_max_nanos": 104210996
+        }
+      },
+      {
+        "broker": 3,
+        "cpu_s": 66.17,
+        "system_cpu_s": 3.92,
+        "cpu_cores": 0.9589041912152774,
+        "io": {
+          "rchar": 13458458799,
+          "wchar": 3475706538,
+          "syscr": 238169,
+          "syscw": 150347,
+          "read_bytes": 16384,
+          "write_bytes": 3483516928,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 390025,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2657628,
+            "name": "engine",
+            "cpu_s": 56.080315847,
+            "cpu_cores": 0.8126892838199311,
+            "voluntary": 863,
+            "involuntary": 274
+          },
+          {
+            "tid": 2657615,
+            "name": "committer",
+            "cpu_s": 4.736580702,
+            "cpu_cores": 0.0686402763665891,
+            "voluntary": 7929,
+            "involuntary": 69
+          },
+          {
+            "tid": 2657616,
+            "name": "database",
+            "cpu_s": 3.824828769,
+            "cpu_cores": 0.05542760068422049,
+            "voluntary": 9056,
+            "involuntary": 50
+          },
+          {
+            "tid": 2657643,
+            "name": "peer-reader",
+            "cpu_s": 0.281262089,
+            "cpu_cores": 0.004075916517637364,
+            "voluntary": 2399,
+            "involuntary": 3
+          },
+          {
+            "tid": 2657626,
+            "name": "peer-reader",
+            "cpu_s": 0.276786115,
+            "cpu_cores": 0.004011052829736947,
+            "voluntary": 1997,
+            "involuntary": 6
+          },
+          {
+            "tid": 2657613,
+            "name": "promoter",
+            "cpu_s": 0.184502443,
+            "cpu_cores": 0.0026737217150091855,
+            "voluntary": 11024,
+            "involuntary": 3
+          },
+          {
+            "tid": 2657618,
+            "name": "peer-writer",
+            "cpu_s": 0.102843576,
+            "cpu_cores": 0.0014903602246632449,
+            "voluntary": 1376,
+            "involuntary": 5
+          },
+          {
+            "tid": 2657619,
+            "name": "peer-writer",
+            "cpu_s": 0.094515601,
+            "cpu_cores": 0.0013696751690211706,
+            "voluntary": 1441,
+            "involuntary": 5
+          },
+          {
+            "tid": 2657625,
+            "name": "stream-listener",
+            "cpu_s": 0.083507464,
+            "cpu_cores": 0.0012101504794825282,
+            "voluntary": 3441,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657624,
+            "name": "peer-listener",
+            "cpu_s": 0.082913057,
+            "cpu_cores": 0.0012015366157438596,
+            "voluntary": 3435,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657623,
+            "name": "liveness",
+            "cpu_s": 0.050691485,
+            "cpu_cores": 0.0007345969083485925,
+            "voluntary": 1378,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657627,
+            "name": "peer-reader",
+            "cpu_s": 0.047746263,
+            "cpu_cores": 0.0006919161509077666,
+            "voluntary": 1378,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657622,
+            "name": "liveness",
+            "cpu_s": 0.046243613,
+            "cpu_cores": 0.000670140461276066,
+            "voluntary": 1378,
+            "involuntary": 2
+          },
+          {
+            "tid": 2657644,
+            "name": "peer-reader",
+            "cpu_s": 0.037719908,
+            "cpu_cores": 0.0005466189794990883,
+            "voluntary": 1378,
+            "involuntary": 1
+          },
+          {
+            "tid": 2657620,
+            "name": "liveness-check",
+            "cpu_s": 0.01677233,
+            "cpu_cores": 0.00024305663493192885,
+            "voluntary": 1378,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657629,
+            "name": "stats",
+            "cpu_s": 0.015215523,
+            "cpu_cores": 0.00022049612779556372,
+            "voluntary": 84,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657209,
+            "name": "blossom-fused-m",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2657217,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 1925,
+          "wal_records": 796,
+          "wal_batches": 780,
+          "released": 1925,
+          "delivered": 193546,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 86,
+          "tick_nanos": 53029187015,
+          "ticks_over_4ms": 1133,
+          "ticks_over_16ms": 969,
+          "db_apply_nanos": 1944907393,
+          "db_flush_nanos": 13123048826,
+          "wal_sync_nanos": 14874526422,
+          "wal_syncs_over_4ms": 207,
+          "wal_syncs_over_16ms": 74,
+          "wal_syncs_over_64ms": 26,
+          "blob_promote_nanos": 2982223431,
+          "blobs_promoted": 66147,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 175714,
+          "stream_waits_over_4ms": 5739,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 140962099,
+          "db_apply_max_nanos": 11818266,
+          "db_flush_max_nanos": 4879362637,
+          "wal_sync_max_nanos": 3893005517,
+          "blob_promote_max_nanos": 833210700,
+          "peer_wait_max_nanos": 376910334,
+          "stream_wait_max_nanos": 571393325
+        }
+      }
+    ],
+    "cluster_cpu_s": 194.12,
+    "cluster_cpu_us_per_record": 195.38472532704193,
+    "cluster_write_bytes_per_record": 10514.667780543457
+  },
+  {
+    "trial": "gap-control-bloom-2",
+    "max_phase_s": 67.46380352973938,
+    "sampled_s": 67.00538372993469,
+    "boundary_error_s": [
+      0.15308856964111328,
+      -0.3053312301635742
+    ],
+    "records": 1105274,
+    "throughput": 16383,
+    "sampler_max_ms": 480.55390402441844,
+    "brokers": [
+      {
+        "broker": 1,
+        "cpu_s": 66.12,
+        "system_cpu_s": 3.89,
+        "cpu_cores": 0.9867863792332981,
+        "io": {
+          "rchar": 14093054770,
+          "wchar": 3763154567,
+          "syscr": 245908,
+          "syscw": 161242,
+          "read_bytes": 8192,
+          "write_bytes": 3771633664,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 363368,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2667384,
+            "name": "engine",
+            "cpu_s": 55.832845557,
+            "cpu_cores": 0.8332590972396244,
+            "voluntary": 1175,
+            "involuntary": 339
+          },
+          {
+            "tid": 2667375,
+            "name": "committer",
+            "cpu_s": 4.914455853,
+            "cpu_cores": 0.07334419384579188,
+            "voluntary": 9057,
+            "involuntary": 56
+          },
+          {
+            "tid": 2667376,
+            "name": "database",
+            "cpu_s": 4.092378877,
+            "cpu_cores": 0.06107537408478011,
+            "voluntary": 11216,
+            "involuntary": 60
+          },
+          {
+            "tid": 2667400,
+            "name": "peer-reader",
+            "cpu_s": 0.239668768,
+            "cpu_cores": 0.003576858375529724,
+            "voluntary": 2986,
+            "involuntary": 5
+          },
+          {
+            "tid": 2667397,
+            "name": "peer-reader",
+            "cpu_s": 0.237400579,
+            "cpu_cores": 0.003543007528422543,
+            "voluntary": 2881,
+            "involuntary": 2
+          },
+          {
+            "tid": 2667374,
+            "name": "promoter",
+            "cpu_s": 0.197945409,
+            "cpu_cores": 0.002954171709512467,
+            "voluntary": 12819,
+            "involuntary": 2
+          },
+          {
+            "tid": 2667377,
+            "name": "peer-writer",
+            "cpu_s": 0.100557552,
+            "cpu_cores": 0.0015007383944743511,
+            "voluntary": 1749,
+            "involuntary": 5
+          },
+          {
+            "tid": 2667378,
+            "name": "peer-writer",
+            "cpu_s": 0.084724848,
+            "cpu_cores": 0.001264448366439981,
+            "voluntary": 1816,
+            "involuntary": 7
+          },
+          {
+            "tid": 2667382,
+            "name": "peer-listener",
+            "cpu_s": 0.049758979,
+            "cpu_cores": 0.0007426116564088887,
+            "voluntary": 3339,
+            "involuntary": 1
+          },
+          {
+            "tid": 2667383,
+            "name": "stream-listener",
+            "cpu_s": 0.046372423,
+            "cpu_cores": 0.0006920701056933594,
+            "voluntary": 3342,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667381,
+            "name": "liveness",
+            "cpu_s": 0.043567134,
+            "cpu_cores": 0.0006502034847766472,
+            "voluntary": 1338,
+            "involuntary": 2
+          },
+          {
+            "tid": 2667380,
+            "name": "liveness",
+            "cpu_s": 0.040912391,
+            "cpu_cores": 0.0006105836385460825,
+            "voluntary": 1338,
+            "involuntary": 1
+          },
+          {
+            "tid": 2667399,
+            "name": "peer-reader",
+            "cpu_s": 0.022603489,
+            "cpu_cores": 0.0003373384009127296,
+            "voluntary": 1338,
+            "involuntary": 2
+          },
+          {
+            "tid": 2667398,
+            "name": "peer-reader",
+            "cpu_s": 0.02146933,
+            "cpu_cores": 0.0003204120147499217,
+            "voluntary": 1338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667385,
+            "name": "stats",
+            "cpu_s": 0.014700749,
+            "cpu_cores": 0.00021939653475087006,
+            "voluntary": 77,
+            "involuntary": 1
+          },
+          {
+            "tid": 2667379,
+            "name": "liveness-check",
+            "cpu_s": 0.009650873,
+            "cpu_cores": 0.0001440313070797096,
+            "voluntary": 1339,
+            "involuntary": 0
+          },
+          {
+            "tid": 2666959,
+            "name": "blossom-fused-m",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2666969,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 3082,
+          "wal_records": 877,
+          "wal_batches": 857,
+          "released": 3081,
+          "delivered": 198606,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 92,
+          "tick_nanos": 52597345082,
+          "ticks_over_4ms": 1833,
+          "ticks_over_16ms": 1235,
+          "db_apply_nanos": 1940708710,
+          "db_flush_nanos": 10341848989,
+          "wal_sync_nanos": 15655558182,
+          "wal_syncs_over_4ms": 317,
+          "wal_syncs_over_16ms": 129,
+          "wal_syncs_over_64ms": 49,
+          "blob_promote_nanos": 5177581082,
+          "blobs_promoted": 73300,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 157469,
+          "stream_waits_over_4ms": 6460,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 130022449,
+          "db_apply_max_nanos": 5805370,
+          "db_flush_max_nanos": 2532116823,
+          "wal_sync_max_nanos": 1890990776,
+          "blob_promote_max_nanos": 672819337,
+          "peer_wait_max_nanos": 107562998,
+          "stream_wait_max_nanos": 142655616
+        }
+      },
+      {
+        "broker": 2,
+        "cpu_s": 67.32,
+        "system_cpu_s": 4.1,
+        "cpu_cores": 1.0046953879308171,
+        "io": {
+          "rchar": 14367052760,
+          "wchar": 3750060706,
+          "syscr": 268062,
+          "syscw": 160185,
+          "read_bytes": 0,
+          "write_bytes": 3757768704,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 422817,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2667360,
+            "name": "engine",
+            "cpu_s": 56.949267853,
+            "cpu_cores": 0.8499207777472646,
+            "voluntary": 1057,
+            "involuntary": 303
+          },
+          {
+            "tid": 2667351,
+            "name": "committer",
+            "cpu_s": 4.904802144,
+            "cpu_cores": 0.07320012021375495,
+            "voluntary": 8158,
+            "involuntary": 79
+          },
+          {
+            "tid": 2667352,
+            "name": "database",
+            "cpu_s": 3.98897057,
+            "cpu_cores": 0.05953209052689785,
+            "voluntary": 10100,
+            "involuntary": 49
+          },
+          {
+            "tid": 2667387,
+            "name": "peer-reader",
+            "cpu_s": 0.274329638,
+            "cpu_cores": 0.004094143227441037,
+            "voluntary": 2295,
+            "involuntary": 5
+          },
+          {
+            "tid": 2667389,
+            "name": "peer-reader",
+            "cpu_s": 0.273822547,
+            "cpu_cores": 0.0040865753131665095,
+            "voluntary": 2404,
+            "involuntary": 5
+          },
+          {
+            "tid": 2667350,
+            "name": "promoter",
+            "cpu_s": 0.211746947,
+            "cpu_cores": 0.003160148262913416,
+            "voluntary": 10810,
+            "involuntary": 3
+          },
+          {
+            "tid": 2667353,
+            "name": "peer-writer",
+            "cpu_s": 0.11273015,
+            "cpu_cores": 0.0016824043640188534,
+            "voluntary": 1664,
+            "involuntary": 4
+          },
+          {
+            "tid": 2667354,
+            "name": "peer-writer",
+            "cpu_s": 0.094709001,
+            "cpu_cores": 0.001413453602201948,
+            "voluntary": 1652,
+            "involuntary": 8
+          },
+          {
+            "tid": 2667359,
+            "name": "stream-listener",
+            "cpu_s": 0.06170908,
+            "cpu_cores": 0.0009209570420299143,
+            "voluntary": 3343,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667358,
+            "name": "peer-listener",
+            "cpu_s": 0.061074253,
+            "cpu_cores": 0.0009114827734762311,
+            "voluntary": 3338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667356,
+            "name": "liveness",
+            "cpu_s": 0.038909354,
+            "cpu_cores": 0.0005806899660007054,
+            "voluntary": 1338,
+            "involuntary": 4
+          },
+          {
+            "tid": 2667390,
+            "name": "peer-reader",
+            "cpu_s": 0.03584526,
+            "cpu_cores": 0.0005349608942540256,
+            "voluntary": 1338,
+            "involuntary": 3
+          },
+          {
+            "tid": 2667357,
+            "name": "liveness",
+            "cpu_s": 0.03512241,
+            "cpu_cores": 0.0005241729551398576,
+            "voluntary": 1338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667388,
+            "name": "peer-reader",
+            "cpu_s": 0.028864005,
+            "cpu_cores": 0.00043077143049186046,
+            "voluntary": 1338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667361,
+            "name": "stats",
+            "cpu_s": 0.01621521,
+            "cpu_cores": 0.00024199861410174786,
+            "voluntary": 75,
+            "involuntary": 1
+          },
+          {
+            "tid": 2667355,
+            "name": "liveness-check",
+            "cpu_s": 0.012345979,
+            "cpu_cores": 0.00018425353774198934,
+            "voluntary": 1339,
+            "involuntary": 0
+          },
+          {
+            "tid": 2666960,
+            "name": "blossom-fused-m",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2666968,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 2747,
+          "wal_records": 794,
+          "wal_batches": 767,
+          "released": 2745,
+          "delivered": 194909,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 92,
+          "tick_nanos": 53628058462,
+          "ticks_over_4ms": 1552,
+          "ticks_over_16ms": 1139,
+          "db_apply_nanos": 1974915013,
+          "db_flush_nanos": 11107598329,
+          "wal_sync_nanos": 15025202456,
+          "wal_syncs_over_4ms": 289,
+          "wal_syncs_over_16ms": 122,
+          "wal_syncs_over_64ms": 42,
+          "blob_promote_nanos": 4227153193,
+          "blobs_promoted": 73724,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 162380,
+          "stream_waits_over_4ms": 6639,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 133077070,
+          "db_apply_max_nanos": 8383640,
+          "db_flush_max_nanos": 3693706743,
+          "wal_sync_max_nanos": 1807312795,
+          "blob_promote_max_nanos": 712175641,
+          "peer_wait_max_nanos": 135403920,
+          "stream_wait_max_nanos": 146693402
+        }
+      },
+      {
+        "broker": 3,
+        "cpu_s": 66.13,
+        "system_cpu_s": 4.1,
+        "cpu_cores": 0.986935620972444,
+        "io": {
+          "rchar": 14351547571,
+          "wchar": 3759279647,
+          "syscr": 239590,
+          "syscw": 161005,
+          "read_bytes": 0,
+          "write_bytes": 3767758848,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 402398,
+        "major_faults": 0,
+        "threads": [
+          {
+            "tid": 2667372,
+            "name": "engine",
+            "cpu_s": 55.599466606,
+            "cpu_cores": 0.8297761091868937,
+            "voluntary": 1184,
+            "involuntary": 262
+          },
+          {
+            "tid": 2667363,
+            "name": "committer",
+            "cpu_s": 5.201158179,
+            "cpu_cores": 0.077622989220736,
+            "voluntary": 9050,
+            "involuntary": 56
+          },
+          {
+            "tid": 2667364,
+            "name": "database",
+            "cpu_s": 3.854967653,
+            "cpu_cores": 0.057532207688526245,
+            "voluntary": 11251,
+            "involuntary": 50
+          },
+          {
+            "tid": 2667393,
+            "name": "peer-reader",
+            "cpu_s": 0.283427745,
+            "cpu_cores": 0.00422992495860267,
+            "voluntary": 1912,
+            "involuntary": 5
+          },
+          {
+            "tid": 2667395,
+            "name": "peer-reader",
+            "cpu_s": 0.272250725,
+            "cpu_cores": 0.004063117168275717,
+            "voluntary": 2174,
+            "involuntary": 3
+          },
+          {
+            "tid": 2667362,
+            "name": "promoter",
+            "cpu_s": 0.198276424,
+            "cpu_cores": 0.002959111834940808,
+            "voluntary": 13745,
+            "involuntary": 3
+          },
+          {
+            "tid": 2667365,
+            "name": "peer-writer",
+            "cpu_s": 0.119706534,
+            "cpu_cores": 0.0017865211321298805,
+            "voluntary": 1755,
+            "involuntary": 12
+          },
+          {
+            "tid": 2667366,
+            "name": "peer-writer",
+            "cpu_s": 0.100998816,
+            "cpu_cores": 0.001507323895152603,
+            "voluntary": 1633,
+            "involuntary": 10
+          },
+          {
+            "tid": 2667371,
+            "name": "stream-listener",
+            "cpu_s": 0.062038547,
+            "cpu_cores": 0.0009258740648370355,
+            "voluntary": 3341,
+            "involuntary": 2
+          },
+          {
+            "tid": 2667370,
+            "name": "peer-listener",
+            "cpu_s": 0.061536676,
+            "cpu_cores": 0.0009183840547503417,
+            "voluntary": 3338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667369,
+            "name": "liveness",
+            "cpu_s": 0.039686125,
+            "cpu_cores": 0.0005922826314965227,
+            "voluntary": 1338,
+            "involuntary": 1
+          },
+          {
+            "tid": 2667394,
+            "name": "peer-reader",
+            "cpu_s": 0.038897228,
+            "cpu_cores": 0.000580508995467817,
+            "voluntary": 1338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667368,
+            "name": "liveness",
+            "cpu_s": 0.035168036,
+            "cpu_cores": 0.0005248538854988851,
+            "voluntary": 1338,
+            "involuntary": 1
+          },
+          {
+            "tid": 2667396,
+            "name": "peer-reader",
+            "cpu_s": 0.026998046,
+            "cpu_cores": 0.0004029235338583489,
+            "voluntary": 1338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667373,
+            "name": "stats",
+            "cpu_s": 0.015963777,
+            "cpu_cores": 0.00023824618428187842,
+            "voluntary": 78,
+            "involuntary": 0
+          },
+          {
+            "tid": 2667367,
+            "name": "liveness-check",
+            "cpu_s": 0.012687929,
+            "cpu_cores": 0.00018935685901208654,
+            "voluntary": 1339,
+            "involuntary": 0
+          },
+          {
+            "tid": 2666962,
+            "name": "blossom-fused-m",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2666971,
+            "name": "blossom",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ],
+        "bloom_delta": {
+          "ticks": 3033,
+          "wal_records": 869,
+          "wal_batches": 856,
+          "released": 3033,
+          "delivered": 200203,
+          "ingress": 0,
+          "egress": 0,
+          "sessions": 0,
+          "db_flushes": 93,
+          "tick_nanos": 52318978343,
+          "ticks_over_4ms": 1802,
+          "ticks_over_16ms": 1272,
+          "db_apply_nanos": 1976260615,
+          "db_flush_nanos": 9985681822,
+          "wal_sync_nanos": 16140027182,
+          "wal_syncs_over_4ms": 331,
+          "wal_syncs_over_16ms": 144,
+          "wal_syncs_over_64ms": 48,
+          "blob_promote_nanos": 4432616796,
+          "blobs_promoted": 73593,
+          "blob_packs_compacted": 0,
+          "peer_waits_over_4ms": 157589,
+          "stream_waits_over_4ms": 6365,
+          "blobs_collected": 0,
+          "rejected_acl": 0,
+          "rejected_unknown_dest": 0,
+          "rejected_schema": 0,
+          "dropped_closed_session": 0,
+          "dropped_queue_full": 0,
+          "dropped_oversized": 0,
+          "members": 0,
+          "dropped_unroutable": 0,
+          "web_failures": 0
+        },
+        "bloom_end": {
+          "tick_max_nanos": 119054505,
+          "db_apply_max_nanos": 6786826,
+          "db_flush_max_nanos": 2795359431,
+          "wal_sync_max_nanos": 1868056787,
+          "blob_promote_max_nanos": 683858866,
+          "peer_wait_max_nanos": 102036665,
+          "stream_wait_max_nanos": 100007440
+        }
+      }
+    ],
+    "cluster_cpu_s": 199.57,
+    "cluster_cpu_us_per_record": 180.56156211039072,
+    "cluster_write_bytes_per_record": 10221.140835666089
+  },
+  {
+    "trial": "gap-control-kafka-2",
+    "max_phase_s": 67.42772054672241,
+    "sampled_s": 67.00553154945374,
+    "boundary_error_s": [
+      0.13519549369812012,
+      -0.28699350357055664
+    ],
+    "records": 1641882,
+    "throughput": 24350,
+    "sampler_max_ms": 25.74293699581176,
+    "brokers": [
+      {
+        "broker": 1,
+        "cpu_s": 15.56,
+        "system_cpu_s": 3.6,
+        "cpu_cores": 0.2322196338150959,
+        "io": {
+          "rchar": 3431458882,
+          "wchar": 3424950361,
+          "syscr": 279013,
+          "syscw": 166401,
+          "read_bytes": 299008,
+          "write_bytes": 2304479232,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 162078,
+        "major_faults": 242,
+        "threads": [
+          {
+            "tid": 2679832,
+            "name": "C2 CompilerThre",
+            "cpu_s": 4.505759606,
+            "cpu_cores": 0.06724459163008809,
+            "voluntary": 2085,
+            "involuntary": 169
+          },
+          {
+            "tid": 2680799,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.45231241,
+            "cpu_cores": 0.021674515169365,
+            "voluntary": 100366,
+            "involuntary": 125
+          },
+          {
+            "tid": 2680789,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.439356298,
+            "cpu_cores": 0.021481156327185863,
+            "voluntary": 100239,
+            "involuntary": 124
+          },
+          {
+            "tid": 2680038,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.552761381,
+            "cpu_cores": 0.008249488784251073,
+            "voluntary": 42212,
+            "involuntary": 77
+          },
+          {
+            "tid": 2680122,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.542449082,
+            "cpu_cores": 0.008095586580036947,
+            "voluntary": 10809,
+            "involuntary": 154
+          },
+          {
+            "tid": 2680043,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.516966488,
+            "cpu_cores": 0.007715280754372503,
+            "voluntary": 36536,
+            "involuntary": 108
+          },
+          {
+            "tid": 2680041,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.515990886,
+            "cpu_cores": 0.007700720732573707,
+            "voluntary": 33979,
+            "involuntary": 105
+          },
+          {
+            "tid": 2680040,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.515835022,
+            "cpu_cores": 0.007698394596262334,
+            "voluntary": 36421,
+            "involuntary": 114
+          },
+          {
+            "tid": 2680053,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.503703627,
+            "cpu_cores": 0.007517343946868615,
+            "voluntary": 37719,
+            "involuntary": 81
+          },
+          {
+            "tid": 2680054,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.497049253,
+            "cpu_cores": 0.00741803313108785,
+            "voluntary": 33965,
+            "involuntary": 118
+          },
+          {
+            "tid": 2680052,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.494664011,
+            "cpu_cores": 0.0073824354431829406,
+            "voluntary": 32510,
+            "involuntary": 106
+          },
+          {
+            "tid": 2679835,
+            "name": "C1 CompilerThre",
+            "cpu_s": 0.47642319,
+            "cpu_cores": 0.007110206858793049,
+            "voluntary": 2098,
+            "involuntary": 107
+          },
+          {
+            "tid": 2680042,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.457943864,
+            "cpu_cores": 0.006834418792156173,
+            "voluntary": 29911,
+            "involuntary": 92
+          },
+          {
+            "tid": 2680123,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.30709107,
+            "cpu_cores": 0.004583070425661052,
+            "voluntary": 5201,
+            "involuntary": 88
+          },
+          {
+            "tid": 2680121,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.288103444,
+            "cpu_cores": 0.004299696418158611,
+            "voluntary": 4460,
+            "involuntary": 101
+          },
+          {
+            "tid": 2679903,
+            "name": "kafka-1-metadat",
+            "cpu_s": 0.110884687,
+            "cpu_cores": 0.0016548587024962417,
+            "voluntary": 508,
+            "involuntary": 23
+          },
+          {
+            "tid": 2679902,
+            "name": "kafka-1-raft-io",
+            "cpu_s": 0.110592006,
+            "cpu_cores": 0.0016504906899869464,
+            "voluntary": 1184,
+            "involuntary": 20
+          },
+          {
+            "tid": 2679883,
+            "name": "GC Thread#3",
+            "cpu_s": 0.065300044,
+            "cpu_cores": 0.0009745470633540905,
+            "voluntary": 114,
+            "involuntary": 7
+          },
+          {
+            "tid": 2679882,
+            "name": "GC Thread#2",
+            "cpu_s": 0.064665923,
+            "cpu_cores": 0.0009650833521449348,
+            "voluntary": 105,
+            "involuntary": 11
+          },
+          {
+            "tid": 2679776,
+            "name": "GC Thread#0",
+            "cpu_s": 0.064077244,
+            "cpu_cores": 0.0009562978237506781,
+            "voluntary": 115,
+            "involuntary": 8
+          },
+          {
+            "tid": 2679881,
+            "name": "GC Thread#1",
+            "cpu_s": 0.059504225,
+            "cpu_cores": 0.0008880494434415857,
+            "voluntary": 114,
+            "involuntary": 9
+          },
+          {
+            "tid": 2679784,
+            "name": "G1 Refine#0",
+            "cpu_s": 0.036930256,
+            "cpu_cores": 0.0005511523473661792,
+            "voluntary": 590,
+            "involuntary": 9
+          },
+          {
+            "tid": 2679901,
+            "name": "kafka-1-raft-ou",
+            "cpu_s": 0.031269693,
+            "cpu_cores": 0.0004666733070675107,
+            "voluntary": 279,
+            "involuntary": 16
+          },
+          {
+            "tid": 2679911,
+            "name": "quorum-controll",
+            "cpu_s": 0.020298109,
+            "cpu_cores": 0.0003029318405603408,
+            "voluntary": 150,
+            "involuntary": 22
+          },
+          {
+            "tid": 2679998,
+            "name": "ExpirationReape",
+            "cpu_s": 0.018382745,
+            "cpu_cores": 0.00027434667817585376,
+            "voluntary": 487,
+            "involuntary": 4
+          },
+          {
+            "tid": 2679889,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.018044712,
+            "cpu_cores": 0.00026930182602434875,
+            "voluntary": 993,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680018,
+            "name": "group-coordinat",
+            "cpu_s": 0.017586018,
+            "cpu_cores": 0.00026245621209676636,
+            "voluntary": 565,
+            "involuntary": 7
+          },
+          {
+            "tid": 2679892,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.017497406,
+            "cpu_cores": 0.0002611337541152996,
+            "voluntary": 984,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680931,
+            "name": "executor-Fetch",
+            "cpu_s": 0.015777957,
+            "cpu_cores": 0.0002354724548130031,
+            "voluntary": 48,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680017,
+            "name": "group-coordinat",
+            "cpu_s": 0.015662277,
+            "cpu_cores": 0.0002337460301832004,
+            "voluntary": 568,
+            "involuntary": 14
+          },
+          {
+            "tid": 2679949,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.014724547,
+            "cpu_cores": 0.0002197512154520031,
+            "voluntary": 335,
+            "involuntary": 4
+          },
+          {
+            "tid": 2680019,
+            "name": "group-coordinat",
+            "cpu_s": 0.012643783,
+            "cpu_cores": 0.00018869760014765646,
+            "voluntary": 582,
+            "involuntary": 9
+          },
+          {
+            "tid": 2680016,
+            "name": "group-coordinat",
+            "cpu_s": 0.012148736,
+            "cpu_cores": 0.00018130944892263962,
+            "voluntary": 580,
+            "involuntary": 12
+          },
+          {
+            "tid": 2680027,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.009919994,
+            "cpu_cores": 0.00014804738908277303,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680097,
+            "name": "kafka-log-clean",
+            "cpu_s": 0.009622143,
+            "cpu_cores": 0.00014360221876455579,
+            "voluntary": 8,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680124,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.007854518,
+            "cpu_cores": 0.00011722193404589198,
+            "voluntary": 143,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680105,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.007443374,
+            "cpu_cores": 0.0001110859630224168,
+            "voluntary": 47,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679812,
+            "name": "VM Thread",
+            "cpu_s": 0.006703139,
+            "cpu_cores": 0.00010003859151617532,
+            "voluntary": 150,
+            "involuntary": 11
+          },
+          {
+            "tid": 2679983,
+            "name": "client-metrics-",
+            "cpu_s": 0.006639758,
+            "cpu_cores": 9.909268453604455e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679997,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006267595,
+            "cpu_cores": 9.353847145252737e-05,
+            "voluntary": 337,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679977,
+            "name": "broker-1-lifecy",
+            "cpu_s": 0.006245041,
+            "cpu_cores": 9.32018723766234e-05,
+            "voluntary": 69,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680007,
+            "name": "group-coordinat",
+            "cpu_s": 0.006214,
+            "cpu_cores": 9.273861211613147e-05,
+            "voluntary": 344,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680034,
+            "name": "share-group-loc",
+            "cpu_s": 0.006075383,
+            "cpu_cores": 9.066987246442537e-05,
+            "voluntary": 334,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679898,
+            "name": "raft-expiration",
+            "cpu_s": 0.005893753,
+            "cpu_cores": 8.795920073628681e-05,
+            "voluntary": 335,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679927,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005828344,
+            "cpu_cores": 8.698302759822694e-05,
+            "voluntary": 224,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680001,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005776335,
+            "cpu_cores": 8.620683794944228e-05,
+            "voluntary": 335,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679930,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005217573,
+            "cpu_cores": 7.78677950812038e-05,
+            "voluntary": 224,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680000,
+            "name": "ExpirationReape",
+            "cpu_s": 0.00511332,
+            "cpu_cores": 7.631190861050168e-05,
+            "voluntary": 336,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680037,
+            "name": "ExpirationReape",
+            "cpu_s": 0.004828021,
+            "cpu_cores": 7.205406610999955e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680081,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004648826,
+            "cpu_cores": 6.937973466517332e-05,
+            "voluntary": 44,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679928,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004586817,
+            "cpu_cores": 6.845430360648178e-05,
+            "voluntary": 251,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680109,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004566204,
+            "cpu_cores": 6.814667228824075e-05,
+            "voluntary": 68,
+            "involuntary": 2
+          },
+          {
+            "tid": 2679948,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004544175,
+            "cpu_cores": 6.78179083863569e-05,
+            "voluntary": 224,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679932,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004540446,
+            "cpu_cores": 6.776225626460262e-05,
+            "voluntary": 240,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679926,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004531061,
+            "cpu_cores": 6.762219320140503e-05,
+            "voluntary": 226,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679950,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00443004,
+            "cpu_cores": 6.611454155438479e-05,
+            "voluntary": 134,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680077,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004290679,
+            "cpu_cores": 6.403469834178161e-05,
+            "voluntary": 91,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679920,
+            "name": "ExpirationReape",
+            "cpu_s": 0.004257083,
+            "cpu_cores": 6.353330690105847e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680078,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004256396,
+            "cpu_cores": 6.352305401619787e-05,
+            "voluntary": 56,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679925,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004049505,
+            "cpu_cores": 6.043538356249356e-05,
+            "voluntary": 224,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679947,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004000393,
+            "cpu_cores": 5.9702429150158916e-05,
+            "voluntary": 223,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679929,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00389139,
+            "cpu_cores": 5.8075653009751025e-05,
+            "voluntary": 225,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680099,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003890393,
+            "cpu_cores": 5.8060773641183305e-05,
+            "voluntary": 64,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680003,
+            "name": "ExpirationReape",
+            "cpu_s": 0.003880385,
+            "cpu_cores": 5.791141283814851e-05,
+            "voluntary": 335,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680079,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003798358,
+            "cpu_cores": 5.668723032510539e-05,
+            "voluntary": 52,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680004,
+            "name": "ExpirationReape",
+            "cpu_s": 0.00375161,
+            "cpu_cores": 5.598955658207274e-05,
+            "voluntary": 335,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680116,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00291799,
+            "cpu_cores": 4.3548494169415915e-05,
+            "voluntary": 48,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679829,
+            "name": "Monitor Deflati",
+            "cpu_s": 0.002820114,
+            "cpu_cores": 4.208777894581139e-05,
+            "voluntary": 270,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679931,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.002806662,
+            "cpu_cores": 4.188701940120467e-05,
+            "voluntary": 224,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680098,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00265894,
+            "cpu_cores": 3.968239544577834e-05,
+            "voluntary": 55,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680082,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001907206,
+            "cpu_cores": 2.8463411242284944e-05,
+            "voluntary": 42,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679800,
+            "name": "VM Periodic Tas",
+            "cpu_s": 0.001490315,
+            "cpu_cores": 2.2241671180536285e-05,
+            "voluntary": 14,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679916,
+            "name": "controller-1-Th",
+            "cpu_s": 0.001467995,
+            "cpu_cores": 2.1908564353624143e-05,
+            "voluntary": 71,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679952,
+            "name": "controller-1-to",
+            "cpu_s": 0.001438007,
+            "cpu_cores": 2.146101921359541e-05,
+            "voluntary": 13,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679917,
+            "name": "controller-1-Th",
+            "cpu_s": 0.001417424,
+            "cpu_cores": 2.1153835619584092e-05,
+            "voluntary": 71,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679778,
+            "name": "G1 Main Marker",
+            "cpu_s": 0.001294807,
+            "cpu_cores": 1.9323882223728975e-05,
+            "voluntary": 21,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679978,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.001210382,
+            "cpu_cores": 1.8063911620590193e-05,
+            "voluntary": 5,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679787,
+            "name": "G1 Service",
+            "cpu_s": 0.001191728,
+            "cpu_cores": 1.7785516694549908e-05,
+            "voluntary": 93,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679826,
+            "name": "Service Thread",
+            "cpu_s": 0.001107485,
+            "cpu_cores": 1.652826228507143e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679960,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.001022874,
+            "cpu_cores": 1.526551579170838e-05,
+            "voluntary": 69,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679959,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.001022499,
+            "cpu_cores": 1.5259919238836872e-05,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679964,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.000986591,
+            "cpu_cores": 1.4724023184143268e-05,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679919,
+            "name": "controller-1-Th",
+            "cpu_s": 0.000927616,
+            "cpu_cores": 1.3843871969217479e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679962,
+            "name": "broker-1-Thrott",
+            "cpu_s": 0.000801685,
+            "cpu_cores": 1.1964459970119225e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679918,
+            "name": "controller-1-Th",
+            "cpu_s": 0.000714219,
+            "cpu_cores": 1.065910505422776e-05,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679815,
+            "name": "Reference Handl",
+            "cpu_s": 0.000471948,
+            "cpu_cores": 7.043418492272934e-06,
+            "voluntary": 26,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679990,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.000421551,
+            "cpu_cores": 6.291286558765262e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680112,
+            "name": "transaction-log",
+            "cpu_s": 0.000394548,
+            "cpu_cores": 5.8882899795937305e-06,
+            "voluntary": 6,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680114,
+            "name": "TxnMarkerSender",
+            "cpu_s": 0.000342883,
+            "cpu_cores": 5.117234235309866e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679781,
+            "name": "G1 Conc#0",
+            "cpu_s": 0.000334809,
+            "cpu_cores": 4.996736720951056e-06,
+            "voluntary": 12,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679886,
+            "name": "SensorExpiryThr",
+            "cpu_s": 0.000327884,
+            "cpu_cores": 4.893387044590546e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679994,
+            "name": "broker-1-to-con",
+            "cpu_s": 0.000157455,
+            "cpu_cores": 2.3498806196886838e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680110,
+            "name": "AddPartitionsTo",
+            "cpu_s": 0.000142378,
+            "cpu_cores": 2.12486934597209e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679849,
+            "name": "Common-Cleaner",
+            "cpu_s": 4.4985e-05,
+            "cpu_cores": 6.713624824660725e-07,
+            "voluntary": 1,
+            "involuntary": 0
+          },
+          {
+            "tid": 2678348,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679767,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679820,
+            "name": "Finalizer",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679823,
+            "name": "Signal Dispatch",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679848,
+            "name": "Notification Th",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679871,
+            "name": "RMI TCP Accept-",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679895,
+            "name": "kafka-1-raft-sc",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679904,
+            "name": "kafka-1-snapsho",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679934,
+            "name": "controller-1-re",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679993,
+            "name": "broker-1-direct",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680107,
+            "name": "LogDirFailureHa",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ]
+      },
+      {
+        "broker": 2,
+        "cpu_s": 15.54,
+        "system_cpu_s": 3.55,
+        "cpu_cores": 0.2319211509952821,
+        "io": {
+          "rchar": 3408080843,
+          "wchar": 3401563643,
+          "syscr": 271241,
+          "syscw": 166244,
+          "read_bytes": 311296,
+          "write_bytes": 2301067264,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 159609,
+        "major_faults": 242,
+        "threads": [
+          {
+            "tid": 2679830,
+            "name": "C2 CompilerThre",
+            "cpu_s": 4.318433879,
+            "cpu_cores": 0.06444891606915706,
+            "voluntary": 2082,
+            "involuntary": 174
+          },
+          {
+            "tid": 2680534,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.444431017,
+            "cpu_cores": 0.021556892149029984,
+            "voluntary": 100901,
+            "involuntary": 113
+          },
+          {
+            "tid": 2680533,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.444191655,
+            "cpu_cores": 0.02155331987679417,
+            "voluntary": 100484,
+            "involuntary": 141
+          },
+          {
+            "tid": 2680051,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.560662839,
+            "cpu_cores": 0.008367411257475067,
+            "voluntary": 40503,
+            "involuntary": 96
+          },
+          {
+            "tid": 2680119,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.555638834,
+            "cpu_cores": 0.008292432298517149,
+            "voluntary": 9990,
+            "involuntary": 151
+          },
+          {
+            "tid": 2680044,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.508407243,
+            "cpu_cores": 0.007587541375218667,
+            "voluntary": 36120,
+            "involuntary": 94
+          },
+          {
+            "tid": 2680048,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.505002278,
+            "cpu_cores": 0.007536725197490311,
+            "voluntary": 33796,
+            "involuntary": 93
+          },
+          {
+            "tid": 2680045,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.499393204,
+            "cpu_cores": 0.007453014586287113,
+            "voluntary": 34989,
+            "involuntary": 84
+          },
+          {
+            "tid": 2680049,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.487882609,
+            "cpu_cores": 0.007281228843620411,
+            "voluntary": 33301,
+            "involuntary": 89
+          },
+          {
+            "tid": 2680047,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.48133673,
+            "cpu_cores": 0.007183537222516431,
+            "voluntary": 33752,
+            "involuntary": 74
+          },
+          {
+            "tid": 2680050,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.477504285,
+            "cpu_cores": 0.007126341272997376,
+            "voluntary": 34011,
+            "involuntary": 119
+          },
+          {
+            "tid": 2679833,
+            "name": "C1 CompilerThre",
+            "cpu_s": 0.473246029,
+            "cpu_cores": 0.007062790460078936,
+            "voluntary": 2104,
+            "involuntary": 95
+          },
+          {
+            "tid": 2680046,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.466802119,
+            "cpu_cores": 0.006966620638707636,
+            "voluntary": 32273,
+            "involuntary": 108
+          },
+          {
+            "tid": 2680117,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.384173135,
+            "cpu_cores": 0.005733454031574383,
+            "voluntary": 6831,
+            "involuntary": 140
+          },
+          {
+            "tid": 2680118,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.209945663,
+            "cpu_cores": 0.003133258674995342,
+            "voluntary": 4289,
+            "involuntary": 65
+          },
+          {
+            "tid": 2679906,
+            "name": "kafka-2-raft-io",
+            "cpu_s": 0.170086041,
+            "cpu_cores": 0.002538388056431837,
+            "voluntary": 1553,
+            "involuntary": 18
+          },
+          {
+            "tid": 2679909,
+            "name": "kafka-2-metadat",
+            "cpu_s": 0.096013278,
+            "cpu_cores": 0.0014329156978500643,
+            "voluntary": 551,
+            "involuntary": 33
+          },
+          {
+            "tid": 2679777,
+            "name": "GC Thread#0",
+            "cpu_s": 0.086665394,
+            "cpu_cores": 0.0012934065590694736,
+            "voluntary": 138,
+            "involuntary": 10
+          },
+          {
+            "tid": 2679915,
+            "name": "quorum-controll",
+            "cpu_s": 0.085906383,
+            "cpu_cores": 0.0012820789718919908,
+            "voluntary": 452,
+            "involuntary": 13
+          },
+          {
+            "tid": 2679875,
+            "name": "GC Thread#1",
+            "cpu_s": 0.080081151,
+            "cpu_cores": 0.0011951423882205269,
+            "voluntary": 136,
+            "involuntary": 11
+          },
+          {
+            "tid": 2679876,
+            "name": "GC Thread#2",
+            "cpu_s": 0.075128634,
+            "cpu_cores": 0.0011212303262537508,
+            "voluntary": 130,
+            "involuntary": 7
+          },
+          {
+            "tid": 2679877,
+            "name": "GC Thread#3",
+            "cpu_s": 0.074602823,
+            "cpu_cores": 0.0011133830487552964,
+            "voluntary": 129,
+            "involuntary": 10
+          },
+          {
+            "tid": 2679786,
+            "name": "G1 Refine#0",
+            "cpu_s": 0.037258658,
+            "cpu_cores": 0.0005560534651158029,
+            "voluntary": 825,
+            "involuntary": 8
+          },
+          {
+            "tid": 2679954,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.029807678,
+            "cpu_cores": 0.0004448539890770109,
+            "voluntary": 484,
+            "involuntary": 4
+          },
+          {
+            "tid": 2679955,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.025032662,
+            "cpu_cores": 0.00037359097706022275,
+            "voluntary": 413,
+            "involuntary": 4
+          },
+          {
+            "tid": 2679891,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.020612485,
+            "cpu_cores": 0.00030762363230842906,
+            "voluntary": 1081,
+            "involuntary": 2
+          },
+          {
+            "tid": 2679894,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.019517223,
+            "cpu_cores": 0.0002912777877986868,
+            "voluntary": 1082,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680024,
+            "name": "group-coordinat",
+            "cpu_s": 0.018533674,
+            "cpu_cores": 0.00027659916385143723,
+            "voluntary": 586,
+            "involuntary": 10
+          },
+          {
+            "tid": 2680928,
+            "name": "executor-Fetch",
+            "cpu_s": 0.017560369,
+            "cpu_cores": 0.0002620734228044962,
+            "voluntary": 48,
+            "involuntary": 4
+          },
+          {
+            "tid": 2679905,
+            "name": "kafka-2-raft-ou",
+            "cpu_s": 0.016193961,
+            "cpu_cores": 0.00024168095716169303,
+            "voluntary": 172,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680009,
+            "name": "ExpirationReape",
+            "cpu_s": 0.014434912,
+            "cpu_cores": 0.00021542866187616535,
+            "voluntary": 480,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679953,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.013656587,
+            "cpu_cores": 0.00020381282983958859,
+            "voluntary": 344,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679899,
+            "name": "raft-expiration",
+            "cpu_s": 0.013204527,
+            "cpu_cores": 0.00019706622266333848,
+            "voluntary": 609,
+            "involuntary": 4
+          },
+          {
+            "tid": 2680023,
+            "name": "group-coordinat",
+            "cpu_s": 0.012092829,
+            "cpu_cores": 0.00018047508497227326,
+            "voluntary": 596,
+            "involuntary": 15
+          },
+          {
+            "tid": 2680025,
+            "name": "group-coordinat",
+            "cpu_s": 0.011739123,
+            "cpu_cores": 0.0001751963267590212,
+            "voluntary": 585,
+            "involuntary": 13
+          },
+          {
+            "tid": 2680022,
+            "name": "group-coordinat",
+            "cpu_s": 0.011279497,
+            "cpu_cores": 0.0001683368035320355,
+            "voluntary": 588,
+            "involuntary": 6
+          },
+          {
+            "tid": 2680080,
+            "name": "kafka-log-clean",
+            "cpu_s": 0.010483678,
+            "cpu_cores": 0.00015645988857296766,
+            "voluntary": 6,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680091,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.009887153,
+            "cpu_cores": 0.00014755726536849783,
+            "voluntary": 63,
+            "involuntary": 4
+          },
+          {
+            "tid": 2680032,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.009541649,
+            "cpu_cores": 0.00014240091495965138,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680120,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.007976459,
+            "cpu_cores": 0.00011904179872243739,
+            "voluntary": 145,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679810,
+            "name": "VM Thread",
+            "cpu_s": 0.007382744,
+            "cpu_cores": 0.00011018111235415142,
+            "voluntary": 173,
+            "involuntary": 21
+          },
+          {
+            "tid": 2679991,
+            "name": "client-metrics-",
+            "cpu_s": 0.006639992,
+            "cpu_cores": 9.909617678503639e-05,
+            "voluntary": 337,
+            "involuntary": 2
+          },
+          {
+            "tid": 2679944,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00663097,
+            "cpu_cores": 9.896153118501839e-05,
+            "voluntary": 231,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679936,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006524008,
+            "cpu_cores": 9.73652152163725e-05,
+            "voluntary": 232,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680015,
+            "name": "group-coordinat",
+            "cpu_s": 0.006300017,
+            "cpu_cores": 9.402234195172743e-05,
+            "voluntary": 341,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679935,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006269161,
+            "cpu_cores": 9.356184265731878e-05,
+            "voluntary": 232,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679945,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006120482,
+            "cpu_cores": 9.134293629896437e-05,
+            "voluntary": 232,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679940,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006064034,
+            "cpu_cores": 9.050049838832206e-05,
+            "voluntary": 232,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679943,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005942755,
+            "cpu_cores": 8.869051349311247e-05,
+            "voluntary": 237,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679941,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00591282,
+            "cpu_cores": 8.824375933255624e-05,
+            "voluntary": 231,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680012,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005646668,
+            "cpu_cores": 8.427166935960281e-05,
+            "voluntary": 336,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680010,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005645944,
+            "cpu_cores": 8.426086428152556e-05,
+            "voluntary": 337,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679942,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00559887,
+            "cpu_cores": 8.355832526852994e-05,
+            "voluntary": 231,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680013,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005480279,
+            "cpu_cores": 8.178845646430334e-05,
+            "voluntary": 340,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680011,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005458972,
+            "cpu_cores": 8.147046779221476e-05,
+            "voluntary": 336,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679982,
+            "name": "broker-2-lifecy",
+            "cpu_s": 0.005344945,
+            "cpu_cores": 7.976871276746964e-05,
+            "voluntary": 69,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680090,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.005204786,
+            "cpu_cores": 7.76769600903559e-05,
+            "voluntary": 29,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680008,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005052897,
+            "cpu_cores": 7.541014723942136e-05,
+            "voluntary": 338,
+            "involuntary": 3
+          },
+          {
+            "tid": 2680035,
+            "name": "share-group-loc",
+            "cpu_s": 0.004917546,
+            "cpu_cores": 7.339014983219084e-05,
+            "voluntary": 334,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679933,
+            "name": "ExpirationReape",
+            "cpu_s": 0.004804886,
+            "cpu_cores": 7.170879610818e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680074,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004679338,
+            "cpu_cores": 6.983510005508118e-05,
+            "voluntary": 59,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680039,
+            "name": "ExpirationReape",
+            "cpu_s": 0.004113352,
+            "cpu_cores": 6.138824519232597e-05,
+            "voluntary": 334,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679956,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.003861568,
+            "cpu_cores": 5.7630585277126747e-05,
+            "voluntary": 134,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680083,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003581328,
+            "cpu_cores": 5.344824400589651e-05,
+            "voluntary": 58,
+            "involuntary": 3
+          },
+          {
+            "tid": 2680089,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00326407,
+            "cpu_cores": 4.8713440883473006e-05,
+            "voluntary": 43,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680072,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003215946,
+            "cpu_cores": 4.7995231522437165e-05,
+            "voluntary": 53,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679824,
+            "name": "Service Thread",
+            "cpu_s": 0.003036425,
+            "cpu_cores": 4.531603480764798e-05,
+            "voluntary": 70,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679828,
+            "name": "Monitor Deflati",
+            "cpu_s": 0.002809625,
+            "cpu_cores": 4.1931239630960076e-05,
+            "voluntary": 270,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680075,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002731371,
+            "cpu_cores": 4.076336590187482e-05,
+            "voluntary": 42,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680073,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002655401,
+            "cpu_cores": 3.96295789108123e-05,
+            "voluntary": 44,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679984,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.002487428,
+            "cpu_cores": 3.7122726176183565e-05,
+            "voluntary": 6,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680096,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.00212223,
+            "cpu_cores": 3.167245973466651e-05,
+            "voluntary": 38,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680076,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.0017751,
+            "cpu_cores": 2.6491842672569196e-05,
+            "voluntary": 36,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679780,
+            "name": "G1 Main Marker",
+            "cpu_s": 0.001535418,
+            "cpu_cores": 2.291479471163926e-05,
+            "voluntary": 28,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679922,
+            "name": "controller-2-Th",
+            "cpu_s": 0.001302592,
+            "cpu_cores": 1.9440066661341476e-05,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679958,
+            "name": "controller-2-to",
+            "cpu_s": 0.001290941,
+            "cpu_cores": 1.926618549465898e-05,
+            "voluntary": 13,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679921,
+            "name": "controller-2-Th",
+            "cpu_s": 0.001286463,
+            "cpu_cores": 1.919935519130268e-05,
+            "voluntary": 70,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679801,
+            "name": "VM Periodic Tas",
+            "cpu_s": 0.001275793,
+            "cpu_cores": 1.9040114606932042e-05,
+            "voluntary": 14,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679789,
+            "name": "G1 Service",
+            "cpu_s": 0.001167764,
+            "cpu_cores": 1.7427874579849074e-05,
+            "voluntary": 98,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679974,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.000995796,
+            "cpu_cores": 1.4861399901962545e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679975,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.000970741,
+            "cpu_cores": 1.4487475549440874e-05,
+            "voluntary": 69,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679973,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.000968264,
+            "cpu_cores": 1.445050845220694e-05,
+            "voluntary": 70,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679972,
+            "name": "broker-2-Thrott",
+            "cpu_s": 0.000909726,
+            "cpu_cores": 1.3576879086894082e-05,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679923,
+            "name": "controller-2-Th",
+            "cpu_s": 0.000706709,
+            "cpu_cores": 1.0547024755387699e-05,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679924,
+            "name": "controller-2-Th",
+            "cpu_s": 0.000645757,
+            "cpu_cores": 9.63736851372332e-06,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679816,
+            "name": "Reference Handl",
+            "cpu_s": 0.000544694,
+            "cpu_cores": 8.12909005278148e-06,
+            "voluntary": 28,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680095,
+            "name": "TxnMarkerSender",
+            "cpu_s": 0.000427151,
+            "cpu_cores": 6.374861748313112e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679783,
+            "name": "G1 Conc#0",
+            "cpu_s": 0.00042229,
+            "cpu_cores": 6.302315498957381e-06,
+            "voluntary": 16,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680094,
+            "name": "transaction-log",
+            "cpu_s": 0.00037749,
+            "cpu_cores": 5.633713982574585e-06,
+            "voluntary": 6,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679884,
+            "name": "SensorExpiryThr",
+            "cpu_s": 0.000319921,
+            "cpu_cores": 4.774546109881702e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680006,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.000261281,
+            "cpu_cores": 3.899394482187793e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680002,
+            "name": "broker-2-to-con",
+            "cpu_s": 0.000166272,
+            "cpu_cores": 2.4814667708035745e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680093,
+            "name": "AddPartitionsTo",
+            "cpu_s": 0.000134843,
+            "cpu_cores": 2.0124159436072603e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679851,
+            "name": "Common-Cleaner",
+            "cpu_s": 3.195e-05,
+            "cpu_cores": 4.7682630465246223e-07,
+            "voluntary": 1,
+            "involuntary": 0
+          },
+          {
+            "tid": 2678349,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679768,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679819,
+            "name": "Finalizer",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679822,
+            "name": "Signal Dispatch",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679850,
+            "name": "Notification Th",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679869,
+            "name": "RMI TCP Accept-",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679897,
+            "name": "kafka-2-raft-sc",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679913,
+            "name": "kafka-2-snapsho",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679951,
+            "name": "controller-2-re",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680005,
+            "name": "broker-2-direct",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680092,
+            "name": "LogDirFailureHa",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ]
+      },
+      {
+        "broker": 3,
+        "cpu_s": 16.32,
+        "system_cpu_s": 3.71,
+        "cpu_cores": 0.2435619809680183,
+        "io": {
+          "rchar": 3407976757,
+          "wchar": 3401387510,
+          "syscr": 275304,
+          "syscw": 164315,
+          "read_bytes": 294912,
+          "write_bytes": 2300293120,
+          "cancelled_write_bytes": 0
+        },
+        "minor_faults": 157885,
+        "major_faults": 242,
+        "threads": [
+          {
+            "tid": 2679831,
+            "name": "C2 CompilerThre",
+            "cpu_s": 5.418605052,
+            "cpu_cores": 0.08086802576889901,
+            "voluntary": 2026,
+            "involuntary": 212
+          },
+          {
+            "tid": 2680816,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.478699141,
+            "cpu_cores": 0.02206831446309234,
+            "voluntary": 100369,
+            "involuntary": 125
+          },
+          {
+            "tid": 2680805,
+            "name": "ReplicaFetcherT",
+            "cpu_s": 1.459310663,
+            "cpu_cores": 0.0217789580838255,
+            "voluntary": 99722,
+            "involuntary": 148
+          },
+          {
+            "tid": 2680062,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.55151343,
+            "cpu_cores": 0.008230864187577604,
+            "voluntary": 39849,
+            "involuntary": 88
+          },
+          {
+            "tid": 2679834,
+            "name": "C1 CompilerThre",
+            "cpu_s": 0.54690833,
+            "cpu_cores": 0.00816213702590139,
+            "voluntary": 2218,
+            "involuntary": 139
+          },
+          {
+            "tid": 2680128,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.528390186,
+            "cpu_cores": 0.007885769633959537,
+            "voluntary": 9387,
+            "involuntary": 164
+          },
+          {
+            "tid": 2680126,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.527471742,
+            "cpu_cores": 0.007872062646211486,
+            "voluntary": 9137,
+            "involuntary": 179
+          },
+          {
+            "tid": 2680067,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.526618968,
+            "cpu_cores": 0.007859335726802294,
+            "voluntary": 36401,
+            "involuntary": 87
+          },
+          {
+            "tid": 2680068,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.522440877,
+            "cpu_cores": 0.007796981307646372,
+            "voluntary": 35795,
+            "involuntary": 111
+          },
+          {
+            "tid": 2680063,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.521644513,
+            "cpu_cores": 0.007785096259030465,
+            "voluntary": 35094,
+            "involuntary": 95
+          },
+          {
+            "tid": 2680069,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.500880298,
+            "cpu_cores": 0.007475208186809518,
+            "voluntary": 34910,
+            "involuntary": 101
+          },
+          {
+            "tid": 2680065,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.500709813,
+            "cpu_cores": 0.00747266384463272,
+            "voluntary": 31948,
+            "involuntary": 127
+          },
+          {
+            "tid": 2680064,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.495015992,
+            "cpu_cores": 0.007387688457252984,
+            "voluntary": 32445,
+            "involuntary": 101
+          },
+          {
+            "tid": 2680066,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.493983202,
+            "cpu_cores": 0.007372274953679212,
+            "voluntary": 32365,
+            "involuntary": 91
+          },
+          {
+            "tid": 2680127,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.115944394,
+            "cpu_cores": 0.0017303704831358097,
+            "voluntary": 1180,
+            "involuntary": 23
+          },
+          {
+            "tid": 2679910,
+            "name": "kafka-3-metadat",
+            "cpu_s": 0.115919697,
+            "cpu_cores": 0.0017300019016257627,
+            "voluntary": 517,
+            "involuntary": 40
+          },
+          {
+            "tid": 2679908,
+            "name": "kafka-3-raft-io",
+            "cpu_s": 0.107502095,
+            "cpu_cores": 0.0016043764225742705,
+            "voluntary": 1138,
+            "involuntary": 12
+          },
+          {
+            "tid": 2679878,
+            "name": "GC Thread#1",
+            "cpu_s": 0.066483457,
+            "cpu_cores": 0.0009922084858163028,
+            "voluntary": 94,
+            "involuntary": 5
+          },
+          {
+            "tid": 2679775,
+            "name": "GC Thread#0",
+            "cpu_s": 0.059900534,
+            "cpu_cores": 0.000893964014833464,
+            "voluntary": 96,
+            "involuntary": 9
+          },
+          {
+            "tid": 2679880,
+            "name": "GC Thread#3",
+            "cpu_s": 0.059625813,
+            "cpu_cores": 0.0008898640398963614,
+            "voluntary": 101,
+            "involuntary": 9
+          },
+          {
+            "tid": 2679879,
+            "name": "GC Thread#2",
+            "cpu_s": 0.048630297,
+            "cpu_cores": 0.0007257654088470023,
+            "voluntary": 89,
+            "involuntary": 14
+          },
+          {
+            "tid": 2680056,
+            "name": "group-coordinat",
+            "cpu_s": 0.038475707,
+            "cpu_cores": 0.0005742168759843779,
+            "voluntary": 636,
+            "involuntary": 15
+          },
+          {
+            "tid": 2680057,
+            "name": "group-coordinat",
+            "cpu_s": 0.031232345,
+            "cpu_cores": 0.00046611592024979056,
+            "voluntary": 637,
+            "involuntary": 12
+          },
+          {
+            "tid": 2680058,
+            "name": "group-coordinat",
+            "cpu_s": 0.031063676,
+            "cpu_cores": 0.00046359868031303227,
+            "voluntary": 619,
+            "involuntary": 15
+          },
+          {
+            "tid": 2680055,
+            "name": "group-coordinat",
+            "cpu_s": 0.030539585,
+            "cpu_cores": 0.00045577707233708195,
+            "voluntary": 661,
+            "involuntary": 11
+          },
+          {
+            "tid": 2679907,
+            "name": "kafka-3-raft-ou",
+            "cpu_s": 0.027130944,
+            "cpu_cores": 0.00040490603346644426,
+            "voluntary": 280,
+            "involuntary": 14
+          },
+          {
+            "tid": 2679890,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.022944544,
+            "cpu_cores": 0.00034242760962303057,
+            "voluntary": 1236,
+            "involuntary": 4
+          },
+          {
+            "tid": 2679914,
+            "name": "quorum-controll",
+            "cpu_s": 0.022512653,
+            "cpu_cores": 0.0003359820074464216,
+            "voluntary": 158,
+            "involuntary": 7
+          },
+          {
+            "tid": 2679893,
+            "name": "metrics-meter-t",
+            "cpu_s": 0.022390099,
+            "cpu_cores": 0.00033415299427144886,
+            "voluntary": 1243,
+            "involuntary": 5
+          },
+          {
+            "tid": 2679785,
+            "name": "G1 Refine#0",
+            "cpu_s": 0.019930198,
+            "cpu_cores": 0.00029744108492431597,
+            "voluntary": 345,
+            "involuntary": 13
+          },
+          {
+            "tid": 2680028,
+            "name": "ExpirationReape",
+            "cpu_s": 0.01709076,
+            "cpu_cores": 0.0002550649118780005,
+            "voluntary": 485,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680930,
+            "name": "executor-Fetch",
+            "cpu_s": 0.015950031,
+            "cpu_cores": 0.00023804051144983468,
+            "voluntary": 52,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679976,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.015656119,
+            "cpu_cores": 0.00023365412732297974,
+            "voluntary": 335,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680059,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.010032563,
+            "cpu_cores": 0.0001497273847099537,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680129,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.009856164,
+            "cpu_cores": 0.00014709478116333745,
+            "voluntary": 150,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680100,
+            "name": "kafka-log-clean",
+            "cpu_s": 0.009651306,
+            "cpu_cores": 0.0001440374514882672,
+            "voluntary": 7,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680036,
+            "name": "group-coordinat",
+            "cpu_s": 0.008214401,
+            "cpu_cores": 0.00012259287867804353,
+            "voluntary": 400,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679900,
+            "name": "raft-expiration",
+            "cpu_s": 0.007088325,
+            "cpu_cores": 0.00010578716168781424,
+            "voluntary": 335,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680088,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.006912468,
+            "cpu_cores": 0.00010316264702561492,
+            "voluntary": 45,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679968,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.006828085,
+            "cpu_cores": 0.00010190330323639775,
+            "voluntary": 225,
+            "involuntary": 2
+          },
+          {
+            "tid": 2679957,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006606347,
+            "cpu_cores": 9.859405406140471e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679811,
+            "name": "VM Thread",
+            "cpu_s": 0.00642693,
+            "cpu_cores": 9.591640945727854e-05,
+            "voluntary": 122,
+            "involuntary": 5
+          },
+          {
+            "tid": 2680030,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006247869,
+            "cpu_cores": 9.324407784734506e-05,
+            "voluntary": 336,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679996,
+            "name": "client-metrics-",
+            "cpu_s": 0.00602882,
+            "cpu_cores": 8.997495968747597e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680029,
+            "name": "ExpirationReape",
+            "cpu_s": 0.006016636,
+            "cpu_cores": 8.979312395364544e-05,
+            "voluntary": 336,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679992,
+            "name": "broker-3-lifecy",
+            "cpu_s": 0.005912365,
+            "cpu_cores": 8.823696884840549e-05,
+            "voluntary": 69,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679970,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.005471456,
+            "cpu_cores": 8.16567807683425e-05,
+            "voluntary": 228,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680061,
+            "name": "ExpirationReape",
+            "cpu_s": 0.005448902,
+            "cpu_cores": 8.132018169243853e-05,
+            "voluntary": 338,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680060,
+            "name": "share-group-loc",
+            "cpu_s": 0.005297469,
+            "cpu_cores": 7.906017424979576e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680102,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.005130784,
+            "cpu_cores": 7.657254380876305e-05,
+            "voluntary": 67,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680103,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004944404,
+            "cpu_cores": 7.379098241091872e-05,
+            "voluntary": 50,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680026,
+            "name": "ExpirationReape",
+            "cpu_s": 0.004746534,
+            "cpu_cores": 7.083794263309142e-05,
+            "voluntary": 339,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679967,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.00465099,
+            "cpu_cores": 6.941203050627717e-05,
+            "voluntary": 224,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679980,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004635239,
+            "cpu_cores": 6.917696036153285e-05,
+            "voluntary": 223,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680104,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004462812,
+            "cpu_cores": 6.66036355029316e-05,
+            "voluntary": 26,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679965,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004445403,
+            "cpu_cores": 6.634382113242471e-05,
+            "voluntary": 232,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680115,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004383445,
+            "cpu_cores": 6.541915120492371e-05,
+            "voluntary": 62,
+            "involuntary": 2
+          },
+          {
+            "tid": 2679981,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004174015,
+            "cpu_cores": 6.229358835724405e-05,
+            "voluntary": 136,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679961,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.004166503,
+            "cpu_cores": 6.218147821012201e-05,
+            "voluntary": 224,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680087,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.004069081,
+            "cpu_cores": 6.072753854652725e-05,
+            "voluntary": 52,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679825,
+            "name": "Service Thread",
+            "cpu_s": 0.004056972,
+            "cpu_cores": 6.0546822123271024e-05,
+            "voluntary": 71,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679979,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.003920801,
+            "cpu_cores": 5.851458692042813e-05,
+            "voluntary": 223,
+            "involuntary": 2
+          },
+          {
+            "tid": 2679969,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.003836656,
+            "cpu_cores": 5.725879507676674e-05,
+            "voluntary": 224,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680033,
+            "name": "ExpirationReape",
+            "cpu_s": 0.003806757,
+            "cpu_cores": 5.681257818528618e-05,
+            "voluntary": 335,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679963,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.003775769,
+            "cpu_cores": 5.6350108904266756e-05,
+            "voluntary": 232,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680031,
+            "name": "ExpirationReape",
+            "cpu_s": 0.003744485,
+            "cpu_cores": 5.588322207751409e-05,
+            "voluntary": 335,
+            "involuntary": 2
+          },
+          {
+            "tid": 2680085,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.003606664,
+            "cpu_cores": 5.3826362042036564e-05,
+            "voluntary": 49,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679966,
+            "name": "data-plane-kafk",
+            "cpu_s": 0.003121855,
+            "cpu_cores": 4.65910041724824e-05,
+            "voluntary": 223,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679827,
+            "name": "Monitor Deflati",
+            "cpu_s": 0.002924049,
+            "cpu_cores": 4.363891953967849e-05,
+            "voluntary": 270,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680101,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002832674,
+            "cpu_cores": 4.227522615665442e-05,
+            "voluntary": 51,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679995,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.002690407,
+            "cpu_cores": 4.0152013390332305e-05,
+            "voluntary": 12,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680086,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.002210479,
+            "cpu_cores": 3.2989500252953684e-05,
+            "voluntary": 48,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679985,
+            "name": "controller-3-to",
+            "cpu_s": 0.001702455,
+            "cpu_cores": 2.540767845030071e-05,
+            "voluntary": 13,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680084,
+            "name": "kafka-scheduler",
+            "cpu_s": 0.001559907,
+            "cpu_cores": 2.32802720003602e-05,
+            "voluntary": 46,
+            "involuntary": 2
+          },
+          {
+            "tid": 2679779,
+            "name": "G1 Main Marker",
+            "cpu_s": 0.001440131,
+            "cpu_cores": 2.149271808905963e-05,
+            "voluntary": 21,
+            "involuntary": 3
+          },
+          {
+            "tid": 2679802,
+            "name": "VM Periodic Tas",
+            "cpu_s": 0.001307785,
+            "cpu_cores": 1.9517567725506112e-05,
+            "voluntary": 14,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679788,
+            "name": "G1 Service",
+            "cpu_s": 0.001280988,
+            "cpu_cores": 1.9117645519378666e-05,
+            "voluntary": 89,
+            "involuntary": 1
+          },
+          {
+            "tid": 2679986,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.000947878,
+            "cpu_cores": 1.4146264913970787e-05,
+            "voluntary": 70,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679937,
+            "name": "controller-3-Th",
+            "cpu_s": 0.000941652,
+            "cpu_cores": 1.4053347212162766e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679988,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.000941235,
+            "cpu_cores": 1.404712384536965e-05,
+            "voluntary": 69,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679987,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.000859564,
+            "cpu_cores": 1.282825432651922e-05,
+            "voluntary": 67,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679989,
+            "name": "broker-3-Thrott",
+            "cpu_s": 0.000814474,
+            "cpu_cores": 1.2155324809249126e-05,
+            "voluntary": 69,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679938,
+            "name": "controller-3-Th",
+            "cpu_s": 0.000742674,
+            "cpu_cores": 1.1083771486117771e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679946,
+            "name": "controller-3-Th",
+            "cpu_s": 0.00074066,
+            "cpu_cores": 1.1053714266162527e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679939,
+            "name": "controller-3-Th",
+            "cpu_s": 0.000728226,
+            "cpu_cores": 1.086814749708432e-05,
+            "voluntary": 68,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679817,
+            "name": "Reference Handl",
+            "cpu_s": 0.000477103,
+            "cpu_cores": 7.120352439079928e-06,
+            "voluntary": 22,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680113,
+            "name": "TxnMarkerSender",
+            "cpu_s": 0.000416833,
+            "cpu_cores": 6.2208744615712e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680111,
+            "name": "transaction-log",
+            "cpu_s": 0.000409547,
+            "cpu_cores": 6.112137170313051e-06,
+            "voluntary": 6,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679782,
+            "name": "G1 Conc#0",
+            "cpu_s": 0.00034588,
+            "cpu_cores": 5.161961885858956e-06,
+            "voluntary": 11,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679885,
+            "name": "SensorExpiryThr",
+            "cpu_s": 0.00027258,
+            "cpu_cores": 4.0680223512415705e-06,
+            "voluntary": 2,
+            "involuntary": 1
+          },
+          {
+            "tid": 2680014,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.000261761,
+            "cpu_cores": 3.906558069863323e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680021,
+            "name": "broker-3-to-con",
+            "cpu_s": 0.000136176,
+            "cpu_cores": 2.0323098235478467e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680108,
+            "name": "AddPartitionsTo",
+            "cpu_s": 9.4307e-05,
+            "cpu_cores": 1.4074509644087562e-06,
+            "voluntary": 2,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679853,
+            "name": "Common-Cleaner",
+            "cpu_s": 4.8581e-05,
+            "cpu_cores": 7.250296934685844e-07,
+            "voluntary": 1,
+            "involuntary": 0
+          },
+          {
+            "tid": 2678351,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679766,
+            "name": "java",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679818,
+            "name": "Finalizer",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679821,
+            "name": "Signal Dispatch",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679852,
+            "name": "Notification Th",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679870,
+            "name": "RMI TCP Accept-",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679896,
+            "name": "kafka-3-raft-sc",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679912,
+            "name": "kafka-3-snapsho",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2679971,
+            "name": "controller-3-re",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680020,
+            "name": "broker-3-direct",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          },
+          {
+            "tid": 2680106,
+            "name": "LogDirFailureHa",
+            "cpu_s": 0.0,
+            "cpu_cores": 0.0,
+            "voluntary": 0,
+            "involuntary": 0
+          }
+        ]
+      }
+    ],
+    "cluster_cpu_s": 47.42,
+    "cluster_cpu_us_per_record": 28.88149087449646,
+    "cluster_write_bytes_per_record": 4206.051114513711
+  }
+]
