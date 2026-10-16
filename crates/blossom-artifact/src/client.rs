@@ -38,7 +38,7 @@ pub enum ClientArtifactError {
 /// The program as one client role's members run it.
 #[derive(Clone)]
 pub struct ClientArtifact {
-    /// The projected program, its relations and roles renumbered; its rules carry no role guard.
+    /// The projected program, its relations and roles renumbered; its rules keep their role guard, `role`.
     pub program: ValidatedProgram,
     /// The client role, in `program`'s numbering, and its name.
     pub role: RoleId,

@@ -516,6 +516,42 @@ fn a_session_not_seen_for_its_lease_ends_at_the_sweep() {
         .unwrap();
 }
 
+/// Who is here is settled when the room is asked, with nothing else running (docs/design/STATELESS.md §6.4): a tab
+/// that goes quiet leaves the room at the next request of another tab there, after its lease, with no sweep and no
+/// wake.
+#[test]
+fn a_quiet_tab_leaves_at_the_next_request_on_its_room() {
+    let deploy = deployment();
+    let shared: Arc<dyn StateStore> = Arc::new(MemStore::new());
+    let lease = Duration::from_millis(300);
+    let mut hosts = Hosts {
+        hosts: vec![Objects::new(deploy.clone(), shared.clone()).with_lease(lease)],
+        rng: Rng(11),
+    };
+    let mut tabs = vec![tab(&mut hosts, &deploy, "porch"), tab(&mut hosts, &deploy, "porch")];
+    pump(&mut hosts, &mut tabs);
+    let object = tabs[0].object.clone();
+    let status = |t: &Tab| t.texts.get("status").cloned().unwrap_or_default();
+    assert_eq!(status(&tabs[0]), "online, 2 here");
+
+    // Within the lease, a request leaves both.
+    let (a, _, _) = tabs[0].session.unwrap();
+    hosts.hosts[0].touch(&object, a).unwrap();
+    tabs[0].receive(&mut hosts);
+    assert_eq!(status(&tabs[0]), "online, 2 here");
+
+    // The second tab makes no request for longer than the lease; the first asks, and hears it go.
+    std::thread::sleep(lease + Duration::from_millis(200));
+    hosts.hosts[0].touch(&object, a).unwrap();
+    while tabs[0].receive(&mut hosts) {}
+    assert_eq!(status(&tabs[0]), "online, 1 here", "the quiet tab is gone");
+    let (b, b_secret, b_at) = tabs[1].session.unwrap();
+    assert!(matches!(
+        hosts.hosts[0].receive(&object, b, &b_secret, b_at, Duration::ZERO),
+        Err(ServeError::Gone(_))
+    ));
+}
+
 #[test]
 fn an_instance_keeps_at_most_its_cache_of_objects_and_loads_the_others_again() {
     let deploy = deployment();

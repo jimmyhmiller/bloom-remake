@@ -222,7 +222,8 @@ What the page keeps, and where:
 A page never gets the program's source, nor any rule or relation placed at another role. The node projects the
 program onto each client role when it starts (`ClientArtifact::project`, over the IR's role projection):
 
-- **What is kept:** the role's rules (without their role guard); the relations they read and write; every channel the
+- **What is kept:** the role's rules, each with its role guard (the page runs as the role, and `self` in a rule is a
+  `Node<R>` by its guard); the relations they read and write; every channel the
   role is an end of, as a schema (its other end's rules stay home); the link events at the role and the member
   relations and node directory of the roles it deals with (the deployment, which the page is given anyway); the
   types, functions, constants, lattices and sites those reach; and the anonymous types over them (the validator

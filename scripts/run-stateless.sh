@@ -48,7 +48,7 @@ backends=()
 for i in $(seq 1 "$count"); do
   p=$((port + i))
   BLOSSOM_SEED="$(cat "$seed_file")" "$bin" serve --deploy "$deploy" --store "$url" --web "127.0.0.1:$p" \
-    --web-root web --insecure-dev &
+    --web-root web &
   pids+=($!)
   backends+=("127.0.0.1:$p")
   echo "run-stateless: instance $i on :$p (pid $!)"

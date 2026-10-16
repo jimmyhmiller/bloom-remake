@@ -91,7 +91,7 @@ blossom-wire = { path = "crates/blossom-wire" }
 # ---- light external crates of ARCHITECTURE §1.2 (versions verified by building; licenses in DEPENDENCIES.md) ----
 blake3 = "1.8.7"
 bytes = "1.12.1"
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 crc32c = "0.6.8"
 hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"] }
 indexmap = "2.14.2"

@@ -112,11 +112,17 @@ at Browser {
     /// The room, once the link reached it: lines typed while offline go to it when the link is back.
     durable table host(r: Node<Room>) key();
     table draft(s: String) key();
+    /// This tab's lines the room has not sent back yet: shown at once, as pending, and gone when the room's copy
+    /// comes (`heard` from this tab with the same number). Kept across reloads, like the lines.
+    durable table unconfirmed(k: u64, at: Instant, text: String) key(k);
 
     view next_k(k = max!(n default 0u64)) = sent_n(n);
 
     hear: on heard(w, k, at, t), not lines(w, k, _, _) {
         next lines(w, k, at, t);
+    }
+    confirmed: on heard(w, k, _, _), unconfirmed(k, a, t) where w == self {
+        delete unconfirmed(k, a, t);
     }
     hear_room: on room(k) {
         upsert called(k);
@@ -147,6 +153,7 @@ at Browser {
     /// Sends while offline wait for the link: the line goes out when it is back.
     send_it: on keydown("say", "Enter", v), host(r), next_k(k) where v != "" {
         send say(k, v) to r;
+        next unconfirmed(k, now(), v);
         upsert sent_n(k + 1u64);
         upsert draft("");
     }
@@ -165,6 +172,9 @@ at Browser {
         not up(_), let s = "offline: lines wait until the room is back";
     }
     view mine(w, k) = lines(w, k, _, _) where w == self;
+    /// The room's time of the latest line heard, in milliseconds: a line not yet confirmed goes after it, since its
+    /// own time is this tab's clock, not the room's.
+    view last_heard(m = max!(ms default 0i64)) = lines(_, _, at, _), let ms = at.as_millis();
 
     page: while title(name), status(s), typed_now(d) {
         emit html div[id: "chat"](class: "chat") {
@@ -176,8 +186,14 @@ at Browser {
             ul[id: "lines"](class: "lines") {
                 for lines(w, k, at, t) {
                     li[id: f"line-{k}-{w}", pos: at.as_millis()](class: "line") {
-                        span[id: f"who-{k}-{w}"](class: "who") { w.to_string() }
+                        span[id: f"who-{k}-{w}"](class: "who") { (if w == self { "you" } else { w.to_string() }) }
                         span[id: f"text-{k}-{w}"](class: "text") { t }
+                    }
+                }
+                for unconfirmed(k, _, t), last_heard(m) {
+                    li[id: f"pending-{k}", pos: m + 1i64 + k as i64](class: "line pending") {
+                        span[id: f"pending-who-{k}"](class: "who") { "you" }
+                        span[id: f"pending-text-{k}"](class: "text") { t }
                     }
                 }
             }

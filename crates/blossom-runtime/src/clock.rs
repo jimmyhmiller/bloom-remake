@@ -56,6 +56,12 @@ impl Stopwatch {
     }
 }
 
+/// The monotonic clock now, for a host's own limits (an idle connection's, a drain's, a client's allowance): never
+/// read by a node.
+pub fn host_monotonic() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// The operating system's entropy.
 pub struct OsEntropy;
 

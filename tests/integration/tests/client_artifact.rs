@@ -92,3 +92,51 @@ fn the_leak_check_finds_the_servers_part() {
     assert!(leaks.iter().any(|l| l.contains("`items`")), "{leaks:?}");
     assert!(leaks.iter().any(|l| l.contains("rule `take")), "{leaks:?}");
 }
+
+/// A page's rules run as its client role, so `self` there is a `Node<Browser>` in the page's program as in the whole
+/// one: it names itself (`to_string` of its own type) and goes into a `Node<Browser>` column.
+#[test]
+fn a_page_knows_itself_as_a_member_of_its_role() {
+    let dir = std::env::temp_dir().join(format!("blossom-client-self-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("whoami.bls");
+    std::fs::write(
+        &path,
+        r#"program whoami version 1;
+
+role Server;
+role Browser: client;
+
+channel hi(name: String): Browser -> Server;
+
+at Server {
+    table heard(who: Node<Browser>, name: String);
+    hear: on hi(n) from b {
+        next heard(b, n);
+    }
+}
+
+at Browser {
+    table me(who: Node<Browser>, name: String) key();
+    greet: on Server.connected(s, _) {
+        send hi(self.to_string()) to s;
+        upsert me(self, self.to_string());
+    }
+}
+"#,
+    )
+    .unwrap();
+    let nodes = [NodeSpec {
+        name: "s".into(),
+        role: Some("Server".into()),
+    }];
+    let (compiled, _) = compile_file(path.to_str().unwrap(), &nodes);
+    let full = compiled.unwrap().0;
+    let client = match ClientArtifact::project(&full, "Browser") {
+        Ok(c) => c,
+        Err(e) => panic!("{e}"),
+    };
+    assert!(client.leaks(&full).is_empty(), "{:?}", client.leaks(&full));
+    let back = ClientArtifact::decode(&client.encode().unwrap()).unwrap();
+    assert_eq!(back.program.digest().0, client.program.digest().0);
+}

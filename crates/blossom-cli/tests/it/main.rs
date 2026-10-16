@@ -8,6 +8,7 @@ mod kill9;
 mod liveness;
 mod query;
 mod raft3;
+mod serve;
 
 use std::process::Command;
 

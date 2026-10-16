@@ -252,9 +252,12 @@ the receive loop sends the cursor it was last given (`?cursor=`). Both are ignor
 As on `blossom run` (CLIENTS.md §3a): the page closes it, the member opens another, the page does not take what the
 node sends (the replay buffer's bound), or no request reached it for 30 s. The last needs a clock that does not live
 in an instance: each request a session makes records the time in a side record (`presence/OBJECT/SESSION`, no
-version, last write wins, so receives still never conflict), and the object schedules a wake at the session's
-deadline. At the wake, a session whose presence is older than 30 s ends: the node hears `disconnected`. A session
-seen since is checked again at its new deadline.
+version, last write wins, so receives still never conflict). Who is here is settled when the object is asked: before
+a page's request on the object (and as a receive waits), a session whose check has come and whose presence is older
+than 30 s ends, and the node hears `disconnected`; a session seen since is checked again at its new deadline. So a
+page that went away without a word leaves at the next request in its room, with nothing else running (a function
+host, DEPLOY.md §1). The object also schedules a wake at the deadline, which `blossom serve`'s sweeper takes, so a room
+nobody asks settles too.
 
 ### 6.5 WebSockets
 
@@ -286,8 +289,9 @@ An object's next wake is the earliest of its node's next timer, its sessions' de
 (§6.4, §8): an entry of the object, with a hint scheduled before each commit that changes it. Each `blossom serve`
 instance runs a sweeper (every 250 ms by default): `due`, then a wake request on each object due (which commits the
 object's next wake, if it moved), then `unschedule` of the hint it handled; and `maintain` now and then. Several sweepers may wake one object at once; the
-version check makes that harmless. A platform that freezes idle instances (a function) calls `POST /blossom/wake`
-from a scheduler instead (`--sweep off`), which runs one sweep and answers what it woke.
+version check makes that harmless. A platform that freezes idle instances (a function) calls `/blossom/wake`
+from a scheduler instead (`--sweep off`, or as well), which runs one sweep and answers what it woke; only for a caller
+with the host's wake secret (DEPLOY.md §2).
 
 ## 10. Testing
 
@@ -311,8 +315,10 @@ BLOSSOM_SEED=$(openssl rand -hex 16) \
 ```
 
 It compiles the deployment's program once at start, then serves the page (`--web-root`), `app.json`, the client
-parts, `/blossom/token`, the link both ways (`/blossom/http/…`, `/blossom/link`), and `/blossom/wake`. Its options:
-`--store`, `--web`, `--web-root`, `--sweep MS|off`, `--cache N` (nodes kept per instance). The deployment's nodes
+parts, `/blossom/token`, the link both ways (`/blossom/http/…`, `/blossom/link`), `/blossom/wake` and
+`/blossom/health`. Its options: `--store` (or `BLOSSOM_STORE`), `--web` (or `PORT`), `--web-root`, `--sweep MS|off`,
+`--cache N` (nodes kept per instance), and those of DEPLOY.md §2 for the open internet (`--wake-secret-env`,
+`--tokens-per-minute`, `--client-ip-header`, `--max-connections`, `--drain`). The deployment's nodes
 need no addresses: their objects are reached through the store. A program whose nodes use streams or answer external
 sessions is refused at start, naming what an object cannot do yet.
 

@@ -29,3 +29,9 @@
   content: "#";
   color: var(--chat-muted);
 }
+
+/* A line the room has not confirmed yet: shown at once, faded until the room's copy takes its place. */
+.chat .line.pending {
+  background: var(--chat-mine);
+  opacity: 0.55;
+}

@@ -271,9 +271,8 @@ pub(crate) fn project(valid: &ValidatedProgram, role: RoleId) -> Result<Validate
         }
     }
     out.types = types;
-    for (_, r) in out.rules.iter_enumerated_mut() {
-        r.role = None;
-    }
+    // Each rule keeps its role guard (renumbered): it still runs only as the role, which is what its `self` is typed
+    // by (`Node<R>`, LANGUAGE §6.10). Relations become shared: the projection holds only the role's.
     for (_, r) in out.rels.iter_enumerated_mut() {
         if matches!(r.placement, Placement::Role(_)) {
             r.placement = Placement::Shared;

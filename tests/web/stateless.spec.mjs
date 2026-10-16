@@ -58,7 +58,6 @@ async function cluster(store) {
         `127.0.0.1:${ports[i]}`,
         "--web-root",
         join(repo, "web"),
-        "--insecure-dev",
       ],
       { env: { ...process.env, ...env, BLOSSOM_SEED: SEED }, stdio: ["ignore", "pipe", "pipe"] },
     );
