@@ -17,6 +17,7 @@ pub mod http_link;
 pub mod keyed;
 pub mod liveness;
 pub mod members;
+mod metadata;
 pub mod net;
 pub mod object;
 pub mod query;

@@ -9,6 +9,7 @@
 //! - the **database thread** flushes the node's database when the engine asks (its memtable full, or the WAL past
 //!   its threshold); the engine applies each released tick to it, and the committer truncates the WAL behind each
 //!   flush (docs/design/DATABASE.md);
+//! - the **metadata thread** persists reservations and acknowledges only durable bounds;
 //! - **listeners** accept peer and client connections; a **reader thread** per connection decodes batches, and a
 //!   **writer thread** per peer and per session sends frames.
 //!
@@ -41,10 +42,7 @@ use blossom_node::recovery::{self, StoreSpec, tick_record};
 use blossom_node::{Backend, Executor, Executors, Node, NodeConfig, NodeState, ReleasedTick};
 use blossom_oracle::{Delivery, Ingress, Oracle, Row};
 use blossom_store::lsm::Flushed;
-use blossom_store::{
-    FileWal, Lsn, MetaRecord, MetaStore, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf,
-    WalWriter,
-};
+use blossom_store::{FileWal, Lsn, OpenMode, RealFs, StoreIdentity, StoreLock, SyncedTick, WalRecordBuf, WalWriter};
 use blossom_value::time::{Instant, NodeId, Tick};
 use blossom_value::value::SessionId;
 use blossom_value::{Seed, Value};
@@ -273,6 +271,7 @@ enum Data {
 /// What else reaches the engine thread.
 enum Control {
     Synced(SyncedTick),
+    Reserved(Result<blossom_node::node::Reservation, String>),
     WalFailed(String),
     /// The database flushed: what its tables cover (the WAL may truncate behind it), or why it failed.
     DatabaseFlushed(Result<Flushed, String>),
@@ -410,6 +409,8 @@ type Sessions = Arc<Mutex<BTreeMap<SessionId, SyncSender<Vec<u8>>>>>;
 
 /// A running node.
 pub struct Server {
+    // Held until shutdown_io has joined every writer, including pending metadata writes.
+    _lock: StoreLock,
     engine: Option<JoinHandle<Result<Stopped, RuntimeError>>>,
     control: Sender<Control>,
     data: Arc<DataQueue>,
@@ -697,6 +698,14 @@ impl Server {
         // The node's database (docs/design/DATABASE.md): the engine applies each released tick to it; its thread
         // flushes when the engine asks, and the committer truncates the WAL behind each flush.
         let db = database;
+        let reserve = {
+            let control = ctl_tx.clone();
+            let (requests, handle) = crate::metadata::start(meta, record, move |r| {
+                let _ = control.send(Control::Reserved(r));
+            })?;
+            threads.push(handle);
+            requests
+        };
         {
             let (promote_tx, promote_rx) = mpsc::channel::<Promotion>();
             let (promoted_tx, promoted_rx) = mpsc::channel::<Flushed>();
@@ -887,9 +896,7 @@ impl Server {
                 flush_wal_bytes: spec.checkpoint_wal_bytes,
                 flush_busy: false,
                 last_flush_lsn: 0,
-                meta,
-                record,
-                _lock: lock,
+                reserve,
                 clock: SystemClock::anchored_at(boot.now),
                 stats: stats.clone(),
                 resident_noted: None,
@@ -926,6 +933,7 @@ impl Server {
                 .map_err(RuntimeError::Io)?
         };
         Ok(Server {
+            _lock: lock,
             database: db,
             engine: Some(engine),
             control: ctl_tx,
@@ -1598,9 +1606,7 @@ struct Engine {
     flush_wal_bytes: u64,
     flush_busy: bool,
     last_flush_lsn: u64,
-    meta: MetaStore,
-    record: MetaRecord,
-    _lock: StoreLock,
+    reserve: SyncSender<blossom_node::node::Reservation>,
     clock: SystemClock,
     stats: Arc<Stats>,
     /// When the stats last took the stores holding the most rows.
@@ -1679,11 +1685,13 @@ impl Engine {
                 }
                 self.note_resident();
                 if let Some(r) = fx.reserve {
-                    self.record.reserved_tick = r.ticks.0;
-                    self.record.last_now = self.record.last_now.max(r.now.0);
-                    self.meta.write(&self.record)?;
-                    let released = self.node.reserved(r)?;
-                    self.dispatch(released, &codec)?;
+                    // Node permits one reservation in flight. Never wait for filesystem I/O here.
+                    self.reserve.try_send(r).map_err(|e| match e {
+                        TrySendError::Full(_) => {
+                            RuntimeError::Internal(internal_error!("duplicate metadata reservation"))
+                        }
+                        TrySendError::Disconnected(_) => RuntimeError::Fault("the metadata writer stopped".into()),
+                    })?;
                 }
                 match fx.wal {
                     Some(delta) => {
@@ -1847,6 +1855,11 @@ impl Engine {
                     self.last_flush_lsn = t.lsn().0;
                     self.ask_flush()?;
                 }
+            }
+            Control::Reserved(r) => {
+                let r = r.map_err(|e| RuntimeError::Fault(format!("metadata reservation: {e}")))?;
+                let released = self.node.reserved(r)?;
+                self.dispatch(released, codec)?;
             }
             Control::WalFailed(e) => return Err(RuntimeError::Fault(e)),
             Control::DatabaseFlushed(r) => {
