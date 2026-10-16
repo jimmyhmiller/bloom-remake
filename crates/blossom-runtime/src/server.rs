@@ -971,9 +971,10 @@ impl Server {
 
     fn wait_engine(&mut self) -> Result<Stopped, RuntimeError> {
         let result = match self.engine.take() {
-            Some(h) => h
-                .join()
-                .map_err(|_| RuntimeError::Internal(internal_error!("the engine thread panicked")))?,
+            Some(h) => match h.join() {
+                Ok(result) => result,
+                Err(_) => Err(RuntimeError::Internal(internal_error!("the engine thread panicked"))),
+            },
             None => Err(internal_error!("the engine was already joined").into()),
         };
         self.shutdown_io();
