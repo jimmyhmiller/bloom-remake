@@ -564,3 +564,78 @@ fn a_logged_blob_whose_record_is_lost_is_never_read_torn_after_a_power_loss() {
         );
     }
 }
+
+/// Canonical pack commits: every WAL reference surviving any syscall cut has durable
+/// payload bytes, even when the referencing record was not yet acknowledged.
+#[test]
+fn grouped_pack_payloads_precede_every_recoverable_wal_reference() {
+    use blossom_store::{FileWal, Lsn, SegmentHeader, WalRecordBuf, WalScan, WalWriter};
+    let fs = SimFs::default();
+    let dir = Path::new("/canonical");
+    fs.create_dir_all(dir).unwrap();
+    fs.sync_dir(Path::new("/")).unwrap();
+    let blobs = BlobStore::open(Arc::new(fs.clone()), dir).unwrap();
+    let wal_dir = dir.join("wal");
+    let mut wal = FileWal::create(
+        Arc::new(fs.clone()),
+        &wal_dir,
+        SegmentHeader {
+            format: 1,
+            store_uuid: [7; 16],
+            segment_seq: 0,
+            restarts: 1,
+            boot_nonce: 1,
+            lsn_base: Lsn(0),
+            catalog: vec![],
+        },
+        Lsn(0),
+    )
+    .unwrap();
+    let payloads: Vec<_> = [vec![31u8; 2048], vec![42u8; 3072]]
+        .into_iter()
+        .map(|v| (BlobRef::of(&v), Arc::<[u8]>::from(v)))
+        .collect();
+    fs.enable_crash_recording().unwrap();
+    blobs
+        .put_all(&[payloads[0].clone(), payloads[1].clone(), payloads[0].clone()])
+        .unwrap();
+    for (i, blob) in payloads.iter().enumerate() {
+        let r = recovery::tick_record(&blobs, std::slice::from_ref(blob), vec![i as u8]).unwrap();
+        assert!(r.logged.is_empty());
+        assert_eq!(
+            r.payload.len(),
+            1,
+            "WAL contains the reference, not another payload copy"
+        );
+        wal.append(&WalRecordBuf {
+            batch: 1,
+            tick: i as u64,
+            now: i as i64,
+            kind: r.kind,
+            payload: r.payload,
+        })
+        .unwrap();
+    }
+    wal.sync().unwrap();
+    let cuts = fs.recorded_cuts().unwrap();
+    assert!(cuts.len() > 5);
+    for (i, cut) in cuts.iter().enumerate() {
+        for fate in [WriteFate::Lost, WriteFate::Survive, WriteFate::Torn { sectors: 1 }] {
+            let mut image = cut.fork().unwrap();
+            image.crash(&mut |_| fate).unwrap();
+            let recovered = BlobStore::open(Arc::new(image.clone()), dir).unwrap();
+            let scan = WalScan::scan(&image, &wal_dir, [7; 16], true).unwrap();
+            for (_, record) in scan.records() {
+                let (b, bytes) = &payloads[record.payload[0] as usize];
+                assert_eq!(
+                    recovered.read(b).unwrap().as_deref(),
+                    Some(bytes.as_ref()),
+                    "cut {i}, {fate:?}"
+                );
+            }
+            if i + 1 == cuts.len() {
+                assert_eq!(scan.records().count(), 2, "acknowledged group, {fate:?}");
+            }
+        }
+    }
+}

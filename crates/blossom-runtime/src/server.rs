@@ -1034,6 +1034,26 @@ fn committer(
         while let Ok(more) = rx.try_recv() {
             work.push(more);
         }
+        // The pack is the canonical durable payload backing. Persist all new payloads in
+        // this group before writing any referencing WAL record; the WAL carries only row
+        // changes and references. A crash between these barriers leaves harmless orphan
+        // payloads, never an acknowledged reference to missing bytes. Recovery of older
+        // WAL-inline blobs remains supported by tick_record and the promoter.
+        let blobs: Vec<_> = work
+            .iter()
+            .filter_map(|w| match w {
+                Commit::Append { blobs, .. } => Some(blobs.as_slice()),
+                Commit::Truncate(_) => None,
+            })
+            .flatten()
+            .cloned()
+            .collect();
+        if !blobs.is_empty()
+            && let Err(e) = blob_store.put_all(&blobs)
+        {
+            let _ = tx.send(Control::WalFailed(format!("payload group persistence failed: {e}")));
+            return;
+        }
         let mut appended = 0u64;
         for w in work {
             match w {

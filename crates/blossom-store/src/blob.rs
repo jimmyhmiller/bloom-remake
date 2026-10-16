@@ -813,11 +813,12 @@ impl BlobStore {
             return Ok(());
         }
         let mut appended: Vec<(BlobRef, Loc)> = Vec::new();
+        let mut seen = BTreeSet::new();
         for (b, bytes) in blobs {
             Self::check(b, bytes)?;
             self.cache()?.insert(*b, bytes.clone());
             let mut s = self.state()?;
-            if s.index.contains_key(b) || appended.iter().any(|(x, _)| x == b) {
+            if s.index.contains_key(b) || !seen.insert(*b) {
                 continue;
             }
             let loc = self.append_adopting(&mut s, b, bytes)?;
