@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::JoinHandle;
 
 use blossom_node::node::Reservation;
-use blossom_store::{MetaRecord, MetaStore};
+use blossom_store::{MetaRecord, MetaStore, StoreLock};
 
 use crate::RuntimeError;
 
@@ -13,10 +13,12 @@ type Completion = Result<Reservation, String>;
 pub(crate) fn start(
     meta: MetaStore,
     mut record: MetaRecord,
+    lock: StoreLock,
     completed: impl FnMut(Completion) + Send + 'static,
 ) -> Result<(SyncSender<Reservation>, JoinHandle<()>), RuntimeError> {
     let (tx, rx) = mpsc::sync_channel(1);
     let thread = crate::server::spawn("metadata", move || {
+        let _lock = lock;
         run(
             rx,
             |r| {

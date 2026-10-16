@@ -18,6 +18,7 @@ use crate::RuntimeError;
 pub(crate) fn start(
     db: Arc<Database>,
     stats: Arc<crate::server::Stats>,
+    lock: StoreLock,
     done: Box<dyn Fn(Result<Flushed, String>) + Send>,
 ) -> Result<(Sender<()>, std::thread::JoinHandle<()>), RuntimeError> {
     use std::sync::atomic::Ordering;
@@ -25,6 +26,7 @@ pub(crate) fn start(
     let handle = std::thread::Builder::new()
         .name("database".into())
         .spawn(move || {
+            let _lock = lock;
             while rx.recv().is_ok() {
                 let clock = crate::clock::Stopwatch::start();
                 let result = db.flush().map_err(|e| e.to_string());

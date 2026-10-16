@@ -700,7 +700,7 @@ impl Server {
         let db = database;
         let reserve = {
             let control = ctl_tx.clone();
-            let (requests, handle) = crate::metadata::start(meta, record, move |r| {
+            let (requests, handle) = crate::metadata::start(meta, record, lock.clone(), move |r| {
                 let _ = control.send(Control::Reserved(r));
             })?;
             threads.push(handle);
@@ -711,12 +711,16 @@ impl Server {
             let (promoted_tx, promoted_rx) = mpsc::channel::<Flushed>();
             let (tx, promoter_stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();
+            let store_lock = lock.clone();
             threads.push(spawn("promoter", move || {
+                let _lock = store_lock;
                 promoter(&blobs, promote_rx, promoted_tx, tx, promoter_stats)
             })?);
             let (tx, stats) = (ctl_tx.clone(), stats.clone());
             let blobs = blob_store.clone();
+            let store_lock = lock.clone();
             threads.push(spawn("committer", move || {
+                let _lock = store_lock;
                 committer(wal, &blobs, commit_rx, promote_tx, promoted_rx, tx, stats)
             })?);
         }
@@ -725,6 +729,7 @@ impl Server {
             let (tx, handle) = crate::db::start(
                 db.clone(),
                 stats.clone(),
+                lock.clone(),
                 Box::new(move |r| {
                     // The engine is gone only when the node stops.
                     let _ = control.send(Control::DatabaseFlushed(r));
@@ -868,6 +873,7 @@ impl Server {
         }
         let engine = {
             let e = Engine {
+                _lock: lock.clone(),
                 db: db.clone(),
                 streams: stream_env.clone(),
                 backlog_bytes: spec.stream_limits.backlog_bytes,
@@ -1590,6 +1596,8 @@ pub(crate) fn web_accept_loop(
 }
 
 struct Engine {
+    /// Every writer keeps the directory locked even when startup fails after spawning it.
+    _lock: StoreLock,
     /// The node's database: each released tick's durable delta goes to it.
     db: Arc<crate::db::Database>,
     node: Node<Box<dyn Executor>>,

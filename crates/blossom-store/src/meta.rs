@@ -96,15 +96,19 @@ impl MetaStore {
         })
     }
 }
-/// Hold the exclusive directory lock for the process lifetime.
+/// An ownership lease on the exclusive directory lock. Clones retain the same
+/// acquired lock; it is released only after every store writer drops its lease.
+#[derive(Clone)]
 pub struct StoreLock {
-    _guard: Box<dyn VfsLock>,
+    // VfsLock promises Send, not Sync. No caller accesses the guard through this
+    // mutex; it makes shared lifetime ownership safe without strengthening the VFS API.
+    _guard: Arc<std::sync::Mutex<Box<dyn VfsLock>>>,
 }
 impl StoreLock {
     /// Acquire LOCK, reporting the holder's pid on refusal.
     pub fn acquire(fs: &dyn Vfs, dir: &Path) -> Result<Self, StoreError> {
         Ok(Self {
-            _guard: fs.lock_exclusive(&dir.join("LOCK"))?,
+            _guard: Arc::new(std::sync::Mutex::new(fs.lock_exclusive(&dir.join("LOCK"))?)),
         })
     }
 }
