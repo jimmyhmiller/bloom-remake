@@ -25,7 +25,15 @@ fn ordinary(p: &blossom_ir::core::Program, rule: &Rule) -> bool {
 // payload fields without crossing a set/distinct boundary. Inferred keys are used only
 // where the inference pass established them from pure, single-writer definitions.
 fn lossless(rule: &Rule, p: &blossom_ir::core::Program, keys: &BTreeMap<RelId, Vec<usize>>) -> bool {
-    if rule.kind != RuleKind::Deductive || rule.head.mode != HeadMode::Insert || !Kernel::eligible(rule) {
+    if rule.kind != RuleKind::Deductive
+        || rule.head.mode != HeadMode::Insert
+        || !Kernel::eligible(rule)
+        || !rule
+            .body
+            .lits
+            .iter()
+            .all(|l| matches!(l, Literal::Pos(_) | Literal::Neg(_)))
+    {
         return false;
     }
     let mut known = BTreeSet::new();

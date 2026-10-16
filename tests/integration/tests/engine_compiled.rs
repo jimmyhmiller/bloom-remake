@@ -156,6 +156,19 @@ fn compiled_deltas_preserve_negation_duplicates_self_joins_and_reset() {
                     .sum::<u64>(),
                 0
             );
+            if t == 23 {
+                for head in [
+                    "nested_result:main",
+                    "nested_constant:main",
+                    "nested_repeated:main",
+                    "early_guard:main",
+                ] {
+                    assert!(
+                        report.rules.iter().any(|r| r.head == head && r.work.compiled_terms > 0),
+                        "{head} must execute compiled terms"
+                    );
+                }
+            }
             assert_eq!(x.outbox, y.outbox);
             assert_eq!(x.host, y.host);
             assert_eq!(
