@@ -218,6 +218,17 @@ fn seeks_find_historical_versions_across_block_boundaries() {
         )
         .unwrap();
     }
+    for v in 0..=24 {
+        assert_eq!(lsm.get(b"b", v).unwrap(), v > 0 && v % 2 == 0, "version {v}");
+        assert!(!lsm.get(b"bb", v).unwrap());
+        let expected = if v > 0 && v % 2 == 0 {
+            vec![b"b".to_vec()]
+        } else {
+            vec![]
+        };
+        assert_eq!(lsm.scan_range(b"b", Some(b"c"), v).unwrap(), expected);
+        assert_eq!(paged(&lsm, b"b", Some(b"c"), v, 1), expected);
+    }
     lsm.flush().unwrap();
     assert!(lsm.info().unwrap().tables[0].blocks > 3);
     drop(lsm);

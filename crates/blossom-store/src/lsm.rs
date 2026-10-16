@@ -790,7 +790,52 @@ impl Manifest {
     }
 }
 
-type Mem = BTreeMap<(Vec<u8>, Reverse<u64>), Op>;
+// Store the byte key once, with its versions in increasing order. Point and range
+// reads seek directly to the visible version instead of visiting every newer version.
+// The flattened flush order remains key ascending, version descending.
+type Mem = BTreeMap<Vec<u8>, History>;
+
+#[derive(Default)]
+struct History(Vec<(u64, Op)>);
+impl History {
+    fn insert(&mut self, version: u64, op: Op) {
+        if self.0.last().is_none_or(|(v, _)| *v < version) {
+            self.0.push((version, op));
+            return;
+        }
+        match self.0.binary_search_by_key(&version, |(v, _)| *v) {
+            Ok(i) => {
+                if let Some(entry) = self.0.get_mut(i) {
+                    entry.1 = op;
+                }
+            }
+            Err(i) => self.0.insert(i, (version, op)),
+        }
+    }
+    // A failed flush can leave an older frozen history beside new writes. Merge it
+    // in linear time, preserving the active memtable on equal versions.
+    fn merge_older(&mut self, older: &Self) {
+        let mut merged = Vec::with_capacity(self.0.len() + older.0.len());
+        let mut current = std::mem::take(&mut self.0).into_iter().peekable();
+        for &(version, op) in &older.0 {
+            while current.peek().is_some_and(|(v, _)| *v < version) {
+                if let Some(entry) = current.next() {
+                    merged.push(entry);
+                }
+            }
+            if current.peek().is_none_or(|(v, _)| *v != version) {
+                merged.push((version, op));
+            }
+        }
+        merged.extend(current);
+        self.0 = merged;
+    }
+    fn at(&self, as_of: u64) -> Option<(u64, Op)> {
+        self.0
+            .get(self.0.partition_point(|(v, _)| *v <= as_of).checked_sub(1)?)
+            .copied()
+    }
+}
 
 /// A page of a scan ([`Lsm::scan_page`]): the keys present, in order, and where the next page starts (`None`: the
 /// range is done).
@@ -997,7 +1042,7 @@ impl Lsm {
         }
         for (key, op) in changes {
             s.mem_bytes += key.len() + 16;
-            s.mem.insert((key, Reverse(version)), op);
+            s.mem.entry(key).or_default().insert(version, op);
         }
         s.applied = Some(version);
         s.applied_mark = mark;
@@ -1014,7 +1059,7 @@ impl Lsm {
             .ok_or_else(|| invalid("an amendment of a tree with no version applied"))?;
         for (key, op) in changes {
             s.mem_bytes += key.len() + 16;
-            s.mem.insert((key, Reverse(version)), op);
+            s.mem.entry(key).or_default().insert(version, op);
         }
         Ok(())
     }
@@ -1038,9 +1083,9 @@ impl Lsm {
             let mut s = self.write()?;
             // A flush that failed left its memtable frozen: it goes out with this one (its versions are older).
             if let Some((old, _, _)) = s.frozen.take() {
-                for (k, op) in old.iter() {
-                    s.mem.entry(k.clone()).or_insert(*op);
-                    s.mem_bytes += k.0.len() + 16;
+                for (key, history) in old.iter() {
+                    s.mem.entry(key.clone()).or_default().merge_older(history);
+                    s.mem_bytes += (key.len() + 16) * history.0.len();
                 }
             }
             let mem = Arc::new(std::mem::take(&mut s.mem));
@@ -1057,11 +1102,13 @@ impl Lsm {
             None
         } else {
             let path = self.dir.join("sst").join(format!("{id}.sst"));
-            let entries = frozen.iter().map(|((key, Reverse(version)), op)| {
-                Ok(Entry {
-                    key: key.clone(),
-                    version: *version,
-                    op: *op,
+            let entries = frozen.iter().flat_map(|(key, history)| {
+                history.0.iter().rev().map(move |&(version, op)| {
+                    Ok(Entry {
+                        key: key.clone(),
+                        version,
+                        op,
+                    })
                 })
             });
             match write_table(&*self.fs, &path, id, self.opts.block_bytes, entries)? {
@@ -1193,16 +1240,16 @@ impl Lsm {
             let mut newest: BTreeMap<Vec<u8>, (u64, Op)> = BTreeMap::new();
             let mems = std::iter::once(&s.mem).chain(s.frozen.as_ref().map(|(m, _, _)| &**m));
             for mem in mems {
-                let mut selected: Option<&Vec<u8>> = None;
-                for ((key, Reverse(version)), op) in mem.range((start.to_vec(), Reverse(u64::MAX))..) {
+                for (key, history) in
+                    mem.range::<[u8], _>((std::ops::Bound::Included(start), std::ops::Bound::Unbounded))
+                {
                     if !before_end(key) {
                         break;
                     }
-                    if *version <= as_of && selected != Some(key) {
-                        selected = Some(key);
-                        let slot = newest.entry(key.clone()).or_insert((*version, *op));
-                        if *version > slot.0 {
-                            *slot = (*version, *op);
+                    if let Some((version, op)) = history.at(as_of) {
+                        let slot = newest.entry(key.clone()).or_insert((version, op));
+                        if version > slot.0 {
+                            *slot = (version, op);
                         }
                     }
                 }
@@ -1254,26 +1301,22 @@ impl Lsm {
             }
             let mems = std::iter::once(&s.mem).chain(s.frozen.as_ref().map(|(m, _, _)| &**m));
             for mem in mems {
-                let mut taken = 0usize;
                 let mut last: Option<&Vec<u8>> = None;
                 let mut more = None;
-                let mut selected = false;
-                for ((key, Reverse(version)), op) in mem.range((start.to_vec(), Reverse(u64::MAX))..) {
+                for (taken, (key, history)) in mem
+                    .range::<[u8], _>((std::ops::Bound::Included(start), std::ops::Bound::Unbounded))
+                    .enumerate()
+                {
                     if !before_end(key) {
                         break;
                     }
-                    if last != Some(key) {
-                        if taken == keys {
-                            more = last.cloned();
-                            break;
-                        }
-                        selected = false;
-                        taken += 1;
-                        last = Some(key);
+                    if taken == keys {
+                        more = last.cloned();
+                        break;
                     }
-                    if !selected && *version <= as_of {
-                        selected = true;
-                        entries.push((key.clone(), *version, *op));
+                    last = Some(key);
+                    if let Some((version, op)) = history.at(as_of) {
+                        entries.push((key.clone(), version, op));
                     }
                 }
                 cut(more);
@@ -1331,11 +1374,7 @@ impl Lsm {
             let mut newest: Option<(u64, Op)> = None;
             let mems = std::iter::once(&s.mem).chain(s.frozen.as_ref().map(|(m, _, _)| &**m));
             for mem in mems {
-                let found = mem
-                    .range((key.to_vec(), Reverse(as_of))..)
-                    .next()
-                    .filter(|((k, _), _)| k.as_slice() == key)
-                    .map(|((_, Reverse(v)), op)| (*v, *op));
+                let found = mem.get(key).and_then(|h| h.at(as_of));
                 if let Some(f) = found
                     && newest.is_none_or(|n| f.0 > n.0)
                 {
@@ -1397,7 +1436,7 @@ impl Lsm {
             applied: s.applied,
             floor: s.manifest.floor,
             key_format: s.manifest.key_format,
-            memtable_entries: s.mem.len(),
+            memtable_entries: s.mem.values().map(|h| h.0.len()).sum(),
         })
     }
 
@@ -1645,6 +1684,28 @@ impl crate::tree::KeyTree for Lsm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merging_frozen_history_keeps_active_amendments_and_all_as_of_reads() {
+        let mut older = History::default();
+        let mut active = History::default();
+        for v in 1..=100 {
+            older.insert(v, if v % 2 == 0 { Op::Put } else { Op::Del });
+        }
+        active.insert(100, Op::Del);
+        active.insert(102, Op::Put);
+        active.merge_older(&older);
+        assert_eq!(active.0.len(), 101);
+        for v in 0..=103 {
+            let expected = match v {
+                0 => None,
+                100 | 101 => Some((100, Op::Del)),
+                102 | 103 => Some((102, Op::Put)),
+                _ => Some((v, if v % 2 == 0 { Op::Put } else { Op::Del })),
+            };
+            assert_eq!(active.at(v), expected);
+        }
+    }
 
     #[test]
     fn decoded_cache_charges_capacity_evicts_and_preserves_pinned_snapshots() {
