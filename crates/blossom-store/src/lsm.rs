@@ -1381,10 +1381,13 @@ impl Lsm {
                     newest = Some(f);
                 }
             }
-            // No eligible disk version can beat an exact as-of hit in the memory snapshot.
-            if let Some((version, op)) = newest
-                && version == as_of
-            {
+            // Applies advance past the flushed version; amendments use the newest applied
+            // version. A frozen memtable remains visible until its table is published under
+            // this same lock. Thus every memory version is at least as new as every disk
+            // version, including after a failed flush. A visible memory tombstone is final
+            // too; no SSTable can override it. Historical reads without a memory hit still
+            // search the disk tables by their version bounds.
+            if let Some((_, op)) = newest {
                 return Ok(op == Op::Put);
             }
             let tables: Vec<_> = s
